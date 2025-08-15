@@ -119,20 +119,26 @@ jobs:
     runs-on: redducklabs-runners
     if: github.event_name != 'pull_request'
     needs: build-and-push
+    permissions:
+      contents: read
+      security-events: write
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       
       - name: Run Trivy security scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
           format: sarif
           output: trivy-results.sarif
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: 0  # Don't fail on vulnerabilities, just report them
       
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: trivy-results.sarif
+          category: container-security
