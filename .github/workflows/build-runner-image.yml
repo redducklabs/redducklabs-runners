@@ -1,0 +1,138 @@
+name: Build and Push Runner Image
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (default: latest)'
+        required: false
+        default: 'latest'
+      force_rebuild:
+        description: 'Force rebuild (ignore cache)'
+        type: boolean
+        required: false
+        default: false
+  
+  # Automatic trigger on changes to Docker files
+  push:
+    branches:
+      - main
+    paths:
+      - 'docker/Dockerfile.custom-runner'
+      - 'docker/build-and-push.sh'
+      - '.github/workflows/build-runner-image.yml'
+  
+  # Automatic trigger on pull requests to main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docker/Dockerfile.custom-runner'
+      - 'docker/build-and-push.sh'
+      - '.github/workflows/build-runner-image.yml'
+
+env:
+  REGISTRY: registry.digitalocean.com
+  REPOSITORY: redducklabs/github-runner
+
+jobs:
+  build-and-push:
+    runs-on: redducklabs-runners
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to DigitalOcean Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DO_REGISTRY_TOKEN }}
+          password: ${{ secrets.DO_REGISTRY_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.custom-runner
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          no-cache: ${{ github.event.inputs.force_rebuild == 'true' }}
+          platforms: linux/amd64
+      
+      - name: Verify image
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Verifying built image..."
+          docker pull ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest python3 --version
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest node --version
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest kubectl version --client
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest helm version
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest terraform version
+          echo "Image verification complete!"
+      
+      - name: Update deployment values (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "Image built and pushed successfully!"
+          echo "To deploy the new image, run:"
+          echo "  cd deploy && ./deploy.sh"
+          echo ""
+          echo "Built image: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest"
+      
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo, number } = context.issue;
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: number,
+              body: `🐳 Docker image build completed successfully!\n\nImage: \`${{ env.REGISTRY }}/${{ env.REPOSITORY }}:pr-${number}\`\n\nThe image has been built and can be tested, but won't be pushed to the registry until this PR is merged.`
+            });
+
+  security-scan:
+    runs-on: redducklabs-runners
+    if: github.event_name != 'pull_request'
+    needs: build-and-push
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
+          format: sarif
+          output: trivy-results.sarif
+      
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif

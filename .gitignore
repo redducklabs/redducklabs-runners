@@ -1,0 +1,97 @@
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Secrets and credentials
+*.key
+*.pem
+*.crt
+secrets/
+config/secrets/
+
+# Kubernetes secrets
+*-secret.yaml
+secrets.yaml
+
+# Local development
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+debug.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Helm
+Chart.lock
+charts/*.tgz
+
+# Backup files
+*.backup
+*.bak
+*.orig
+
+# Test artifacts
+test-results/
+coverage/
+*.test
+
+# Build artifacts
+dist/
+build/
+*.tar.gz
+*.zip
+
+# Editor files
+*.sublime-*
+.vscode/settings.json
+
+# Local configuration overrides
+*-local.yaml
+*-local.yml
+*-local.sh
+local-*
+
+# Kubernetes local config
+kubeconfig
+kube-config
+
+# Registry credentials
+registry-auth.json
+docker-config.json
+
+# CI/CD artifacts
+.github/workflows/secrets/
+
+# Terraform (if used)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Personal notes
+notes.txt
+TODO.txt
+NOTES.md

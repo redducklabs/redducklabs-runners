@@ -1,0 +1,240 @@
+name: Deploy GitHub Runners
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_runners:
+        description: 'Minimum number of runners'
+        required: false
+        default: '2'
+        type: choice
+        options:
+          - '0'
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+      max_runners:
+        description: 'Maximum number of runners'
+        required: false
+        default: '4'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '4'
+          - '6'
+          - '8'
+          - '10'
+      runner_image:
+        description: 'Runner image to deploy'
+        required: false
+        default: 'registry.digitalocean.com/redducklabs/github-runner:latest'
+        type: string
+      namespace:
+        description: 'Kubernetes namespace'
+        required: false
+        default: 'arc-runners'
+        type: string
+
+env:
+  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
+  RELEASE_NAME: redducklabs-runners
+  RUNNER_SCALE_SET_NAME: redducklabs-runners
+
+jobs:
+  deploy:
+    name: Deploy Self-Hosted Runners
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Validate GitHub Token
+        run: |
+          echo "🔐 Validating GitHub token permissions..."
+          
+          # Check if RUNNER_TOKEN secret is set
+          if [ -z "${{ secrets.RUNNER_TOKEN }}" ]; then
+            echo "❌ Error: RUNNER_TOKEN secret is not set!"
+            echo "Please add RUNNER_TOKEN secret with 'admin:org' and 'repo' scopes"
+            exit 1
+          fi
+          
+          # Validate token permissions
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
+            https://api.github.com/user)
+          
+          if [ "$RESPONSE" != "200" ]; then
+            echo "❌ Error: RUNNER_TOKEN is invalid or expired!"
+            exit 1
+          fi
+          
+          echo "✅ GitHub token validated successfully"
+      
+      - name: Install kubectl
+        run: |
+          echo "📦 Installing kubectl..."
+          curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
+      
+      - name: Install Helm
+        run: |
+          echo "📦 Installing Helm..."
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          DESIRED_VERSION=v3.17.4 ./get_helm.sh
+          helm version
+      
+      - name: Install doctl
+        run: |
+          echo "📦 Installing DigitalOcean CLI..."
+          cd /tmp
+          wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
+          tar xf doctl-1.138.0-linux-amd64.tar.gz
+          sudo mv doctl /usr/local/bin
+          doctl version
+      
+      - name: Configure DigitalOcean access
+        run: |
+          echo "🔧 Configuring DigitalOcean access..."
+          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
+          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
+          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+      
+      - name: Create namespace if not exists
+        run: |
+          echo "📁 Ensuring namespace exists..."
+          kubectl create namespace ${{ inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Configure registry access
+        run: |
+          echo "🔐 Configuring registry access..."
+          # Check if registry secret exists
+          if ! kubectl get secret do-registry-secret -n ${{ inputs.namespace }} &>/dev/null; then
+            echo "Creating registry secret..."
+            doctl registry kubernetes-manifest | kubectl apply -n ${{ inputs.namespace }} -f -
+          else
+            echo "Registry secret already exists"
+          fi
+      
+      - name: Check for existing ARC controller
+        id: check-controller
+        run: |
+          echo "🔍 Checking for Actions Runner Controller..."
+          if helm list -n arc-systems | grep -q arc; then
+            echo "controller_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ ARC controller found"
+          else
+            echo "controller_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ ARC controller not found - will install"
+          fi
+      
+      - name: Install ARC controller if needed
+        if: steps.check-controller.outputs.controller_exists == 'false'
+        run: |
+          echo "📦 Installing Actions Runner Controller..."
+          helm install arc \
+            --namespace arc-systems \
+            --create-namespace \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+            --version 0.12.1
+          
+          echo "⏳ Waiting for controller to be ready..."
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=gha-rs-controller \
+            -n arc-systems \
+            --timeout=300s
+      
+      - name: Prepare values file
+        run: |
+          echo "📝 Preparing Helm values..."
+          cat > /tmp/runner-values.yaml <<EOF
+          githubConfigUrl: "https://github.com/${{ github.repository_owner }}"
+          githubConfigSecret:
+            github_token: "${{ secrets.RUNNER_TOKEN }}"
+          
+          minRunners: ${{ inputs.min_runners }}
+          maxRunners: ${{ inputs.max_runners }}
+          
+          runnerScaleSetName: "${{ env.RUNNER_SCALE_SET_NAME }}"
+          
+          containerMode:
+            type: "dind"
+          
+          template:
+            spec:
+              imagePullSecrets:
+              - name: do-registry-secret
+              
+              containers:
+              - name: runner
+                image: ${{ inputs.runner_image }}
+                imagePullPolicy: Always
+                command: ["/home/runner/run.sh"]
+                
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                  requests:
+                    cpu: "500m"
+                    memory: "1Gi"
+          EOF
+      
+      - name: Deploy runners
+        run: |
+          echo "🚀 Deploying GitHub runners..."
+          helm upgrade --install ${{ env.RELEASE_NAME }} \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace ${{ inputs.namespace }} \
+            --values /tmp/runner-values.yaml \
+            --version 0.12.1 \
+            --wait \
+            --timeout 5m
+      
+      - name: Verify deployment
+        run: |
+          echo "✅ Deployment complete! Checking runner status..."
+          echo ""
+          echo "📊 Runner pods:"
+          kubectl get pods -n ${{ inputs.namespace }}
+          echo ""
+          echo "📈 Runner scale set:"
+          kubectl get runners.actions.github.com -n ${{ inputs.namespace }}
+          echo ""
+          echo "🎯 To use these runners in your workflows, add:"
+          echo "  runs-on: ${{ env.RUNNER_SCALE_SET_NAME }}"
+      
+      - name: Check GitHub registration
+        run: |
+          echo ""
+          echo "🔍 Checking GitHub registration..."
+          RUNNERS=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
+            https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners | \
+            jq '.total_count')
+          echo "✅ Found $RUNNERS runner(s) registered with GitHub"
+      
+      - name: Summary
+        run: |
+          echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Successfully deployed GitHub runners!**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runner Label**: \`${{ env.RUNNER_SCALE_SET_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace**: \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Runners**: ${{ inputs.min_runners }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runners**: ${{ inputs.max_runners }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ inputs.runner_image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage" >> $GITHUB_STEP_SUMMARY
+          echo "Add this to your workflow:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`yaml" >> $GITHUB_STEP_SUMMARY
+          echo "jobs:" >> $GITHUB_STEP_SUMMARY
+          echo "  build:" >> $GITHUB_STEP_SUMMARY
+          echo "    runs-on: ${{ env.RUNNER_SCALE_SET_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

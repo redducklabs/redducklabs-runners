@@ -1,0 +1,176 @@
+name: Emergency Stop Runners
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "STOP-RUNNERS" to confirm emergency shutdown'
+        required: true
+        type: string
+      namespace:
+        description: 'Kubernetes namespace'
+        required: false
+        default: 'arc-runners'
+        type: string
+      reason:
+        description: 'Reason for emergency stop'
+        required: false
+        default: 'Emergency shutdown initiated via GitHub Actions'
+        type: string
+
+env:
+  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
+  RELEASE_NAME: redducklabs-runners
+
+jobs:
+  emergency-stop:
+    name: Emergency Stop All Runners
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "STOP-RUNNERS" ]; then
+            echo "❌ Confirmation text does not match!"
+            echo "You must type exactly: STOP-RUNNERS"
+            exit 1
+          fi
+          echo "⚠️ EMERGENCY STOP CONFIRMED"
+      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          echo "📦 Installing kubectl..."
+          curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+      
+      - name: Install Helm
+        run: |
+          echo "📦 Installing Helm..."
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          DESIRED_VERSION=v3.17.4 ./get_helm.sh
+      
+      - name: Install doctl
+        run: |
+          echo "📦 Installing DigitalOcean CLI..."
+          cd /tmp
+          wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
+          tar xf doctl-1.138.0-linux-amd64.tar.gz
+          sudo mv doctl /usr/local/bin
+      
+      - name: Configure Kubernetes access
+        run: |
+          echo "🔧 Configuring Kubernetes access..."
+          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
+          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
+          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+      
+      - name: Record current state
+        id: backup
+        run: |
+          echo "📸 Recording current state before shutdown..."
+          
+          # Save current configuration
+          helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} > /tmp/runner-values-backup.yaml
+          
+          # Get current scaling
+          CURRENT_MIN=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.minRunners // 2')
+          CURRENT_MAX=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.maxRunners // 4')
+          
+          echo "current_min=$CURRENT_MIN" >> $GITHUB_OUTPUT
+          echo "current_max=$CURRENT_MAX" >> $GITHUB_OUTPUT
+          
+          # Count running pods
+          POD_COUNT=$(kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} --no-headers 2>/dev/null | wc -l)
+          echo "pod_count=$POD_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "Current state saved:"
+          echo "  Min runners: $CURRENT_MIN"
+          echo "  Max runners: $CURRENT_MAX"
+          echo "  Active pods: $POD_COUNT"
+      
+      - name: Scale to zero
+        run: |
+          echo "🛑 INITIATING EMERGENCY STOP..."
+          echo "Reason: ${{ inputs.reason }}"
+          
+          # Scale to zero
+          helm upgrade ${{ env.RELEASE_NAME }} \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace ${{ inputs.namespace }} \
+            --reuse-values \
+            --set minRunners=0 \
+            --set maxRunners=0 \
+            --wait \
+            --timeout 2m
+          
+          echo "✅ Runners scaled to zero"
+      
+      - name: Verify shutdown
+        run: |
+          echo "🔍 Verifying shutdown..."
+          
+          # Wait for pods to terminate
+          echo "Waiting for pods to terminate..."
+          kubectl wait --for=delete pod \
+            -l runner-deployment-name=${{ env.RELEASE_NAME }} \
+            -n ${{ inputs.namespace }} \
+            --timeout=60s || true
+          
+          # Check remaining pods
+          REMAINING=$(kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} --no-headers 2>/dev/null | wc -l)
+          
+          if [ "$REMAINING" -eq 0 ]; then
+            echo "✅ All runner pods have been terminated"
+          else
+            echo "⚠️ Warning: $REMAINING pod(s) may still be terminating"
+            kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }}
+          fi
+      
+      - name: Create recovery instructions
+        run: |
+          echo "## 🛑 Emergency Stop Completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Shutdown Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Initiated by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Reason**: ${{ inputs.reason }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Previous Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Runners**: ${{ steps.backup.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runners**: ${{ steps.backup.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Active Pods**: ${{ steps.backup.outputs.pod_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Recovery Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To restore runners to previous configuration:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **Via GitHub Actions**:" >> $GITHUB_STEP_SUMMARY
+          echo "   - Go to Actions → Scale GitHub Runners" >> $GITHUB_STEP_SUMMARY
+          echo "   - Select 'scale-custom'" >> $GITHUB_STEP_SUMMARY
+          echo "   - Set min_runners: ${{ steps.backup.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
+          echo "   - Set max_runners: ${{ steps.backup.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Via Command Line**:" >> $GITHUB_STEP_SUMMARY
+          echo "   \`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "   helm upgrade ${{ env.RELEASE_NAME }} \\" >> $GITHUB_STEP_SUMMARY
+          echo "     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \\" >> $GITHUB_STEP_SUMMARY
+          echo "     --namespace ${{ inputs.namespace }} \\" >> $GITHUB_STEP_SUMMARY
+          echo "     --reuse-values \\" >> $GITHUB_STEP_SUMMARY
+          echo "     --set minRunners=${{ steps.backup.outputs.current_min }} \\" >> $GITHUB_STEP_SUMMARY
+          echo "     --set maxRunners=${{ steps.backup.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
+          echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **All GitHub Actions workflows using these runners will fail until restored!**" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Send notification
+        if: always()
+        run: |
+          echo "📧 Emergency stop notification:"
+          echo "  - Runners have been stopped"
+          echo "  - Initiated by: @${{ github.actor }}"
+          echo "  - Reason: ${{ inputs.reason }}"
+          echo "  - Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"

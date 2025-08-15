@@ -1,0 +1,53 @@
+# GitHub Actions Runner Controller - Docker-in-Docker Configuration
+# Template version - configure for your organization
+
+# REPLACE: Your GitHub organization or repository URL
+githubConfigUrl: "https://github.com/YOUR_ORG_OR_REPO"
+
+# IMPORTANT: Never commit tokens to git!
+# Set the token via --set flag when deploying:
+# --set githubConfigSecret.github_token=$GITHUB_TOKEN
+githubConfigSecret:
+  github_token: ""  # SET VIA ENVIRONMENT VARIABLE
+
+# Runner scaling configuration
+minRunners: 2
+maxRunners: 4
+
+# Runner scale set name (used in workflows as: runs-on: your-runner-name)
+runnerScaleSetName: "YOUR-RUNNER-NAME"
+
+# Enable Docker-in-Docker mode
+containerMode:
+  type: "dind"
+  
+# Runner template configuration for DinD
+template:
+  spec:
+    # Pull secret for private registry (if using custom image)
+    # Uncomment and configure if using private registry
+    # imagePullSecrets:
+    # - name: your-registry-secret
+    
+    # Container configuration
+    containers:
+    - name: runner
+      # REPLACE: Your custom image or use the default GitHub runner
+      # For custom image: your-registry.com/your-org/github-runner:tag
+      # For default: ghcr.io/actions/actions-runner:latest
+      image: YOUR_REGISTRY/YOUR_IMAGE:TAG
+      imagePullPolicy: Always
+      
+      # CRITICAL: Must specify the command for ARC to work properly
+      command: ["/home/runner/run.sh"]
+      
+      # Resource limits - adjust as needed
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+    
+    # Docker-in-Docker sidecar container (automatically added by ARC when containerMode.type: "dind")

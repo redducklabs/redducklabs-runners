@@ -1,0 +1,197 @@
+name: Scale GitHub Runners
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Scaling action to perform'
+        required: true
+        type: choice
+        options:
+          - 'status'
+          - 'scale-up'
+          - 'scale-down'
+          - 'scale-max'
+          - 'scale-custom'
+      min_runners:
+        description: 'Minimum runners (for custom scaling)'
+        required: false
+        default: '2'
+        type: string
+      max_runners:
+        description: 'Maximum runners (for custom scaling)'
+        required: false
+        default: '4'
+        type: string
+      namespace:
+        description: 'Kubernetes namespace'
+        required: false
+        default: 'arc-runners'
+        type: string
+
+env:
+  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
+  RELEASE_NAME: redducklabs-runners
+
+jobs:
+  scale:
+    name: Scale Runners - ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          echo "📦 Installing kubectl..."
+          curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+      
+      - name: Install Helm
+        run: |
+          echo "📦 Installing Helm..."
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          DESIRED_VERSION=v3.17.4 ./get_helm.sh
+      
+      - name: Install doctl
+        run: |
+          echo "📦 Installing DigitalOcean CLI..."
+          cd /tmp
+          wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
+          tar xf doctl-1.138.0-linux-amd64.tar.gz
+          sudo mv doctl /usr/local/bin
+      
+      - name: Configure Kubernetes access
+        run: |
+          echo "🔧 Configuring Kubernetes access..."
+          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
+          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
+          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+      
+      - name: Check current status
+        id: current-status
+        run: |
+          echo "📊 Checking current runner status..."
+          
+          # Get current values
+          CURRENT_MIN=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.minRunners // 2')
+          CURRENT_MAX=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.maxRunners // 4')
+          
+          echo "current_min=$CURRENT_MIN" >> $GITHUB_OUTPUT
+          echo "current_max=$CURRENT_MAX" >> $GITHUB_OUTPUT
+          
+          echo "Current configuration:"
+          echo "  Min runners: $CURRENT_MIN"
+          echo "  Max runners: $CURRENT_MAX"
+          
+          # Get pod count
+          POD_COUNT=$(kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} --no-headers 2>/dev/null | wc -l)
+          echo "pod_count=$POD_COUNT" >> $GITHUB_OUTPUT
+          echo "  Active pods: $POD_COUNT"
+      
+      - name: Display status
+        if: inputs.action == 'status'
+        run: |
+          echo "## 📊 Runner Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Current Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Runners**: ${{ steps.current-status.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runners**: ${{ steps.current-status.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Active Pods**: ${{ steps.current-status.outputs.pod_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pod Details" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Scale up (default)
+        if: inputs.action == 'scale-up'
+        run: |
+          echo "⬆️ Scaling up to default configuration..."
+          helm upgrade ${{ env.RELEASE_NAME }} \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace ${{ inputs.namespace }} \
+            --reuse-values \
+            --set minRunners=2 \
+            --set maxRunners=4 \
+            --wait
+          
+          echo "✅ Scaled to: Min=2, Max=4"
+          echo "## ✅ Scaled Up" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=2, Max=4**" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Scale down (minimal)
+        if: inputs.action == 'scale-down'
+        run: |
+          echo "⬇️ Scaling down to minimal configuration..."
+          helm upgrade ${{ env.RELEASE_NAME }} \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace ${{ inputs.namespace }} \
+            --reuse-values \
+            --set minRunners=0 \
+            --set maxRunners=1 \
+            --wait
+          
+          echo "✅ Scaled to: Min=0, Max=1"
+          echo "## ✅ Scaled Down" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=0, Max=1** (minimal)" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Scale to maximum
+        if: inputs.action == 'scale-max'
+        run: |
+          echo "⬆️⬆️ Scaling to maximum configuration..."
+          helm upgrade ${{ env.RELEASE_NAME }} \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace ${{ inputs.namespace }} \
+            --reuse-values \
+            --set minRunners=4 \
+            --set maxRunners=8 \
+            --wait
+          
+          echo "✅ Scaled to: Min=4, Max=8"
+          echo "## ✅ Scaled to Maximum" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=4, Max=8** (maximum)" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Custom scaling
+        if: inputs.action == 'scale-custom'
+        run: |
+          echo "🎯 Scaling to custom configuration..."
+          
+          # Validate inputs
+          if [ ${{ inputs.min_runners }} -gt ${{ inputs.max_runners }} ]; then
+            echo "❌ Error: min_runners cannot be greater than max_runners"
+            exit 1
+          fi
+          
+          helm upgrade ${{ env.RELEASE_NAME }} \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace ${{ inputs.namespace }} \
+            --reuse-values \
+            --set minRunners=${{ inputs.min_runners }} \
+            --set maxRunners=${{ inputs.max_runners }} \
+            --wait
+          
+          echo "✅ Scaled to: Min=${{ inputs.min_runners }}, Max=${{ inputs.max_runners }}"
+          echo "## ✅ Custom Scaling Applied" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=${{ inputs.min_runners }}, Max=${{ inputs.max_runners }}**" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Verify scaling
+        if: inputs.action != 'status'
+        run: |
+          echo ""
+          echo "⏳ Waiting for scaling to take effect..."
+          sleep 10
+          
+          echo "📊 New runner status:"
+          kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }}
+          
+          # Get new values
+          NEW_MIN=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.minRunners // 0')
+          NEW_MAX=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.maxRunners // 0')
+          
+          echo ""
+          echo "### New Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Runners**: $NEW_MIN" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runners**: $NEW_MAX" >> $GITHUB_STEP_SUMMARY

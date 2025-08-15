@@ -1,0 +1,118 @@
+# Use the official GitHub Actions runner as base
+FROM ghcr.io/actions/actions-runner:latest
+
+# Switch to root to install tools
+USER root
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
+# Update and install basic dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl wget git build-essential \
+    libpq-dev gettext-base \
+    ca-certificates gnupg lsb-release \
+    software-properties-common \
+    apt-transport-https \
+    jq zip unzip tar gzip \
+    sudo && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python 3.13
+RUN add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.13 python3.13-dev python3.13-venv && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.13 1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install pip for Python 3.13
+RUN python3.13 -m ensurepip && \
+    python3.13 -m pip install --upgrade pip setuptools wheel
+
+# Install Node.js 22.x and npm
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g npm@11.5.2 pnpm@latest && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install kubectl 1.33.0
+RUN curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl" && \
+    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
+    rm kubectl
+
+# Install Helm 3.17.4
+RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
+    chmod 700 get_helm.sh && \
+    DESIRED_VERSION=v3.17.4 ./get_helm.sh && \
+    rm get_helm.sh
+
+# Install doctl 1.138.0
+RUN cd /tmp && \
+    wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz && \
+    tar xf doctl-1.138.0-linux-amd64.tar.gz && \
+    mv doctl /usr/local/bin && \
+    rm doctl-1.138.0-linux-amd64.tar.gz
+
+# Install Terraform 1.12.2
+RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list && \
+    apt-get update && \
+    apt-get install -y terraform=1.12.2-1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install PostgreSQL client and Redis tools
+RUN apt-get update && \
+    apt-get install -y postgresql-client redis-tools && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI (not daemon)
+RUN apt-get update && \
+    apt-get install -y docker.io && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    apt-get update && \
+    apt-get install gh -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install kubeconform 0.7.0 (successor to kubeval)
+RUN wget https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz && \
+    tar xf kubeconform-linux-amd64.tar.gz && \
+    mv kubeconform /usr/local/bin && \
+    rm kubeconform-linux-amd64.tar.gz
+
+# Install kubesec 2.14.2
+RUN wget https://github.com/controlplaneio/kubesec/releases/download/v2.14.2/kubesec_linux_amd64.tar.gz && \
+    tar xf kubesec_linux_amd64.tar.gz && \
+    mv kubesec /usr/local/bin && \
+    rm kubesec_linux_amd64.tar.gz
+
+# Install Trivy 0.65.0
+RUN wget https://github.com/aquasecurity/trivy/releases/download/v0.65.0/trivy_0.65.0_Linux-64bit.tar.gz && \
+    tar xf trivy_0.65.0_Linux-64bit.tar.gz && \
+    mv trivy /usr/local/bin && \
+    rm trivy_0.65.0_Linux-64bit.tar.gz
+
+# Install Python development tools
+RUN python3.13 -m pip install --no-cache-dir \
+    black flake8 mypy ruff pytest pytest-cov \
+    requests boto3 pyyaml
+
+# Clean up
+RUN apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Switch back to runner user
+USER runner
+
+# Set working directory
+WORKDIR /home/runner
+
+# ARC expects this to be the default CMD
+CMD ["/home/runner/run.sh"]

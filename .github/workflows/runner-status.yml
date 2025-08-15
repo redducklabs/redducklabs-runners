@@ -1,0 +1,248 @@
+name: Runner Status
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Kubernetes namespace'
+        required: false
+        default: 'arc-runners'
+        type: string
+      detailed:
+        description: 'Show detailed information'
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
+
+env:
+  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
+  RELEASE_NAME: redducklabs-runners
+
+jobs:
+  status:
+    name: Check Runner Status
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          echo "📦 Installing kubectl..."
+          curl -sLO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+      
+      - name: Install Helm
+        run: |
+          echo "📦 Installing Helm..."
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          DESIRED_VERSION=v3.17.4 ./get_helm.sh
+      
+      - name: Install doctl
+        run: |
+          echo "📦 Installing DigitalOcean CLI..."
+          cd /tmp
+          wget -q https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
+          tar xf doctl-1.138.0-linux-amd64.tar.gz
+          sudo mv doctl /usr/local/bin
+      
+      - name: Install jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq
+      
+      - name: Configure Kubernetes access
+        run: |
+          echo "🔧 Configuring Kubernetes access..."
+          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
+          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
+          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+      
+      - name: Check deployment status
+        id: deployment
+        run: |
+          echo "🔍 Checking deployment status..."
+          
+          # Check if release exists
+          if ! helm list -n ${{ inputs.namespace }} | grep -q ${{ env.RELEASE_NAME }}; then
+            echo "❌ Runners are not deployed!"
+            echo "deployed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "deployed=true" >> $GITHUB_OUTPUT
+          
+          # Get deployment info
+          CHART_VERSION=$(helm list -n ${{ inputs.namespace }} -o json | jq -r '.[] | select(.name=="${{ env.RELEASE_NAME }}") | .chart')
+          DEPLOYED_TIME=$(helm list -n ${{ inputs.namespace }} -o json | jq -r '.[] | select(.name=="${{ env.RELEASE_NAME }}") | .updated')
+          
+          echo "chart_version=$CHART_VERSION" >> $GITHUB_OUTPUT
+          echo "deployed_time=$DEPLOYED_TIME" >> $GITHUB_OUTPUT
+          
+          echo "✅ Deployment found:"
+          echo "  Chart: $CHART_VERSION"
+          echo "  Deployed: $DEPLOYED_TIME"
+      
+      - name: Get runner configuration
+        if: steps.deployment.outputs.deployed == 'true'
+        id: config
+        run: |
+          echo "📊 Getting runner configuration..."
+          
+          # Get current values
+          VALUES=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json)
+          
+          MIN_RUNNERS=$(echo "$VALUES" | jq -r '.minRunners // 0')
+          MAX_RUNNERS=$(echo "$VALUES" | jq -r '.maxRunners // 0')
+          GITHUB_URL=$(echo "$VALUES" | jq -r '.githubConfigUrl // "Not configured"')
+          RUNNER_NAME=$(echo "$VALUES" | jq -r '.runnerScaleSetName // "Not configured"')
+          CONTAINER_MODE=$(echo "$VALUES" | jq -r '.containerMode.type // "Not configured"')
+          
+          echo "min_runners=$MIN_RUNNERS" >> $GITHUB_OUTPUT
+          echo "max_runners=$MAX_RUNNERS" >> $GITHUB_OUTPUT
+          echo "github_url=$GITHUB_URL" >> $GITHUB_OUTPUT
+          echo "runner_name=$RUNNER_NAME" >> $GITHUB_OUTPUT
+          echo "container_mode=$CONTAINER_MODE" >> $GITHUB_OUTPUT
+          
+          echo "Configuration:"
+          echo "  GitHub URL: $GITHUB_URL"
+          echo "  Runner Name: $RUNNER_NAME"
+          echo "  Min Runners: $MIN_RUNNERS"
+          echo "  Max Runners: $MAX_RUNNERS"
+          echo "  Container Mode: $CONTAINER_MODE"
+      
+      - name: Check runner pods
+        if: steps.deployment.outputs.deployed == 'true'
+        id: pods
+        run: |
+          echo "🏃 Checking runner pods..."
+          
+          # Get pod information
+          PODS=$(kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} -o json)
+          
+          TOTAL_PODS=$(echo "$PODS" | jq '.items | length')
+          RUNNING_PODS=$(echo "$PODS" | jq '[.items[] | select(.status.phase=="Running")] | length')
+          PENDING_PODS=$(echo "$PODS" | jq '[.items[] | select(.status.phase=="Pending")] | length')
+          
+          echo "total_pods=$TOTAL_PODS" >> $GITHUB_OUTPUT
+          echo "running_pods=$RUNNING_PODS" >> $GITHUB_OUTPUT
+          echo "pending_pods=$PENDING_PODS" >> $GITHUB_OUTPUT
+          
+          echo "Pod Status:"
+          echo "  Total: $TOTAL_PODS"
+          echo "  Running: $RUNNING_PODS"
+          echo "  Pending: $PENDING_PODS"
+          
+          if [ "${{ inputs.detailed }}" == "true" ]; then
+            echo ""
+            echo "Pod Details:"
+            kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }}
+          fi
+      
+      - name: Check GitHub registration
+        if: steps.deployment.outputs.deployed == 'true' && secrets.RUNNER_TOKEN != ''
+        id: github
+        continue-on-error: true
+        run: |
+          echo "🔗 Checking GitHub registration..."
+          
+          # Get org from GitHub URL
+          ORG=$(echo "${{ steps.config.outputs.github_url }}" | sed 's|https://github.com/||')
+          
+          # Check runners via API
+          RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
+            "https://api.github.com/orgs/${ORG}/actions/runners")
+          
+          if [ $? -eq 0 ]; then
+            TOTAL_RUNNERS=$(echo "$RESPONSE" | jq '.total_count // 0')
+            ONLINE_RUNNERS=$(echo "$RESPONSE" | jq '[.runners[] | select(.status=="online")] | length')
+            OFFLINE_RUNNERS=$(echo "$RESPONSE" | jq '[.runners[] | select(.status=="offline")] | length')
+            
+            echo "github_total=$TOTAL_RUNNERS" >> $GITHUB_OUTPUT
+            echo "github_online=$ONLINE_RUNNERS" >> $GITHUB_OUTPUT
+            echo "github_offline=$OFFLINE_RUNNERS" >> $GITHUB_OUTPUT
+            
+            echo "GitHub Registration:"
+            echo "  Total: $TOTAL_RUNNERS"
+            echo "  Online: $ONLINE_RUNNERS"
+            echo "  Offline: $OFFLINE_RUNNERS"
+          else
+            echo "⚠️ Could not check GitHub registration (token may not be set)"
+          fi
+      
+      - name: Check resource usage
+        if: steps.deployment.outputs.deployed == 'true' && inputs.detailed == true
+        run: |
+          echo "💾 Checking resource usage..."
+          
+          kubectl top pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} || echo "Metrics not available"
+      
+      - name: Generate status report
+        if: always()
+        run: |
+          echo "# 📊 GitHub Runners Status Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Report Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.deployment.outputs.deployed }}" != "true" ]; then
+            echo "## ❌ Runners Not Deployed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No runners are currently deployed in namespace \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To deploy runners, use the **Deploy GitHub Runners** workflow." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ✅ Deployment Information" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| **Chart Version** | ${{ steps.deployment.outputs.chart_version }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Deployed** | ${{ steps.deployment.outputs.deployed_time }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Namespace** | \`${{ inputs.namespace }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            echo "## ⚙️ Configuration" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| **GitHub URL** | ${{ steps.config.outputs.github_url }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Runner Label** | \`${{ steps.config.outputs.runner_name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Min Runners** | ${{ steps.config.outputs.min_runners }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Max Runners** | ${{ steps.config.outputs.max_runners }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Container Mode** | ${{ steps.config.outputs.container_mode }} |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            echo "## 🏃 Pod Status" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| **Total** | ${{ steps.pods.outputs.total_pods }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Running** | ${{ steps.pods.outputs.running_pods }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Pending** | ${{ steps.pods.outputs.pending_pods }} |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ -n "${{ steps.github.outputs.github_total }}" ]; then
+              echo "## 🔗 GitHub Registration" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
+              echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+              echo "| **Total Registered** | ${{ steps.github.outputs.github_total }} |" >> $GITHUB_STEP_SUMMARY
+              echo "| **Online** | ${{ steps.github.outputs.github_online }} |" >> $GITHUB_STEP_SUMMARY
+              echo "| **Offline** | ${{ steps.github.outputs.github_offline }} |" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "## 📝 Usage" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Use these runners in your workflows:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`yaml" >> $GITHUB_STEP_SUMMARY
+            echo "jobs:" >> $GITHUB_STEP_SUMMARY
+            echo "  build:" >> $GITHUB_STEP_SUMMARY
+            echo "    runs-on: ${{ steps.config.outputs.runner_name }}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi

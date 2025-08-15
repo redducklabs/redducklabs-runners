@@ -1,0 +1,50 @@
+# GitHub Actions Runner Controller - Docker-in-Docker Configuration
+# Production configuration for redducklabs
+
+# GitHub configuration
+githubConfigUrl: "https://github.com/redducklabs"
+
+# IMPORTANT: Never commit tokens to git!
+# Set the token via --set flag when deploying:
+# --set githubConfigSecret.github_token=$GITHUB_TOKEN
+githubConfigSecret:
+  github_token: ""  # SET VIA ENVIRONMENT VARIABLE
+
+# Runner scaling configuration
+minRunners: 2
+maxRunners: 4
+
+# Runner scale set name (used in workflows as: runs-on: redducklabs-runners)
+runnerScaleSetName: "redducklabs-runners"
+
+# Enable Docker-in-Docker mode
+containerMode:
+  type: "dind"
+  
+# Runner template configuration for DinD
+template:
+  spec:
+    # Pull secret for private registry
+    imagePullSecrets:
+    - name: do-registry-secret
+    
+    # Container configuration
+    containers:
+    - name: runner
+      # Custom image with all tools installed
+      image: registry.digitalocean.com/redducklabs/github-runner:latest
+      imagePullPolicy: Always
+      
+      # CRITICAL: Must specify the command for ARC to work properly
+      command: ["/home/runner/run.sh"]
+      
+      # Resource limits
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+    
+    # Docker-in-Docker sidecar container (automatically added by ARC when containerMode.type: "dind")
