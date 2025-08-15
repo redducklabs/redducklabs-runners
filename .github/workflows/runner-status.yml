@@ -18,169 +18,335 @@ on:
     - cron: '0 9 * * *'
 
 env:
-  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
-  RELEASE_NAME: redducklabs-runners
+  CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+  RELEASE_NAME: ${{ vars.RELEASE_NAME || 'redducklabs-runners' }}
+
+# Use minimal permissions
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
+  validate-inputs:
+    name: Validate Status Check Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      namespace: ${{ steps.validate.outputs.namespace }}
+      detailed: ${{ steps.validate.outputs.detailed }}
+    
+    steps:
+      - name: Validate and sanitize inputs
+        id: validate
+        run: |
+          echo "🔍 Validating status check inputs..."
+          
+          # Handle scheduled runs (no inputs)
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            NAMESPACE="arc-runners"
+            DETAILED="true"
+          else
+            NAMESPACE="${{ github.event.inputs.namespace }}"
+            DETAILED="${{ github.event.inputs.detailed }}"
+          fi
+          
+          # Validate namespace format (DNS-1123 label)
+          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+            echo "❌ Error: namespace must be a valid DNS-1123 label"
+            exit 1
+          fi
+          
+          # Validate detailed flag
+          case "${DETAILED}" in
+            true|false)
+              echo "✅ Valid detailed flag: ${DETAILED}"
+              ;;
+            *)
+              echo "⚠️ Invalid detailed flag '${DETAILED}', defaulting to true"
+              DETAILED="true"
+              ;;
+          esac
+          
+          # Set validated outputs
+          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
+          echo "detailed=${DETAILED}" >> $GITHUB_OUTPUT
+          
+          echo "✅ All inputs validated successfully"
+          echo "  Namespace: ${NAMESPACE}"
+          echo "  Detailed: ${DETAILED}"
+          echo "  Event: ${{ github.event_name }}"
+
   status:
     name: Check Runner Status
     runs-on: ubuntu-latest
+    needs: validate-inputs
+    timeout-minutes: 5
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Install kubectl
-        run: |
-          echo "📦 Installing kubectl..."
-          curl -sLO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-      
-      - name: Install Helm
-        run: |
-          echo "📦 Installing Helm..."
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-          chmod 700 get_helm.sh
-          DESIRED_VERSION=v3.17.4 ./get_helm.sh
-      
-      - name: Install doctl
-        run: |
-          echo "📦 Installing DigitalOcean CLI..."
-          cd /tmp
-          wget -q https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
-          tar xf doctl-1.138.0-linux-amd64.tar.gz
-          sudo mv doctl /usr/local/bin
-      
-      - name: Install jq
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y jq
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
       
       - name: Configure Kubernetes access
         run: |
           echo "🔧 Configuring Kubernetes access..."
-          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
-          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
-          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+          
+          # Validate DO_TOKEN
+          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+          
+          # Initialize doctl with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring doctl..."
+            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+              echo "✅ DigitalOcean authentication configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to authenticate with DigitalOcean"
+              exit 1
+            else
+              echo "⚠️ Authentication failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
+          # Configure kubectl with retry logic
+          echo "Configuring kubectl for cluster ${CLUSTER_CONTEXT}..."
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring kubectl..."
+            if doctl kubernetes cluster kubeconfig save "${CLUSTER_CONTEXT}"; then
+              kubectl config use-context "${CLUSTER_CONTEXT}"
+              echo "✅ Kubernetes access configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to configure kubectl"
+              exit 1
+            else
+              echo "⚠️ kubectl configuration failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
       
       - name: Check deployment status
         id: deployment
         run: |
           echo "🔍 Checking deployment status..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           # Check if release exists
-          if ! helm list -n ${{ inputs.namespace }} | grep -q ${{ env.RELEASE_NAME }}; then
-            echo "❌ Runners are not deployed!"
+          if ! helm list -n "${NAMESPACE}" 2>/dev/null | grep -q "${RELEASE_NAME}"; then
+            echo "❌ Runners are not deployed in namespace '${NAMESPACE}'!"
             echo "deployed=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
           echo "deployed=true" >> $GITHUB_OUTPUT
           
-          # Get deployment info
-          CHART_VERSION=$(helm list -n ${{ inputs.namespace }} -o json | jq -r '.[] | select(.name=="${{ env.RELEASE_NAME }}") | .chart')
-          DEPLOYED_TIME=$(helm list -n ${{ inputs.namespace }} -o json | jq -r '.[] | select(.name=="${{ env.RELEASE_NAME }}") | .updated')
+          # Get deployment info with error handling
+          HELM_INFO=$(helm list -n "${NAMESPACE}" -o json 2>/dev/null)
+          if [ $? -eq 0 ]; then
+            CHART_VERSION=$(echo "${HELM_INFO}" | jq -r ".[] | select(.name==\"${RELEASE_NAME}\") | .chart")
+            DEPLOYED_TIME=$(echo "${HELM_INFO}" | jq -r ".[] | select(.name==\"${RELEASE_NAME}\") | .updated")
+            
+            # Validate retrieved info
+            if [ "${CHART_VERSION}" = "null" ] || [ "${CHART_VERSION}" = "" ]; then
+              CHART_VERSION="Unknown"
+            fi
+            if [ "${DEPLOYED_TIME}" = "null" ] || [ "${DEPLOYED_TIME}" = "" ]; then
+              DEPLOYED_TIME="Unknown"
+            fi
+          else
+            echo "⚠️ Warning: Could not retrieve deployment information"
+            CHART_VERSION="Unknown"
+            DEPLOYED_TIME="Unknown"
+          fi
           
-          echo "chart_version=$CHART_VERSION" >> $GITHUB_OUTPUT
-          echo "deployed_time=$DEPLOYED_TIME" >> $GITHUB_OUTPUT
+          echo "chart_version=${CHART_VERSION}" >> $GITHUB_OUTPUT
+          echo "deployed_time=${DEPLOYED_TIME}" >> $GITHUB_OUTPUT
           
           echo "✅ Deployment found:"
-          echo "  Chart: $CHART_VERSION"
-          echo "  Deployed: $DEPLOYED_TIME"
+          echo "  Chart: ${CHART_VERSION}"
+          echo "  Deployed: ${DEPLOYED_TIME}"
       
       - name: Get runner configuration
         if: steps.deployment.outputs.deployed == 'true'
         id: config
         run: |
           echo "📊 Getting runner configuration..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          # Get current values
-          VALUES=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json)
+          # Get current values with error handling
+          VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
           
-          MIN_RUNNERS=$(echo "$VALUES" | jq -r '.minRunners // 0')
-          MAX_RUNNERS=$(echo "$VALUES" | jq -r '.maxRunners // 0')
-          GITHUB_URL=$(echo "$VALUES" | jq -r '.githubConfigUrl // "Not configured"')
-          RUNNER_NAME=$(echo "$VALUES" | jq -r '.runnerScaleSetName // "Not configured"')
-          CONTAINER_MODE=$(echo "$VALUES" | jq -r '.containerMode.type // "Not configured"')
+          if [ $? -eq 0 ] && [ "${VALUES_JSON}" != "" ]; then
+            MIN_RUNNERS=$(echo "${VALUES_JSON}" | jq -r '.minRunners // 0')
+            MAX_RUNNERS=$(echo "${VALUES_JSON}" | jq -r '.maxRunners // 0')
+            GITHUB_URL=$(echo "${VALUES_JSON}" | jq -r '.githubConfigUrl // "Not configured"')
+            RUNNER_NAME=$(echo "${VALUES_JSON}" | jq -r '.runnerScaleSetName // "Not configured"')
+            CONTAINER_MODE=$(echo "${VALUES_JSON}" | jq -r '.containerMode.type // "Not configured"')
+            
+            # Validate numeric values
+            if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
+              MIN_RUNNERS=0
+            fi
+            if ! [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]]; then
+              MAX_RUNNERS=0
+            fi
+          else
+            echo "⚠️ Warning: Could not retrieve configuration values"
+            MIN_RUNNERS=0
+            MAX_RUNNERS=0
+            GITHUB_URL="Not configured"
+            RUNNER_NAME="Not configured"
+            CONTAINER_MODE="Not configured"
+          fi
           
-          echo "min_runners=$MIN_RUNNERS" >> $GITHUB_OUTPUT
-          echo "max_runners=$MAX_RUNNERS" >> $GITHUB_OUTPUT
-          echo "github_url=$GITHUB_URL" >> $GITHUB_OUTPUT
-          echo "runner_name=$RUNNER_NAME" >> $GITHUB_OUTPUT
-          echo "container_mode=$CONTAINER_MODE" >> $GITHUB_OUTPUT
+          echo "min_runners=${MIN_RUNNERS}" >> $GITHUB_OUTPUT
+          echo "max_runners=${MAX_RUNNERS}" >> $GITHUB_OUTPUT
+          echo "github_url=${GITHUB_URL}" >> $GITHUB_OUTPUT
+          echo "runner_name=${RUNNER_NAME}" >> $GITHUB_OUTPUT
+          echo "container_mode=${CONTAINER_MODE}" >> $GITHUB_OUTPUT
           
           echo "Configuration:"
-          echo "  GitHub URL: $GITHUB_URL"
-          echo "  Runner Name: $RUNNER_NAME"
-          echo "  Min Runners: $MIN_RUNNERS"
-          echo "  Max Runners: $MAX_RUNNERS"
-          echo "  Container Mode: $CONTAINER_MODE"
+          echo "  GitHub URL: ${GITHUB_URL}"
+          echo "  Runner Name: ${RUNNER_NAME}"
+          echo "  Min Runners: ${MIN_RUNNERS}"
+          echo "  Max Runners: ${MAX_RUNNERS}"
+          echo "  Container Mode: ${CONTAINER_MODE}"
       
       - name: Check runner pods
         if: steps.deployment.outputs.deployed == 'true'
         id: pods
         run: |
           echo "🏃 Checking runner pods..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          # Get pod information
-          PODS=$(kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} -o json)
+          # Get pod information with error handling
+          PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" -o json 2>/dev/null)
           
-          TOTAL_PODS=$(echo "$PODS" | jq '.items | length')
-          RUNNING_PODS=$(echo "$PODS" | jq '[.items[] | select(.status.phase=="Running")] | length')
-          PENDING_PODS=$(echo "$PODS" | jq '[.items[] | select(.status.phase=="Pending")] | length')
+          if [ $? -eq 0 ] && [ "${PODS_JSON}" != "" ]; then
+            TOTAL_PODS=$(echo "${PODS_JSON}" | jq '.items | length')
+            RUNNING_PODS=$(echo "${PODS_JSON}" | jq '[.items[] | select(.status.phase=="Running")] | length')
+            PENDING_PODS=$(echo "${PODS_JSON}" | jq '[.items[] | select(.status.phase=="Pending")] | length')
+            FAILED_PODS=$(echo "${PODS_JSON}" | jq '[.items[] | select(.status.phase=="Failed")] | length')
+            
+            # Validate numeric values
+            for value in TOTAL_PODS RUNNING_PODS PENDING_PODS FAILED_PODS; do
+              if ! [[ "${!value}" =~ ^[0-9]+$ ]]; then
+                declare $value=0
+              fi
+            done
+          else
+            echo "⚠️ Warning: Could not retrieve pod information"
+            TOTAL_PODS=0
+            RUNNING_PODS=0
+            PENDING_PODS=0
+            FAILED_PODS=0
+          fi
           
-          echo "total_pods=$TOTAL_PODS" >> $GITHUB_OUTPUT
-          echo "running_pods=$RUNNING_PODS" >> $GITHUB_OUTPUT
-          echo "pending_pods=$PENDING_PODS" >> $GITHUB_OUTPUT
+          echo "total_pods=${TOTAL_PODS}" >> $GITHUB_OUTPUT
+          echo "running_pods=${RUNNING_PODS}" >> $GITHUB_OUTPUT
+          echo "pending_pods=${PENDING_PODS}" >> $GITHUB_OUTPUT
+          echo "failed_pods=${FAILED_PODS}" >> $GITHUB_OUTPUT
           
           echo "Pod Status:"
-          echo "  Total: $TOTAL_PODS"
-          echo "  Running: $RUNNING_PODS"
-          echo "  Pending: $PENDING_PODS"
+          echo "  Total: ${TOTAL_PODS}"
+          echo "  Running: ${RUNNING_PODS}"
+          echo "  Pending: ${PENDING_PODS}"
+          echo "  Failed: ${FAILED_PODS}"
           
-          if [ "${{ inputs.detailed }}" == "true" ]; then
+          if [ "${{ needs.validate-inputs.outputs.detailed }}" = "true" ] && [ "${TOTAL_PODS}" -gt 0 ]; then
             echo ""
             echo "Pod Details:"
-            kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }}
+            kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" 2>/dev/null || echo "Could not retrieve pod details"
           fi
       
       - name: Check GitHub registration
-        if: steps.deployment.outputs.deployed == 'true' && secrets.RUNNER_TOKEN != ''
+        if: steps.deployment.outputs.deployed == 'true'
         id: github
         continue-on-error: true
         run: |
           echo "🔗 Checking GitHub registration..."
           
-          # Get org from GitHub URL
-          ORG=$(echo "${{ steps.config.outputs.github_url }}" | sed 's|https://github.com/||')
-          
-          # Check runners via API
-          RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
-            "https://api.github.com/orgs/${ORG}/actions/runners")
-          
-          if [ $? -eq 0 ]; then
-            TOTAL_RUNNERS=$(echo "$RESPONSE" | jq '.total_count // 0')
-            ONLINE_RUNNERS=$(echo "$RESPONSE" | jq '[.runners[] | select(.status=="online")] | length')
-            OFFLINE_RUNNERS=$(echo "$RESPONSE" | jq '[.runners[] | select(.status=="offline")] | length')
-            
-            echo "github_total=$TOTAL_RUNNERS" >> $GITHUB_OUTPUT
-            echo "github_online=$ONLINE_RUNNERS" >> $GITHUB_OUTPUT
-            echo "github_offline=$OFFLINE_RUNNERS" >> $GITHUB_OUTPUT
-            
-            echo "GitHub Registration:"
-            echo "  Total: $TOTAL_RUNNERS"
-            echo "  Online: $ONLINE_RUNNERS"
-            echo "  Offline: $OFFLINE_RUNNERS"
-          else
-            echo "⚠️ Could not check GitHub registration (token may not be set)"
+          # Check if token is available
+          if [ -z "${{ secrets.RUNNER_TOKEN }}" ]; then
+            echo "⚠️ RUNNER_TOKEN not configured - skipping GitHub registration check"
+            echo "github_total=N/A" >> $GITHUB_OUTPUT
+            echo "github_online=N/A" >> $GITHUB_OUTPUT
+            echo "github_offline=N/A" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          
+          # Extract org from GitHub URL
+          GITHUB_URL="${{ steps.config.outputs.github_url }}"
+          if [[ "${GITHUB_URL}" =~ https://github\.com/([^/]+) ]]; then
+            ORG="${BASH_REMATCH[1]}"
+          else
+            echo "⚠️ Could not extract organization from GitHub URL: ${GITHUB_URL}"
+            echo "github_total=N/A" >> $GITHUB_OUTPUT
+            echo "github_online=N/A" >> $GITHUB_OUTPUT
+            echo "github_offline=N/A" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check runners via API with retry logic
+          for attempt in 1 2 3; do
+            RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
+              "https://api.github.com/orgs/${ORG}/actions/runners" 2>/dev/null)
+            
+            if [ $? -eq 0 ] && [ "${RESPONSE}" != "" ]; then
+              # Check if response is valid JSON
+              if echo "${RESPONSE}" | jq . >/dev/null 2>&1; then
+                TOTAL_RUNNERS=$(echo "${RESPONSE}" | jq '.total_count // 0')
+                ONLINE_RUNNERS=$(echo "${RESPONSE}" | jq '[.runners[]? | select(.status=="online")] | length')
+                OFFLINE_RUNNERS=$(echo "${RESPONSE}" | jq '[.runners[]? | select(.status=="offline")] | length')
+                
+                # Validate numeric values
+                for value in TOTAL_RUNNERS ONLINE_RUNNERS OFFLINE_RUNNERS; do
+                  if ! [[ "${!value}" =~ ^[0-9]+$ ]]; then
+                    declare $value=0
+                  fi
+                done
+                
+                echo "github_total=${TOTAL_RUNNERS}" >> $GITHUB_OUTPUT
+                echo "github_online=${ONLINE_RUNNERS}" >> $GITHUB_OUTPUT
+                echo "github_offline=${OFFLINE_RUNNERS}" >> $GITHUB_OUTPUT
+                
+                echo "GitHub Registration:"
+                echo "  Total: ${TOTAL_RUNNERS}"
+                echo "  Online: ${ONLINE_RUNNERS}"
+                echo "  Offline: ${OFFLINE_RUNNERS}"
+                break
+              else
+                echo "⚠️ Invalid JSON response from GitHub API"
+              fi
+            fi
+            
+            if [ "${attempt}" = "3" ]; then
+              echo "⚠️ Could not check GitHub registration after 3 attempts"
+              echo "github_total=Error" >> $GITHUB_OUTPUT
+              echo "github_online=Error" >> $GITHUB_OUTPUT
+              echo "github_offline=Error" >> $GITHUB_OUTPUT
+            else
+              echo "Retrying GitHub API check in 5s..."
+              sleep 5
+            fi
+          done
       
       - name: Check resource usage
-        if: steps.deployment.outputs.deployed == 'true' && inputs.detailed == true
+        if: steps.deployment.outputs.deployed == 'true' && needs.validate-inputs.outputs.detailed == 'true'
+        continue-on-error: true
         run: |
           echo "💾 Checking resource usage..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          kubectl top pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} || echo "Metrics not available"
+          echo "Pod resource usage:"
+          kubectl top pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" 2>/dev/null || echo "⚠️ Metrics server not available or no pods found"
       
       - name: Generate status report
         if: always()
@@ -188,12 +354,14 @@ jobs:
           echo "# 📊 GitHub Runners Status Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Report Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**Namespace**: \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Release**: \`${RELEASE_NAME}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ steps.deployment.outputs.deployed }}" != "true" ]; then
             echo "## ❌ Runners Not Deployed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "No runners are currently deployed in namespace \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "No runners are currently deployed in namespace \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "To deploy runners, use the **Deploy GitHub Runners** workflow." >> $GITHUB_STEP_SUMMARY
           else
@@ -203,7 +371,7 @@ jobs:
             echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
             echo "| **Chart Version** | ${{ steps.deployment.outputs.chart_version }} |" >> $GITHUB_STEP_SUMMARY
             echo "| **Deployed** | ${{ steps.deployment.outputs.deployed_time }} |" >> $GITHUB_STEP_SUMMARY
-            echo "| **Namespace** | \`${{ inputs.namespace }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Namespace** | \`${{ needs.validate-inputs.outputs.namespace }}\` |" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             
             echo "## ⚙️ Configuration" >> $GITHUB_STEP_SUMMARY
@@ -224,9 +392,12 @@ jobs:
             echo "| **Total** | ${{ steps.pods.outputs.total_pods }} |" >> $GITHUB_STEP_SUMMARY
             echo "| **Running** | ${{ steps.pods.outputs.running_pods }} |" >> $GITHUB_STEP_SUMMARY
             echo "| **Pending** | ${{ steps.pods.outputs.pending_pods }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Failed** | ${{ steps.pods.outputs.failed_pods }} |" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             
-            if [ -n "${{ steps.github.outputs.github_total }}" ]; then
+            # Only show GitHub registration if we have valid data
+            GITHUB_TOTAL="${{ steps.github.outputs.github_total }}"
+            if [ "${GITHUB_TOTAL}" != "" ] && [ "${GITHUB_TOTAL}" != "N/A" ] && [ "${GITHUB_TOTAL}" != "Error" ]; then
               echo "## 🔗 GitHub Registration" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
@@ -234,6 +405,11 @@ jobs:
               echo "| **Total Registered** | ${{ steps.github.outputs.github_total }} |" >> $GITHUB_STEP_SUMMARY
               echo "| **Online** | ${{ steps.github.outputs.github_online }} |" >> $GITHUB_STEP_SUMMARY
               echo "| **Offline** | ${{ steps.github.outputs.github_offline }} |" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            elif [ "${GITHUB_TOTAL}" = "Error" ]; then
+              echo "## ⚠️ GitHub Registration" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Could not check GitHub registration. Please verify RUNNER_TOKEN secret is configured correctly." >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
             
@@ -245,4 +421,12 @@ jobs:
             echo "  build:" >> $GITHUB_STEP_SUMMARY
             echo "    runs-on: ${{ steps.config.outputs.runner_name }}" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            
+            # Health check warnings
+            FAILED_PODS="${{ steps.pods.outputs.failed_pods }}"
+            if [ "${FAILED_PODS}" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "## ⚠️ Health Warning" >> $GITHUB_STEP_SUMMARY
+              echo "There are ${FAILED_PODS} failed pod(s). Consider investigating or redeploying runners." >> $GITHUB_STEP_SUMMARY
+            fi
           fi

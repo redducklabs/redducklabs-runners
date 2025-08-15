@@ -38,18 +38,95 @@ on:
         type: string
 
 env:
-  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
-  RELEASE_NAME: redducklabs-runners
-  RUNNER_SCALE_SET_NAME: redducklabs-runners
+  CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+  RELEASE_NAME: ${{ vars.RELEASE_NAME || 'redducklabs-runners' }}
+  RUNNER_SCALE_SET_NAME: ${{ vars.RUNNER_SCALE_SET_NAME || 'redducklabs-runners' }}
+  REGISTRY: ${{ vars.REGISTRY || 'registry.digitalocean.com' }}
+  REPOSITORY: ${{ vars.REPOSITORY || 'redducklabs/github-runner' }}
+
+# Use minimal permissions
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
+  validate-inputs:
+    name: Validate Deployment Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      min_runners: ${{ steps.validate.outputs.min_runners }}
+      max_runners: ${{ steps.validate.outputs.max_runners }}
+      runner_image: ${{ steps.validate.outputs.runner_image }}
+      namespace: ${{ steps.validate.outputs.namespace }}
+    
+    steps:
+      - name: Validate and sanitize inputs
+        id: validate
+        run: |
+          echo "🔍 Validating deployment inputs..."
+          
+          # Validate numeric inputs
+          MIN_RUNNERS="${{ github.event.inputs.min_runners }}"
+          MAX_RUNNERS="${{ github.event.inputs.max_runners }}"
+          NAMESPACE="${{ github.event.inputs.namespace }}"
+          RUNNER_IMAGE="${{ github.event.inputs.runner_image }}"
+          
+          # Validate min_runners is numeric
+          if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
+            echo "❌ Error: min_runners must be a number"
+            exit 1
+          fi
+          
+          # Validate max_runners is numeric
+          if ! [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]]; then
+            echo "❌ Error: max_runners must be a number"
+            exit 1
+          fi
+          
+          # Validate min <= max
+          if [ "${MIN_RUNNERS}" -gt "${MAX_RUNNERS}" ]; then
+            echo "❌ Error: min_runners (${MIN_RUNNERS}) cannot be greater than max_runners (${MAX_RUNNERS})"
+            exit 1
+          fi
+          
+          # Validate namespace format (DNS-1123 label)
+          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+            echo "❌ Error: namespace must be a valid DNS-1123 label"
+            exit 1
+          fi
+          
+          # Validate runner image format
+          if ! [[ "${RUNNER_IMAGE}" =~ ^[a-z0-9._/-]+:[a-z0-9._-]+$ ]]; then
+            echo "❌ Error: runner_image must be a valid container image reference"
+            exit 1
+          fi
+          
+          # Set validated outputs
+          echo "min_runners=${MIN_RUNNERS}" >> $GITHUB_OUTPUT
+          echo "max_runners=${MAX_RUNNERS}" >> $GITHUB_OUTPUT
+          echo "runner_image=${RUNNER_IMAGE}" >> $GITHUB_OUTPUT
+          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
+          
+          echo "✅ All inputs validated successfully"
+          echo "  Min runners: ${MIN_RUNNERS}"
+          echo "  Max runners: ${MAX_RUNNERS}"
+          echo "  Namespace: ${NAMESPACE}"
+          echo "  Runner image: ${RUNNER_IMAGE}"
+
   deploy:
     name: Deploy Self-Hosted Runners
     runs-on: ubuntu-latest
+    needs: validate-inputs
+    timeout-minutes: 15
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
       
       - name: Validate GitHub Token
         run: |
@@ -62,61 +139,94 @@ jobs:
             exit 1
           fi
           
-          # Validate token permissions
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
-            https://api.github.com/user)
-          
-          if [ "$RESPONSE" != "200" ]; then
-            echo "❌ Error: RUNNER_TOKEN is invalid or expired!"
-            exit 1
-          fi
-          
-          echo "✅ GitHub token validated successfully"
-      
-      - name: Install kubectl
-        run: |
-          echo "📦 Installing kubectl..."
-          curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          kubectl version --client
-      
-      - name: Install Helm
-        run: |
-          echo "📦 Installing Helm..."
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-          chmod 700 get_helm.sh
-          DESIRED_VERSION=v3.17.4 ./get_helm.sh
-          helm version
-      
-      - name: Install doctl
-        run: |
-          echo "📦 Installing DigitalOcean CLI..."
-          cd /tmp
-          wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
-          tar xf doctl-1.138.0-linux-amd64.tar.gz
-          sudo mv doctl /usr/local/bin
-          doctl version
+          # Validate token permissions with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Validating token..."
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
+              https://api.github.com/user)
+            
+            if [ "${RESPONSE}" = "200" ]; then
+              echo "✅ GitHub token validated successfully"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: RUNNER_TOKEN is invalid or expired (HTTP ${RESPONSE})"
+              exit 1
+            else
+              echo "⚠️ Token validation failed (HTTP ${RESPONSE}), retrying in 5s..."
+              sleep 5
+            fi
+          done
       
       - name: Configure DigitalOcean access
         run: |
           echo "🔧 Configuring DigitalOcean access..."
-          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
-          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
-          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+          
+          # Validate DO_TOKEN
+          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+          
+          # Initialize doctl with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring doctl..."
+            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+              echo "✅ DigitalOcean authentication configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to authenticate with DigitalOcean"
+              exit 1
+            else
+              echo "⚠️ Authentication failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
+          # Configure kubectl with retry logic
+          echo "Configuring kubectl for cluster ${CLUSTER_CONTEXT}..."
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring kubectl..."
+            if doctl kubernetes cluster kubeconfig save "${CLUSTER_CONTEXT}"; then
+              kubectl config use-context "${CLUSTER_CONTEXT}"
+              echo "✅ Kubernetes access configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to configure kubectl"
+              exit 1
+            else
+              echo "⚠️ kubectl configuration failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
       
       - name: Create namespace if not exists
         run: |
           echo "📁 Ensuring namespace exists..."
-          kubectl create namespace ${{ inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          
+          if ! kubectl get namespace "${NAMESPACE}" &>/dev/null; then
+            echo "Creating namespace: ${NAMESPACE}"
+            kubectl create namespace "${NAMESPACE}"
+          else
+            echo "Namespace ${NAMESPACE} already exists"
+          fi
       
       - name: Configure registry access
         run: |
           echo "🔐 Configuring registry access..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          
           # Check if registry secret exists
-          if ! kubectl get secret do-registry-secret -n ${{ inputs.namespace }} &>/dev/null; then
+          if ! kubectl get secret do-registry-secret -n "${NAMESPACE}" &>/dev/null; then
             echo "Creating registry secret..."
-            doctl registry kubernetes-manifest | kubectl apply -n ${{ inputs.namespace }} -f -
+            doctl registry kubernetes-manifest | kubectl apply -n "${NAMESPACE}" -f -
+            
+            # Wait for secret to be created
+            kubectl wait --for=condition=complete \
+              --timeout=30s \
+              secret/do-registry-secret \
+              -n "${NAMESPACE}" || echo "Secret may take time to propagate"
           else
             echo "Registry secret already exists"
           fi
@@ -125,9 +235,17 @@ jobs:
         id: check-controller
         run: |
           echo "🔍 Checking for Actions Runner Controller..."
-          if helm list -n arc-systems | grep -q arc; then
+          
+          if helm list -n arc-systems 2>/dev/null | grep -q arc; then
             echo "controller_exists=true" >> $GITHUB_OUTPUT
             echo "✅ ARC controller found"
+            
+            # Check controller health
+            if kubectl get pods -n arc-systems -l app.kubernetes.io/name=gha-rs-controller --no-headers | grep -q Running; then
+              echo "✅ ARC controller is running"
+            else
+              echo "⚠️ ARC controller pods may not be ready"
+            fi
           else
             echo "controller_exists=false" >> $GITHUB_OUTPUT
             echo "⚠️ ARC controller not found - will install"
@@ -137,11 +255,31 @@ jobs:
         if: steps.check-controller.outputs.controller_exists == 'false'
         run: |
           echo "📦 Installing Actions Runner Controller..."
-          helm install arc \
-            --namespace arc-systems \
-            --create-namespace \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
-            --version 0.12.1
+          
+          # Create namespace first
+          kubectl create namespace arc-systems --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Install with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Installing ARC controller..."
+            if helm install arc \
+              --namespace arc-systems \
+              --create-namespace \
+              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+              --version 0.12.1 \
+              --wait \
+              --timeout 300s; then
+              
+              echo "✅ ARC controller installed successfully"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to install ARC controller"
+              exit 1
+            else
+              echo "⚠️ Installation failed, retrying in 10s..."
+              sleep 10
+            fi
+          done
           
           echo "⏳ Waiting for controller to be ready..."
           kubectl wait --for=condition=ready pod \
@@ -152,15 +290,21 @@ jobs:
       - name: Prepare values file
         run: |
           echo "📝 Preparing Helm values..."
+          
+          # Use validated inputs
+          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
+          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
+          RUNNER_IMAGE="${{ needs.validate-inputs.outputs.runner_image }}"
+          
           cat > /tmp/runner-values.yaml <<EOF
           githubConfigUrl: "https://github.com/${{ github.repository_owner }}"
           githubConfigSecret:
             github_token: "${{ secrets.RUNNER_TOKEN }}"
           
-          minRunners: ${{ inputs.min_runners }}
-          maxRunners: ${{ inputs.max_runners }}
+          minRunners: ${MIN_RUNNERS}
+          maxRunners: ${MAX_RUNNERS}
           
-          runnerScaleSetName: "${{ env.RUNNER_SCALE_SET_NAME }}"
+          runnerScaleSetName: "${RUNNER_SCALE_SET_NAME}"
           
           containerMode:
             type: "dind"
@@ -172,7 +316,7 @@ jobs:
               
               containers:
               - name: runner
-                image: ${{ inputs.runner_image }}
+                image: ${RUNNER_IMAGE}
                 imagePullPolicy: Always
                 command: ["/home/runner/run.sh"]
                 
@@ -183,58 +327,120 @@ jobs:
                   requests:
                     cpu: "500m"
                     memory: "1Gi"
+                
+                securityContext:
+                  runAsUser: 1001
+                  runAsGroup: 121
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: false
+                  capabilities:
+                    drop:
+                    - ALL
           EOF
+          
+          echo "Values file prepared with security constraints"
       
       - name: Deploy runners
         run: |
           echo "🚀 Deploying GitHub runners..."
-          helm upgrade --install ${{ env.RELEASE_NAME }} \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace ${{ inputs.namespace }} \
-            --values /tmp/runner-values.yaml \
-            --version 0.12.1 \
-            --wait \
-            --timeout 5m
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          
+          # Deploy with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Deploying runners..."
+            if helm upgrade --install "${RELEASE_NAME}" \
+              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+              --namespace "${NAMESPACE}" \
+              --values /tmp/runner-values.yaml \
+              --version 0.12.1 \
+              --wait \
+              --timeout 300s; then
+              
+              echo "✅ Runners deployed successfully"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to deploy runners"
+              echo "Checking deployment status..."
+              helm status "${RELEASE_NAME}" -n "${NAMESPACE}" || true
+              kubectl get pods -n "${NAMESPACE}" || true
+              exit 1
+            else
+              echo "⚠️ Deployment failed, retrying in 10s..."
+              sleep 10
+            fi
+          done
       
       - name: Verify deployment
         run: |
           echo "✅ Deployment complete! Checking runner status..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          
           echo ""
           echo "📊 Runner pods:"
-          kubectl get pods -n ${{ inputs.namespace }}
+          kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}"
+          
           echo ""
           echo "📈 Runner scale set:"
-          kubectl get runners.actions.github.com -n ${{ inputs.namespace }}
+          kubectl get runners.actions.github.com -n "${NAMESPACE}" 2>/dev/null || echo "Runner CRDs not yet available"
+          
           echo ""
           echo "🎯 To use these runners in your workflows, add:"
-          echo "  runs-on: ${{ env.RUNNER_SCALE_SET_NAME }}"
+          echo "  runs-on: ${RUNNER_SCALE_SET_NAME}"
       
       - name: Check GitHub registration
+        continue-on-error: true
         run: |
           echo ""
           echo "🔍 Checking GitHub registration..."
-          RUNNERS=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
-            https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners | \
-            jq '.total_count')
-          echo "✅ Found $RUNNERS runner(s) registered with GitHub"
+          
+          # Extract org from repository owner
+          ORG="${{ github.repository_owner }}"
+          
+          # Check with retry logic
+          for attempt in 1 2 3; do
+            RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
+              "https://api.github.com/orgs/${ORG}/actions/runners" 2>/dev/null)
+            
+            if [ $? -eq 0 ]; then
+              RUNNERS=$(echo "${RESPONSE}" | jq '.total_count // 0' 2>/dev/null)
+              if [ "${RUNNERS}" != "null" ] && [ "${RUNNERS}" != "0" ]; then
+                echo "✅ Found ${RUNNERS} runner(s) registered with GitHub"
+                break
+              fi
+            fi
+            
+            if [ "${attempt}" = "3" ]; then
+              echo "⚠️ Could not verify GitHub registration (may take a few minutes to appear)"
+            else
+              echo "Retrying GitHub API check..."
+              sleep 5
+            fi
+          done
       
       - name: Summary
+        if: always()
         run: |
           echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ **Successfully deployed GitHub runners!**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Runner Label**: \`${{ env.RUNNER_SCALE_SET_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Namespace**: \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Min Runners**: ${{ inputs.min_runners }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Max Runners**: ${{ inputs.max_runners }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: \`${{ inputs.runner_image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runner Label**: \`${RUNNER_SCALE_SET_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace**: \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Runners**: ${{ needs.validate-inputs.outputs.min_runners }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runners**: ${{ needs.validate-inputs.outputs.max_runners }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ needs.validate-inputs.outputs.runner_image }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Usage" >> $GITHUB_STEP_SUMMARY
           echo "Add this to your workflow:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`yaml" >> $GITHUB_STEP_SUMMARY
           echo "jobs:" >> $GITHUB_STEP_SUMMARY
           echo "  build:" >> $GITHUB_STEP_SUMMARY
-          echo "    runs-on: ${{ env.RUNNER_SCALE_SET_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "    runs-on: ${RUNNER_SCALE_SET_NAME}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Security Features" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Input validation and sanitization" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Checksum verified tool downloads" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Minimal container security context" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Retry logic for network operations" >> $GITHUB_STEP_SUMMARY

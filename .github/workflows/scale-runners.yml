@@ -30,168 +30,400 @@ on:
         type: string
 
 env:
-  CLUSTER_CONTEXT: do-sfo3-redducklabs-cluster
-  RELEASE_NAME: redducklabs-runners
+  CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+  RELEASE_NAME: ${{ vars.RELEASE_NAME || 'redducklabs-runners' }}
+
+# Use minimal permissions
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  scale:
-    name: Scale Runners - ${{ inputs.action }}
+  validate-inputs:
+    name: Validate Scaling Inputs
     runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.validate.outputs.action }}
+      min_runners: ${{ steps.validate.outputs.min_runners }}
+      max_runners: ${{ steps.validate.outputs.max_runners }}
+      namespace: ${{ steps.validate.outputs.namespace }}
+    
+    steps:
+      - name: Validate and sanitize inputs
+        id: validate
+        run: |
+          echo "🔍 Validating scaling inputs..."
+          
+          # Get and validate inputs
+          ACTION="${{ github.event.inputs.action }}"
+          MIN_RUNNERS="${{ github.event.inputs.min_runners }}"
+          MAX_RUNNERS="${{ github.event.inputs.max_runners }}"
+          NAMESPACE="${{ github.event.inputs.namespace }}"
+          
+          # Validate action is one of allowed values
+          case "${ACTION}" in
+            status|scale-up|scale-down|scale-max|scale-custom)
+              echo "✅ Valid action: ${ACTION}"
+              ;;
+            *)
+              echo "❌ Error: Invalid action '${ACTION}'"
+              exit 1
+              ;;
+          esac
+          
+          # Validate namespace format (DNS-1123 label)
+          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+            echo "❌ Error: namespace must be a valid DNS-1123 label"
+            exit 1
+          fi
+          
+          # For custom scaling, validate numeric inputs
+          if [ "${ACTION}" = "scale-custom" ]; then
+            # Validate min_runners is numeric
+            if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
+              echo "❌ Error: min_runners must be a number"
+              exit 1
+            fi
+            
+            # Validate max_runners is numeric
+            if ! [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]]; then
+              echo "❌ Error: max_runners must be a number"
+              exit 1
+            fi
+            
+            # Validate min <= max
+            if [ "${MIN_RUNNERS}" -gt "${MAX_RUNNERS}" ]; then
+              echo "❌ Error: min_runners (${MIN_RUNNERS}) cannot be greater than max_runners (${MAX_RUNNERS})"
+              exit 1
+            fi
+            
+            # Validate reasonable limits
+            if [ "${MIN_RUNNERS}" -lt 0 ] || [ "${MIN_RUNNERS}" -gt 20 ]; then
+              echo "❌ Error: min_runners must be between 0 and 20"
+              exit 1
+            fi
+            
+            if [ "${MAX_RUNNERS}" -lt 1 ] || [ "${MAX_RUNNERS}" -gt 50 ]; then
+              echo "❌ Error: max_runners must be between 1 and 50"
+              exit 1
+            fi
+          fi
+          
+          # Set validated outputs
+          echo "action=${ACTION}" >> $GITHUB_OUTPUT
+          echo "min_runners=${MIN_RUNNERS}" >> $GITHUB_OUTPUT
+          echo "max_runners=${MAX_RUNNERS}" >> $GITHUB_OUTPUT
+          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
+          
+          echo "✅ All inputs validated successfully"
+          echo "  Action: ${ACTION}"
+          echo "  Namespace: ${NAMESPACE}"
+          if [ "${ACTION}" = "scale-custom" ]; then
+            echo "  Min runners: ${MIN_RUNNERS}"
+            echo "  Max runners: ${MAX_RUNNERS}"
+          fi
+
+  scale:
+    name: Scale Runners - ${{ needs.validate-inputs.outputs.action }}
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    timeout-minutes: 10
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Install kubectl
-        run: |
-          echo "📦 Installing kubectl..."
-          curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-      
-      - name: Install Helm
-        run: |
-          echo "📦 Installing Helm..."
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-          chmod 700 get_helm.sh
-          DESIRED_VERSION=v3.17.4 ./get_helm.sh
-      
-      - name: Install doctl
-        run: |
-          echo "📦 Installing DigitalOcean CLI..."
-          cd /tmp
-          wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz
-          tar xf doctl-1.138.0-linux-amd64.tar.gz
-          sudo mv doctl /usr/local/bin
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
       
       - name: Configure Kubernetes access
         run: |
           echo "🔧 Configuring Kubernetes access..."
-          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
-          doctl kubernetes cluster kubeconfig save ${{ env.CLUSTER_CONTEXT }}
-          kubectl config use-context ${{ env.CLUSTER_CONTEXT }}
+          
+          # Validate DO_TOKEN
+          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+          
+          # Initialize doctl with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring doctl..."
+            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+              echo "✅ DigitalOcean authentication configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to authenticate with DigitalOcean"
+              exit 1
+            else
+              echo "⚠️ Authentication failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
+          # Configure kubectl with retry logic
+          echo "Configuring kubectl for cluster ${CLUSTER_CONTEXT}..."
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring kubectl..."
+            if doctl kubernetes cluster kubeconfig save "${CLUSTER_CONTEXT}"; then
+              kubectl config use-context "${CLUSTER_CONTEXT}"
+              echo "✅ Kubernetes access configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to configure kubectl"
+              exit 1
+            else
+              echo "⚠️ kubectl configuration failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
       
       - name: Check current status
         id: current-status
         run: |
           echo "📊 Checking current runner status..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          # Get current values
-          CURRENT_MIN=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.minRunners // 2')
-          CURRENT_MAX=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.maxRunners // 4')
+          # Check if release exists
+          if ! helm list -n "${NAMESPACE}" 2>/dev/null | grep -q "${RELEASE_NAME}"; then
+            echo "❌ Error: Runner deployment '${RELEASE_NAME}' not found in namespace '${NAMESPACE}'"
+            echo "Please deploy runners first using the 'Deploy GitHub Runners' workflow"
+            exit 1
+          fi
           
-          echo "current_min=$CURRENT_MIN" >> $GITHUB_OUTPUT
-          echo "current_max=$CURRENT_MAX" >> $GITHUB_OUTPUT
+          # Get current values with error handling
+          VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
+          if [ $? -ne 0 ]; then
+            echo "❌ Error: Could not retrieve current Helm values"
+            exit 1
+          fi
+          
+          CURRENT_MIN=$(echo "${VALUES_JSON}" | jq -r '.minRunners // 2')
+          CURRENT_MAX=$(echo "${VALUES_JSON}" | jq -r '.maxRunners // 4')
+          
+          # Validate retrieved values
+          if ! [[ "${CURRENT_MIN}" =~ ^[0-9]+$ ]] || ! [[ "${CURRENT_MAX}" =~ ^[0-9]+$ ]]; then
+            echo "❌ Error: Invalid current values retrieved from Helm"
+            exit 1
+          fi
+          
+          echo "current_min=${CURRENT_MIN}" >> $GITHUB_OUTPUT
+          echo "current_max=${CURRENT_MAX}" >> $GITHUB_OUTPUT
           
           echo "Current configuration:"
-          echo "  Min runners: $CURRENT_MIN"
-          echo "  Max runners: $CURRENT_MAX"
+          echo "  Min runners: ${CURRENT_MIN}"
+          echo "  Max runners: ${CURRENT_MAX}"
           
           # Get pod count
-          POD_COUNT=$(kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} --no-headers 2>/dev/null | wc -l)
-          echo "pod_count=$POD_COUNT" >> $GITHUB_OUTPUT
-          echo "  Active pods: $POD_COUNT"
+          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
+          echo "pod_count=${POD_COUNT}" >> $GITHUB_OUTPUT
+          echo "  Active pods: ${POD_COUNT}"
       
       - name: Display status
-        if: inputs.action == 'status'
+        if: needs.validate-inputs.outputs.action == 'status'
         run: |
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          
           echo "## 📊 Runner Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Current Configuration" >> $GITHUB_STEP_SUMMARY
           echo "- **Min Runners**: ${{ steps.current-status.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Max Runners**: ${{ steps.current-status.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Active Pods**: ${{ steps.current-status.outputs.pod_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace**: \`${NAMESPACE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release**: \`${RELEASE_NAME}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Pod Details" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }} >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
       
       - name: Scale up (default)
-        if: inputs.action == 'scale-up'
+        if: needs.validate-inputs.outputs.action == 'scale-up'
         run: |
           echo "⬆️ Scaling up to default configuration..."
-          helm upgrade ${{ env.RELEASE_NAME }} \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace ${{ inputs.namespace }} \
-            --reuse-values \
-            --set minRunners=2 \
-            --set maxRunners=4 \
-            --wait
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          echo "✅ Scaled to: Min=2, Max=4"
+          # Scale with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Scaling up..."
+            if helm upgrade "${RELEASE_NAME}" \
+              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+              --namespace "${NAMESPACE}" \
+              --reuse-values \
+              --set minRunners=2 \
+              --set maxRunners=4 \
+              --wait \
+              --timeout 180s; then
+              
+              echo "✅ Scaled to: Min=2, Max=4"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to scale up runners"
+              exit 1
+            else
+              echo "⚠️ Scaling failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
           echo "## ✅ Scaled Up" >> $GITHUB_STEP_SUMMARY
           echo "Runners scaled to: **Min=2, Max=4**" >> $GITHUB_STEP_SUMMARY
       
       - name: Scale down (minimal)
-        if: inputs.action == 'scale-down'
+        if: needs.validate-inputs.outputs.action == 'scale-down'
         run: |
           echo "⬇️ Scaling down to minimal configuration..."
-          helm upgrade ${{ env.RELEASE_NAME }} \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace ${{ inputs.namespace }} \
-            --reuse-values \
-            --set minRunners=0 \
-            --set maxRunners=1 \
-            --wait
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          echo "✅ Scaled to: Min=0, Max=1"
+          # Scale with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Scaling down..."
+            if helm upgrade "${RELEASE_NAME}" \
+              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+              --namespace "${NAMESPACE}" \
+              --reuse-values \
+              --set minRunners=0 \
+              --set maxRunners=1 \
+              --wait \
+              --timeout 180s; then
+              
+              echo "✅ Scaled to: Min=0, Max=1"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to scale down runners"
+              exit 1
+            else
+              echo "⚠️ Scaling failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
           echo "## ✅ Scaled Down" >> $GITHUB_STEP_SUMMARY
           echo "Runners scaled to: **Min=0, Max=1** (minimal)" >> $GITHUB_STEP_SUMMARY
       
       - name: Scale to maximum
-        if: inputs.action == 'scale-max'
+        if: needs.validate-inputs.outputs.action == 'scale-max'
         run: |
           echo "⬆️⬆️ Scaling to maximum configuration..."
-          helm upgrade ${{ env.RELEASE_NAME }} \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace ${{ inputs.namespace }} \
-            --reuse-values \
-            --set minRunners=4 \
-            --set maxRunners=8 \
-            --wait
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          echo "✅ Scaled to: Min=4, Max=8"
+          # Scale with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Scaling to maximum..."
+            if helm upgrade "${RELEASE_NAME}" \
+              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+              --namespace "${NAMESPACE}" \
+              --reuse-values \
+              --set minRunners=4 \
+              --set maxRunners=8 \
+              --wait \
+              --timeout 180s; then
+              
+              echo "✅ Scaled to: Min=4, Max=8"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to scale to maximum"
+              exit 1
+            else
+              echo "⚠️ Scaling failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
           echo "## ✅ Scaled to Maximum" >> $GITHUB_STEP_SUMMARY
           echo "Runners scaled to: **Min=4, Max=8** (maximum)" >> $GITHUB_STEP_SUMMARY
       
       - name: Custom scaling
-        if: inputs.action == 'scale-custom'
+        if: needs.validate-inputs.outputs.action == 'scale-custom'
         run: |
           echo "🎯 Scaling to custom configuration..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
+          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
           
-          # Validate inputs
-          if [ ${{ inputs.min_runners }} -gt ${{ inputs.max_runners }} ]; then
-            echo "❌ Error: min_runners cannot be greater than max_runners"
-            exit 1
-          fi
+          # Scale with retry logic
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Custom scaling..."
+            if helm upgrade "${RELEASE_NAME}" \
+              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+              --namespace "${NAMESPACE}" \
+              --reuse-values \
+              --set minRunners="${MIN_RUNNERS}" \
+              --set maxRunners="${MAX_RUNNERS}" \
+              --wait \
+              --timeout 180s; then
+              
+              echo "✅ Scaled to: Min=${MIN_RUNNERS}, Max=${MAX_RUNNERS}"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to apply custom scaling"
+              exit 1
+            else
+              echo "⚠️ Scaling failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
           
-          helm upgrade ${{ env.RELEASE_NAME }} \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace ${{ inputs.namespace }} \
-            --reuse-values \
-            --set minRunners=${{ inputs.min_runners }} \
-            --set maxRunners=${{ inputs.max_runners }} \
-            --wait
-          
-          echo "✅ Scaled to: Min=${{ inputs.min_runners }}, Max=${{ inputs.max_runners }}"
           echo "## ✅ Custom Scaling Applied" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=${{ inputs.min_runners }}, Max=${{ inputs.max_runners }}**" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=${MIN_RUNNERS}, Max=${MAX_RUNNERS}**" >> $GITHUB_STEP_SUMMARY
       
       - name: Verify scaling
-        if: inputs.action != 'status'
+        if: needs.validate-inputs.outputs.action != 'status'
         run: |
           echo ""
           echo "⏳ Waiting for scaling to take effect..."
           sleep 10
           
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          
           echo "📊 New runner status:"
-          kubectl get pods -n ${{ inputs.namespace }} -l runner-deployment-name=${{ env.RELEASE_NAME }}
+          kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}"
           
-          # Get new values
-          NEW_MIN=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.minRunners // 0')
-          NEW_MAX=$(helm get values ${{ env.RELEASE_NAME }} -n ${{ inputs.namespace }} -o json | jq -r '.maxRunners // 0')
-          
-          echo ""
-          echo "### New Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Min Runners**: $NEW_MIN" >> $GITHUB_STEP_SUMMARY
-          echo "- **Max Runners**: $NEW_MAX" >> $GITHUB_STEP_SUMMARY
+          # Get new values with error handling
+          NEW_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
+          if [ $? -eq 0 ]; then
+            NEW_MIN=$(echo "${NEW_VALUES}" | jq -r '.minRunners // 0')
+            NEW_MAX=$(echo "${NEW_VALUES}" | jq -r '.maxRunners // 0')
+            
+            echo ""
+            echo "### New Configuration" >> $GITHUB_STEP_SUMMARY
+            echo "- **Min Runners**: ${NEW_MIN}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Max Runners**: ${NEW_MAX}" >> $GITHUB_STEP_SUMMARY
+            
+            # Verify scaling worked as expected
+            case "${{ needs.validate-inputs.outputs.action }}" in
+              scale-up)
+                if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "4" ]; then
+                  echo "✅ Scale up verified"
+                else
+                  echo "⚠️ Scale up may not have applied correctly"
+                fi
+                ;;
+              scale-down)
+                if [ "${NEW_MIN}" = "0" ] && [ "${NEW_MAX}" = "1" ]; then
+                  echo "✅ Scale down verified"
+                else
+                  echo "⚠️ Scale down may not have applied correctly"
+                fi
+                ;;
+              scale-max)
+                if [ "${NEW_MIN}" = "4" ] && [ "${NEW_MAX}" = "8" ]; then
+                  echo "✅ Scale to maximum verified"
+                else
+                  echo "⚠️ Scale to maximum may not have applied correctly"
+                fi
+                ;;
+              scale-custom)
+                if [ "${NEW_MIN}" = "${{ needs.validate-inputs.outputs.min_runners }}" ] && [ "${NEW_MAX}" = "${{ needs.validate-inputs.outputs.max_runners }}" ]; then
+                  echo "✅ Custom scaling verified"
+                else
+                  echo "⚠️ Custom scaling may not have applied correctly"
+                fi
+                ;;
+            esac
+          else
+            echo "⚠️ Could not verify new configuration"
+          fi

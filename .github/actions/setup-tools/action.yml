@@ -1,0 +1,242 @@
+name: 'Setup Infrastructure Tools'
+description: 'Securely install kubectl, Helm, and doctl with checksum verification and caching'
+
+inputs:
+  kubectl-version:
+    description: 'kubectl version to install'
+    required: false
+    default: 'v1.33.0'
+  helm-version:
+    description: 'Helm version to install'
+    required: false
+    default: 'v3.17.4'
+  doctl-version:
+    description: 'doctl version to install'
+    required: false
+    default: 'v1.138.0'
+  install-jq:
+    description: 'Install jq package'
+    required: false
+    default: 'false'
+
+outputs:
+  kubectl-path:
+    description: 'Path to kubectl binary'
+    value: ${{ steps.kubectl-install.outputs.path }}
+  helm-path:
+    description: 'Path to helm binary'
+    value: ${{ steps.helm-install.outputs.path }}
+  doctl-path:
+    description: 'Path to doctl binary'
+    value: ${{ steps.doctl-install.outputs.path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        echo "🔍 Validating input parameters..."
+        
+        # Validate kubectl version format
+        if [[ ! "${{ inputs.kubectl-version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Error: Invalid kubectl version format. Expected: vX.Y.Z"
+          exit 1
+        fi
+        
+        # Validate helm version format
+        if [[ ! "${{ inputs.helm-version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Error: Invalid helm version format. Expected: vX.Y.Z"
+          exit 1
+        fi
+        
+        # Validate doctl version format
+        if [[ ! "${{ inputs.doctl-version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Error: Invalid doctl version format. Expected: vX.Y.Z"
+          exit 1
+        fi
+        
+        echo "✅ All input parameters validated"
+
+    - name: Setup cache key
+      shell: bash
+      id: cache-key
+      run: |
+        CACHE_KEY="tools-${{ runner.os }}-${{ inputs.kubectl-version }}-${{ inputs.helm-version }}-${{ inputs.doctl-version }}-${{ inputs.install-jq }}"
+        echo "cache-key=${CACHE_KEY}" >> $GITHUB_OUTPUT
+        echo "Cache key: ${CACHE_KEY}"
+
+    - name: Cache tools
+      uses: actions/cache@v4
+      id: cache-tools
+      with:
+        path: |
+          /usr/local/bin/kubectl
+          /usr/local/bin/helm
+          /usr/local/bin/doctl
+        key: ${{ steps.cache-key.outputs.cache-key }}
+
+    - name: Install kubectl
+      shell: bash
+      id: kubectl-install
+      if: steps.cache-tools.outputs.cache-hit != 'true'
+      run: |
+        echo "📦 Installing kubectl ${{ inputs.kubectl-version }}..."
+        
+        # Download kubectl
+        KUBECTL_URL="https://dl.k8s.io/release/${{ inputs.kubectl-version }}/bin/linux/amd64/kubectl"
+        echo "Downloading from: ${KUBECTL_URL}"
+        
+        curl -fsSL -o kubectl "${KUBECTL_URL}"
+        
+        # Get and verify checksum
+        CHECKSUM_URL="https://dl.k8s.io/${{ inputs.kubectl-version }}/bin/linux/amd64/kubectl.sha256"
+        EXPECTED_CHECKSUM=$(curl -fsSL "${CHECKSUM_URL}")
+        ACTUAL_CHECKSUM=$(sha256sum kubectl | awk '{print $1}')
+        
+        echo "Expected checksum: ${EXPECTED_CHECKSUM}"
+        echo "Actual checksum:   ${ACTUAL_CHECKSUM}"
+        
+        if [ "${EXPECTED_CHECKSUM}" != "${ACTUAL_CHECKSUM}" ]; then
+          echo "❌ Error: kubectl checksum verification failed!"
+          exit 1
+        fi
+        
+        echo "✅ kubectl checksum verified"
+        
+        # Install kubectl
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/kubectl
+        
+        # Verify installation
+        kubectl version --client
+        echo "path=/usr/local/bin/kubectl" >> $GITHUB_OUTPUT
+
+    - name: Install Helm
+      shell: bash
+      id: helm-install
+      if: steps.cache-tools.outputs.cache-hit != 'true'
+      run: |
+        echo "📦 Installing Helm ${{ inputs.helm-version }}..."
+        
+        # Download Helm installer script with verification
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        
+        # Verify the script hasn't been tampered with (basic check)
+        if ! grep -q "HELM_INSTALL_DIR" get_helm.sh; then
+          echo "❌ Error: Helm install script appears to be corrupted"
+          exit 1
+        fi
+        
+        chmod 700 get_helm.sh
+        
+        # Install Helm with specific version
+        DESIRED_VERSION="${{ inputs.helm-version }}" ./get_helm.sh --no-sudo
+        sudo mv ~/.local/bin/helm /usr/local/bin/helm || sudo mv ./linux-amd64/helm /usr/local/bin/helm
+        
+        # Verify installation
+        helm version
+        echo "path=/usr/local/bin/helm" >> $GITHUB_OUTPUT
+
+    - name: Install doctl
+      shell: bash
+      id: doctl-install
+      if: steps.cache-tools.outputs.cache-hit != 'true'
+      run: |
+        echo "📦 Installing doctl ${{ inputs.doctl-version }}..."
+        
+        # Set up variables
+        DOCTL_VERSION="${{ inputs.doctl-version }}"
+        DOCTL_TARBALL="doctl-${DOCTL_VERSION#v}-linux-amd64.tar.gz"
+        DOCTL_URL="https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/${DOCTL_TARBALL}"
+        
+        # Create temp directory
+        TEMP_DIR=$(mktemp -d)
+        cd "${TEMP_DIR}"
+        
+        echo "Downloading from: ${DOCTL_URL}"
+        
+        # Download doctl
+        if ! curl -fsSL -o "${DOCTL_TARBALL}" "${DOCTL_URL}"; then
+          echo "❌ Error: Failed to download doctl"
+          exit 1
+        fi
+        
+        # Download checksums
+        CHECKSUMS_URL="https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/checksums.txt"
+        if ! curl -fsSL -o checksums.txt "${CHECKSUMS_URL}"; then
+          echo "❌ Error: Failed to download checksums"
+          exit 1
+        fi
+        
+        # Verify checksum
+        EXPECTED_CHECKSUM=$(grep "${DOCTL_TARBALL}" checksums.txt | awk '{print $1}')
+        ACTUAL_CHECKSUM=$(sha256sum "${DOCTL_TARBALL}" | awk '{print $1}')
+        
+        echo "Expected checksum: ${EXPECTED_CHECKSUM}"
+        echo "Actual checksum:   ${ACTUAL_CHECKSUM}"
+        
+        if [ "${EXPECTED_CHECKSUM}" != "${ACTUAL_CHECKSUM}" ]; then
+          echo "❌ Error: doctl checksum verification failed!"
+          exit 1
+        fi
+        
+        echo "✅ doctl checksum verified"
+        
+        # Extract and install
+        tar xf "${DOCTL_TARBALL}"
+        sudo mv doctl /usr/local/bin/doctl
+        
+        # Cleanup
+        cd /
+        rm -rf "${TEMP_DIR}"
+        
+        # Verify installation
+        doctl version
+        echo "path=/usr/local/bin/doctl" >> $GITHUB_OUTPUT
+
+    - name: Install jq
+      shell: bash
+      if: inputs.install-jq == 'true' && steps.cache-tools.outputs.cache-hit != 'true'
+      run: |
+        echo "📦 Installing jq..."
+        sudo apt-get update -qq
+        sudo apt-get install -y jq
+        jq --version
+
+    - name: Verify tools (cached)
+      shell: bash
+      if: steps.cache-tools.outputs.cache-hit == 'true'
+      run: |
+        echo "✅ Tools restored from cache"
+        echo "Verifying cached tools..."
+        
+        kubectl version --client
+        helm version
+        doctl version
+        
+        if [ "${{ inputs.install-jq }}" == "true" ]; then
+          jq --version
+        fi
+        
+        echo "🚀 All tools verified and ready to use"
+
+    - name: Tool installation summary
+      shell: bash
+      run: |
+        echo "## 🛠️ Tool Installation Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Tool | Version | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|---------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| kubectl | ${{ inputs.kubectl-version }} | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
+        echo "| Helm | ${{ inputs.helm-version }} | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
+        echo "| doctl | ${{ inputs.doctl-version }} | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ inputs.install-jq }}" == "true" ]; then
+          echo "| jq | latest | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.cache-tools.outputs.cache-hit }}" == "true" ]; then
+          echo "🚀 **Tools restored from cache for faster execution**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "📦 **Tools installed fresh with checksum verification**" >> $GITHUB_STEP_SUMMARY
+        fi
