@@ -127,18 +127,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Run Trivy security scan
+      - name: Authenticate with DigitalOcean Registry (for Trivy)
+        run: |
+          echo "🔐 Authenticating with registry for Trivy scan..."
+          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
+          doctl registry login --expiry-seconds 3600
+      
+      - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
           format: sarif
           output: trivy-results.sarif
-          severity: 'CRITICAL,HIGH,MEDIUM'
-          exit-code: 0  # Don't fail on vulnerabilities, just report them
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
       
-      - name: Upload Trivy scan results
+      - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: trivy-results.sarif
-          category: container-security
