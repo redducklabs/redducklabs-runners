@@ -38,23 +38,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     npm install -g npm@11.5.2 pnpm@latest && \
     rm -rf /var/lib/apt/lists/*
 
-# Install kubectl 1.33.0
-RUN curl -LO "https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl" && \
+# Install kubectl 1.33.3
+RUN curl -LO "https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl" && \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
     rm kubectl
 
-# Install Helm 3.17.4
+# Install Helm 3.18.5
 RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
     chmod 700 get_helm.sh && \
-    DESIRED_VERSION=v3.17.4 ./get_helm.sh && \
+    DESIRED_VERSION=v3.18.5 ./get_helm.sh && \
     rm get_helm.sh
 
-# Install doctl 1.138.0
+# Install doctl 1.139.0
 RUN cd /tmp && \
-    wget https://github.com/digitalocean/doctl/releases/download/v1.138.0/doctl-1.138.0-linux-amd64.tar.gz && \
-    tar xf doctl-1.138.0-linux-amd64.tar.gz && \
+    wget https://github.com/digitalocean/doctl/releases/download/v1.139.0/doctl-1.139.0-linux-amd64.tar.gz && \
+    tar xf doctl-1.139.0-linux-amd64.tar.gz && \
     mv doctl /usr/local/bin && \
-    rm doctl-1.138.0-linux-amd64.tar.gz
+    rm doctl-1.139.0-linux-amd64.tar.gz
 
 # Install Terraform 1.12.2
 RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
@@ -108,11 +108,38 @@ RUN python3.13 -m pip install --no-cache-dir \
 RUN apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+# Clean kubectl config to ensure no inherited contexts
+RUN rm -rf /root/.kube /home/runner/.kube
+
+# Create empty .kube directories with proper permissions
+RUN mkdir -p /home/runner/.kube && \
+    chown -R runner:runner /home/runner/.kube
+
 # Switch back to runner user
 USER runner
 
 # Set working directory
 WORKDIR /home/runner
 
+# Ensure KUBECONFIG points to user's directory (will be empty)
+ENV KUBECONFIG=/home/runner/.kube/config
+
+# Create entrypoint script to ensure clean kubectl state
+RUN echo '#!/bin/bash\n\
+# Clear any kubectl context that might be inherited\n\
+unset KUBERNETES_SERVICE_HOST\n\
+unset KUBERNETES_SERVICE_PORT\n\
+unset KUBERNETES_PORT\n\
+unset KUBERNETES_PORT_443_TCP\n\
+unset KUBERNETES_SERVICE_PORT_HTTPS\n\
+unset KUBERNETES_PORT_443_TCP_ADDR\n\
+unset KUBERNETES_PORT_443_TCP_PORT\n\
+unset KUBERNETES_PORT_443_TCP_PROTO\n\
+# Remove any config that might have been mounted\n\
+rm -rf /home/runner/.kube/config\n\
+# Execute the original runner script\n\
+exec /home/runner/run.sh "$@"' > /home/runner/entrypoint.sh && \
+    chmod +x /home/runner/entrypoint.sh
+
 # ARC expects this to be the default CMD
-CMD ["/home/runner/run.sh"]
+CMD ["/home/runner/entrypoint.sh"]
