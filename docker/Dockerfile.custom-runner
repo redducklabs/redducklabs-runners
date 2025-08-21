@@ -89,21 +89,38 @@ RUN wget https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconfo
     mv kubeconform /usr/local/bin && \
     rm kubeconform-linux-amd64.tar.gz
 
-# Note: Using pre-built binaries for security tools instead of building from source
+# Install Go 1.24.6 for building security tools from source (fixes CVE-2025-47907)
+RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
+    rm go1.24.6.linux-amd64.tar.gz
 
-# Install kubesec 2.14.2 (pre-built binary)
-RUN wget https://github.com/controlplaneio/kubesec/releases/download/v2.14.2/kubesec_linux_amd64.tar.gz && \
-    tar xf kubesec_linux_amd64.tar.gz && \
-    mv kubesec /usr/local/bin && \
-    rm kubesec_linux_amd64.tar.gz
+# Set Go environment variables
+ENV PATH=$PATH:/usr/local/go/bin
+ENV GOPATH=/tmp/go
+ENV GOCACHE=/tmp/go-cache
 
-# Install Trivy 0.65.0 (pre-built binary)
+# Build kubesec 2.14.2 from source with secure Go version (fixes CVE-2025-47907 & CVE-2025-8959)
+RUN mkdir -p $GOPATH/src && \
+    cd $GOPATH/src && \
+    git clone --depth 1 --branch v2.14.2 https://github.com/controlplaneio/kubesec.git && \
+    cd kubesec && \
+    go mod download && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o kubesec . && \
+    mv kubesec /usr/local/bin/kubesec && \
+    chmod +x /usr/local/bin/kubesec && \
+    cd / && \
+    rm -rf $GOPATH $GOCACHE
+
+# Clean up Go installation after building kubesec
+RUN rm -rf /usr/local/go
+
+# Install Trivy 0.65.0 (pre-built binary - released July 2025, built with secure Go version)
 RUN wget https://github.com/aquasecurity/trivy/releases/download/v0.65.0/trivy_0.65.0_Linux-64bit.tar.gz && \
     tar xf trivy_0.65.0_Linux-64bit.tar.gz && \
     mv trivy /usr/local/bin && \
     rm trivy_0.65.0_Linux-64bit.tar.gz
 
-# Install Docker buildx 0.27.0 (pre-built binary)
+# Install Docker buildx 0.27.0 (pre-built binary - released August 2025, built with secure Go version)
 RUN wget https://github.com/docker/buildx/releases/download/v0.27.0/buildx-v0.27.0.linux-amd64 && \
     chmod +x buildx-v0.27.0.linux-amd64 && \
     mv buildx-v0.27.0.linux-amd64 /usr/local/bin/docker-buildx && \
