@@ -41,19 +41,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     npm install -g npm@latest pnpm@latest && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.24.6 for building kubectl from source (fixes CVE-2025-47907)
+# Install Go 1.24.6 for building all Go-based tools (fixes CVE-2025-47907, CVE-2025-22874, CVE-2025-22869, CVE-2024-45337, CVE-2025-8959)
 RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
     rm go1.24.6.linux-amd64.tar.gz
 
-# Set Go environment variables for kubectl build
+# Set Go environment variables for all builds
 ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPATH=/tmp/go-kubectl
-ENV GOCACHE=/tmp/go-kubectl-cache
+ENV GOPATH=/tmp/go-builds
+ENV GOCACHE=/tmp/go-builds-cache
 
 # Build kubectl 1.33.3 from source with secure Go 1.24.6+ (fixes CVE-2025-47907)
-RUN mkdir -p $GOPATH/src && \
-    cd $GOPATH/src && \
+RUN mkdir -p $GOPATH/kubectl-src && \
+    cd $GOPATH/kubectl-src && \
     git clone --depth 1 --branch v1.33.3 https://github.com/kubernetes/kubernetes.git && \
     cd kubernetes && \
     go mod download && \
@@ -61,10 +61,7 @@ RUN mkdir -p $GOPATH/src && \
     mv kubectl /usr/local/bin/kubectl && \
     chmod +x /usr/local/bin/kubectl && \
     cd / && \
-    rm -rf $GOPATH $GOCACHE
-
-# Clean up Go installation after building kubectl
-RUN rm -rf /usr/local/go
+    rm -rf $GOPATH/kubectl-src
 
 # Install Helm 3.18.6 (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
 RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
@@ -72,19 +69,9 @@ RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/s
     DESIRED_VERSION=v3.18.6 ./get_helm.sh && \
     rm get_helm.sh
 
-# Install Go 1.24.6 for building doctl from source (fixes CVE-2025-47907)
-RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
-    rm go1.24.6.linux-amd64.tar.gz
-
-# Set Go environment variables for doctl build
-ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPATH=/tmp/go-doctl
-ENV GOCACHE=/tmp/go-doctl-cache
-
 # Build doctl 1.139.0 from source with secure Go 1.24.6+ (fixes CVE-2025-47907)
-RUN mkdir -p $GOPATH/src && \
-    cd $GOPATH/src && \
+RUN mkdir -p $GOPATH/doctl-src && \
+    cd $GOPATH/doctl-src && \
     git clone --depth 1 --branch v1.139.0 https://github.com/digitalocean/doctl.git && \
     cd doctl && \
     go mod download && \
@@ -92,10 +79,7 @@ RUN mkdir -p $GOPATH/src && \
     mv doctl /usr/local/bin/doctl && \
     chmod +x /usr/local/bin/doctl && \
     cd / && \
-    rm -rf $GOPATH $GOCACHE
-
-# Clean up Go installation after building doctl
-RUN rm -rf /usr/local/go
+    rm -rf $GOPATH/doctl-src
 
 # Install Terraform 1.12.2
 RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
@@ -124,19 +108,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     apt-get install gh -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.24.6 for building kubeconform from source (fixes CVE-2025-22874)
-RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
-    rm go1.24.6.linux-amd64.tar.gz
-
-# Set Go environment variables for kubeconform build
-ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPATH=/tmp/go-kubeconform
-ENV GOCACHE=/tmp/go-kubeconform-cache
-
 # Build kubeconform 0.7.0 from source with secure Go 1.24.6+ (fixes CVE-2025-22874)
-RUN mkdir -p /tmp/kubeconform-build && \
-    cd /tmp/kubeconform-build && \
+RUN mkdir -p $GOPATH/kubeconform-src && \
+    cd $GOPATH/kubeconform-src && \
     git clone --depth 1 --branch v0.7.0 https://github.com/yannh/kubeconform.git && \
     cd kubeconform && \
     go mod download && \
@@ -144,25 +118,12 @@ RUN mkdir -p /tmp/kubeconform-build && \
     mv kubeconform /usr/local/bin/kubeconform && \
     chmod +x /usr/local/bin/kubeconform && \
     cd / && \
-    rm -rf /tmp/kubeconform-build
-
-# Clean up Go installation after building kubeconform
-RUN rm -rf /usr/local/go
-
-# Install Go 1.24.6 for building security tools from source (fixes CVE-2025-47907)
-RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
-    rm go1.24.6.linux-amd64.tar.gz
-
-# Set Go environment variables
-ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPATH=/tmp/go
-ENV GOCACHE=/tmp/go-cache
+    rm -rf $GOPATH/kubeconform-src
 
 # Build kubesec 2.14.2 from source with secure Go 1.24.6+ (fixes CVE-2025-22869 & CVE-2024-45337)
 # This ensures the latest golang.org/x/crypto/ssh packages are used
-RUN mkdir -p $GOPATH/src && \
-    cd $GOPATH/src && \
+RUN mkdir -p $GOPATH/kubesec-src && \
+    cd $GOPATH/kubesec-src && \
     git clone --depth 1 --branch v2.14.2 https://github.com/controlplaneio/kubesec.git && \
     cd kubesec && \
     go get -u golang.org/x/crypto@latest && \
@@ -172,25 +133,12 @@ RUN mkdir -p $GOPATH/src && \
     mv kubesec /usr/local/bin/kubesec && \
     chmod +x /usr/local/bin/kubesec && \
     cd / && \
-    rm -rf $GOPATH $GOCACHE
-
-# Clean up Go installation after building kubesec
-RUN rm -rf /usr/local/go
-
-# Reinstall Go 1.24.6 for building Trivy from source (fixes CVE-2025-8959)
-RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
-    rm go1.24.6.linux-amd64.tar.gz
-
-# Set Go environment variables for Trivy build
-ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPATH=/tmp/go-trivy
-ENV GOCACHE=/tmp/go-trivy-cache
+    rm -rf $GOPATH/kubesec-src
 
 # Build Trivy from source with go-getter v1.7.9+ security fix (fixes CVE-2025-8959)
 # Using latest stable release with updated dependencies
-RUN mkdir -p $GOPATH/src && \
-    cd $GOPATH/src && \
+RUN mkdir -p $GOPATH/trivy-src && \
+    cd $GOPATH/trivy-src && \
     git clone https://github.com/aquasecurity/trivy.git && \
     cd trivy && \
     git checkout $(git describe --tags $(git rev-list --tags --max-count=1)) && \
@@ -201,10 +149,10 @@ RUN mkdir -p $GOPATH/src && \
     mv trivy /usr/local/bin/trivy && \
     chmod +x /usr/local/bin/trivy && \
     cd / && \
-    rm -rf $GOPATH $GOCACHE
+    rm -rf $GOPATH/trivy-src
 
-# Clean up Go installation after building Trivy
-RUN rm -rf /usr/local/go
+# Clean up Go installation and cache after building all tools
+RUN rm -rf /usr/local/go $GOPATH $GOCACHE
 
 # Install Docker buildx 0.27.0 (pre-built binary - released August 2025, built with secure Go version)
 RUN wget https://github.com/docker/buildx/releases/download/v0.27.0/buildx-v0.27.0.linux-amd64 && \
