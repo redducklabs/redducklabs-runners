@@ -216,6 +216,12 @@ cd scripts/
 5. **Network Policies** - Implement Kubernetes network policies (recommended)
 6. **RBAC** - Use minimal permissions for service accounts
 
+### 📄 Security Documentation
+
+- **[Security Guide](docs/SECURITY.md)** - Comprehensive security practices, monitoring, and incident response
+- **[Security Dismissals](SECURITY-DISMISSALS.md)** - Risk assessment for accepted base image vulnerabilities
+- **[Security Validation Plan](SECURITY-VALIDATION-PLAN.md)** - Testing procedures for security controls
+
 ### 🛡️ Security Fixes
 
 **CVE-2025-54388 (MEDIUM)** - Fixed Docker firewalld vulnerability:

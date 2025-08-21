@@ -63,6 +63,31 @@ Emergency shutdown for all runners.
 - Force delete all runner pods
 - Requires typing 'STOP' to confirm
 
+### 🔒 dismiss-base-image-vulnerabilities.sh
+Security alert dismissal script for base image vulnerabilities.
+
+```bash
+./dismiss-base-image-vulnerabilities.sh
+```
+
+**Purpose:** Dismisses security alerts that originate from the official GitHub Actions runner base image (`ghcr.io/actions/actions-runner:latest`) and cannot be fixed without breaking runner compatibility.
+
+**Covered Vulnerabilities:**
+- CVE-2025-47907: Container runtime components (alerts 11,10,8,6,5,4,3)
+- CVE-2024-21538: Node.js cross-spawn vulnerability (alert 2)
+
+**Features:**
+- Interactive confirmation prompts
+- Batch dismissal of multiple alerts
+- Detailed dismissal comments with risk justification
+- Verification of dismissal success
+- Links to comprehensive risk assessment in `SECURITY-DISMISSALS.md`
+
+**Requirements:**
+- GitHub CLI (`gh`) installed and authenticated
+- Repository admin permissions for security alert management
+- Review and approval of risk acceptance in `SECURITY-DISMISSALS.md`
+
 ## Common Operations
 
 ### Scale for high load
