@@ -41,10 +41,30 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     npm install -g npm@latest pnpm@latest && \
     rm -rf /var/lib/apt/lists/*
 
-# Install kubectl 1.33.3
-RUN curl -LO "https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl" && \
-    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
-    rm kubectl
+# Install Go 1.24.6 for building kubectl from source (fixes CVE-2025-47907)
+RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
+    rm go1.24.6.linux-amd64.tar.gz
+
+# Set Go environment variables for kubectl build
+ENV PATH=$PATH:/usr/local/go/bin
+ENV GOPATH=/tmp/go-kubectl
+ENV GOCACHE=/tmp/go-kubectl-cache
+
+# Build kubectl 1.33.3 from source with secure Go 1.24.6+ (fixes CVE-2025-47907)
+RUN mkdir -p $GOPATH/src && \
+    cd $GOPATH/src && \
+    git clone --depth 1 --branch v1.33.3 https://github.com/kubernetes/kubernetes.git && \
+    cd kubernetes && \
+    go mod download && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o kubectl ./cmd/kubectl && \
+    mv kubectl /usr/local/bin/kubectl && \
+    chmod +x /usr/local/bin/kubectl && \
+    cd / && \
+    rm -rf $GOPATH $GOCACHE
+
+# Clean up Go installation after building kubectl
+RUN rm -rf /usr/local/go
 
 # Install Helm 3.18.6 (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
 RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
@@ -52,12 +72,30 @@ RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/s
     DESIRED_VERSION=v3.18.6 ./get_helm.sh && \
     rm get_helm.sh
 
-# Install doctl 1.139.0
-RUN cd /tmp && \
-    wget https://github.com/digitalocean/doctl/releases/download/v1.139.0/doctl-1.139.0-linux-amd64.tar.gz && \
-    tar xf doctl-1.139.0-linux-amd64.tar.gz && \
-    mv doctl /usr/local/bin && \
-    rm doctl-1.139.0-linux-amd64.tar.gz
+# Install Go 1.24.6 for building doctl from source (fixes CVE-2025-47907)
+RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
+    rm go1.24.6.linux-amd64.tar.gz
+
+# Set Go environment variables for doctl build
+ENV PATH=$PATH:/usr/local/go/bin
+ENV GOPATH=/tmp/go-doctl
+ENV GOCACHE=/tmp/go-doctl-cache
+
+# Build doctl 1.139.0 from source with secure Go 1.24.6+ (fixes CVE-2025-47907)
+RUN mkdir -p $GOPATH/src && \
+    cd $GOPATH/src && \
+    git clone --depth 1 --branch v1.139.0 https://github.com/digitalocean/doctl.git && \
+    cd doctl && \
+    go mod download && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o doctl . && \
+    mv doctl /usr/local/bin/doctl && \
+    chmod +x /usr/local/bin/doctl && \
+    cd / && \
+    rm -rf $GOPATH $GOCACHE
+
+# Clean up Go installation after building doctl
+RUN rm -rf /usr/local/go
 
 # Install Terraform 1.12.2
 RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
