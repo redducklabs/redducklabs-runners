@@ -87,25 +87,52 @@ RUN wget https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconfo
     mv kubeconform /usr/local/bin && \
     rm kubeconform-linux-amd64.tar.gz
 
-# Install kubesec 2.14.2
-RUN wget https://github.com/controlplaneio/kubesec/releases/download/v2.14.2/kubesec_linux_amd64.tar.gz && \
-    tar xf kubesec_linux_amd64.tar.gz && \
-    mv kubesec /usr/local/bin && \
-    rm kubesec_linux_amd64.tar.gz
+# Install Go 1.24.6 to build security tools from source
+RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
+    rm go1.24.6.linux-amd64.tar.gz
 
-# Install Trivy 0.65.0
-RUN wget https://github.com/aquasecurity/trivy/releases/download/v0.65.0/trivy_0.65.0_Linux-64bit.tar.gz && \
-    tar xf trivy_0.65.0_Linux-64bit.tar.gz && \
-    mv trivy /usr/local/bin && \
-    rm trivy_0.65.0_Linux-64bit.tar.gz
+# Set Go environment
+ENV PATH=/usr/local/go/bin:$PATH
+ENV GOPATH=/tmp/go
+ENV GO111MODULE=on
+
+# Install kubesec from source with Go 1.24.6
+RUN cd /tmp && \
+    git clone https://github.com/controlplaneio/kubesec.git && \
+    cd kubesec && \
+    git checkout v2.14.2 && \
+    /usr/local/go/bin/go build -o /usr/local/bin/kubesec ./cmd/kubesec && \
+    cd / && rm -rf /tmp/kubesec
+
+# Install Trivy from source with Go 1.24.6
+RUN cd /tmp && \
+    git clone https://github.com/aquasecurity/trivy.git && \
+    cd trivy && \
+    git checkout v0.65.0 && \
+    /usr/local/go/bin/go build -o /usr/local/bin/trivy ./cmd/trivy && \
+    cd / && rm -rf /tmp/trivy
+
+# Install latest Docker buildx from source with Go 1.24.6
+RUN cd /tmp && \
+    git clone https://github.com/docker/buildx.git && \
+    cd buildx && \
+    git checkout $(git describe --tags `git rev-list --tags --max-count=1`) && \
+    /usr/local/go/bin/go build -o /usr/local/bin/docker-buildx ./cmd/buildx && \
+    mkdir -p /usr/local/lib/docker/cli-plugins && \
+    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx && \
+    cd / && rm -rf /tmp/buildx
 
 # Install Python development tools
 RUN python3.13 -m pip install --no-cache-dir \
     black flake8 mypy ruff pytest pytest-cov \
     requests boto3 pyyaml
 
-# Clean up
-RUN apt-get clean && \
+# Clean up Go cache and installation files, then remove Go
+RUN /usr/local/go/bin/go clean -cache -modcache && \
+    rm -rf $GOPATH && \
+    rm -rf /usr/local/go && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Clean kubectl config to ensure no inherited contexts

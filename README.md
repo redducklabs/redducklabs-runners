@@ -100,8 +100,11 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 
 ### Security & Validation
 - kubeconform 0.7.0 - Kubernetes manifest validation
-- kubesec 2.14.2 - Security risk analysis
-- Trivy 0.65.0 - Vulnerability scanner
+- kubesec 2.14.2 - Security risk analysis (built with Go 1.24.6+)
+- Trivy 0.65.0 - Vulnerability scanner (built with Go 1.24.6+)
+- Docker buildx - Latest version (built with Go 1.24.6+)
+
+**Security Note**: All Go-based tools are compiled from source using Go 1.24.6 to address CVE-2025-47907 and related stdlib vulnerabilities.
 
 ### Database Clients
 - PostgreSQL client
@@ -212,6 +215,15 @@ cd scripts/
 4. **Resource Limits** - Always set CPU/memory limits
 5. **Network Policies** - Implement Kubernetes network policies (recommended)
 6. **RBAC** - Use minimal permissions for service accounts
+
+### 🛡️ Security Fixes
+
+**CVE-2025-47907 (HIGH)** - Fixed Go stdlib vulnerabilities in database/sql Postgres operations:
+- **Trivy**: Built from source with Go 1.24.6+ (was stdlib v1.24.4)
+- **kubesec**: Built from source with Go 1.24.6+ (was stdlib v1.23.1)  
+- **docker-buildx**: Built from source with Go 1.24.6+ (was stdlib v1.24.5)
+
+All Go-based security tools now use the latest Go compiler to ensure no vulnerable stdlib versions are present.
 
 ## 🐛 Troubleshooting
 
