@@ -75,7 +75,7 @@ RUN mkdir -p $GOPATH/doctl-src && \
     git clone --depth 1 --branch v1.139.0 https://github.com/digitalocean/doctl.git && \
     cd doctl && \
     go mod download && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o doctl . && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o doctl ./cmd/doctl && \
     mv doctl /usr/local/bin/doctl && \
     chmod +x /usr/local/bin/doctl && \
     cd / && \
