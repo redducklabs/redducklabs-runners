@@ -415,6 +415,44 @@ trivy image registry.digitalocean.com/redducklabs/github-runner:latest
 trivy k8s cluster --report summary
 ```
 
+## 🔒 Security Vulnerability Remediation
+
+### CVE-2025-8959: HashiCorp go-getter Symlink Attack Vulnerability
+
+**Status:** RESOLVED  
+**Severity:** HIGH  
+**Date Fixed:** August 21, 2025
+
+**Vulnerability Description:**
+HashiCorp's go-getter library subdirectory download feature was vulnerable to symlink attacks leading to unauthorized read access beyond the designated directory boundaries.
+
+**Affected Component:**
+- Trivy security scanner (included in custom runner image)
+- go-getter library dependency v1.7.8
+
+**Remediation Action:**
+Updated Trivy installation in `docker/Dockerfile.custom-runner` to:
+1. Build from source using Go 1.24.6 instead of using pre-compiled binaries
+2. Explicitly update go-getter dependency to v1.7.9 which includes the security fix
+3. Build from main branch to ensure latest security patches
+
+**Technical Details:**
+- The fix disables symlinks in git client operations
+- Specifically addresses subdirectory symlink content handling
+- Prevents unauthorized directory traversal via symlink attacks
+
+**Verification:**
+```bash
+# Verify Trivy includes fixed go-getter version
+trivy --version
+# Check for go-getter v1.7.9 in dependencies
+```
+
+**References:**
+- CVE-2025-8959
+- HashiCorp go-getter PR #540: https://github.com/hashicorp/go-getter/pull/540
+- go-getter v1.7.9 release: https://github.com/hashicorp/go-getter/releases/tag/v1.7.9
+
 **kubesec Security:**
 ```bash
 # Validate Kubernetes manifests

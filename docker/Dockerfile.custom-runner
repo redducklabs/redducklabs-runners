@@ -43,10 +43,10 @@ RUN curl -LO "https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl" && \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
     rm kubectl
 
-# Install Helm 3.18.5
+# Install Helm 3.18.6 (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
 RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
     chmod 700 get_helm.sh && \
-    DESIRED_VERSION=v3.18.5 ./get_helm.sh && \
+    DESIRED_VERSION=v3.18.6 ./get_helm.sh && \
     rm get_helm.sh
 
 # Install doctl 1.139.0
@@ -68,9 +68,11 @@ RUN apt-get update && \
     apt-get install -y postgresql-client redis-tools && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker CLI (not daemon)
-RUN apt-get update && \
-    apt-get install -y docker.io && \
+# Install Docker CLI v28.3.3+ (Security Update - fixes CVE-2025-54388)
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y docker-ce-cli=5:28.3.3-1~ubuntu.22.04~jammy && \
     rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -87,24 +89,33 @@ RUN wget https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconfo
     mv kubeconform /usr/local/bin && \
     rm kubeconform-linux-amd64.tar.gz
 
-# Install kubesec 2.14.2
+# Note: Using pre-built binaries for security tools instead of building from source
+
+# Install kubesec 2.14.2 (pre-built binary)
 RUN wget https://github.com/controlplaneio/kubesec/releases/download/v2.14.2/kubesec_linux_amd64.tar.gz && \
     tar xf kubesec_linux_amd64.tar.gz && \
     mv kubesec /usr/local/bin && \
     rm kubesec_linux_amd64.tar.gz
 
-# Install Trivy 0.65.0
+# Install Trivy 0.65.0 (pre-built binary)
 RUN wget https://github.com/aquasecurity/trivy/releases/download/v0.65.0/trivy_0.65.0_Linux-64bit.tar.gz && \
     tar xf trivy_0.65.0_Linux-64bit.tar.gz && \
     mv trivy /usr/local/bin && \
     rm trivy_0.65.0_Linux-64bit.tar.gz
+
+# Install Docker buildx 0.27.0 (pre-built binary)
+RUN wget https://github.com/docker/buildx/releases/download/v0.27.0/buildx-v0.27.0.linux-amd64 && \
+    chmod +x buildx-v0.27.0.linux-amd64 && \
+    mv buildx-v0.27.0.linux-amd64 /usr/local/bin/docker-buildx && \
+    mkdir -p /usr/local/lib/docker/cli-plugins && \
+    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # Install Python development tools
 RUN python3.13 -m pip install --no-cache-dir \
     black flake8 mypy ruff pytest pytest-cov \
     requests boto3 pyyaml
 
-# Clean up
+# Clean up installation files and caches
 RUN apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 

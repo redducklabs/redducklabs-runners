@@ -92,16 +92,19 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 
 ### Infrastructure Tools
 - Terraform 1.12.2
-- kubectl 1.33.0
-- Helm 3.17.4
-- doctl 1.138.0 (DigitalOcean CLI)
-- Docker CLI with buildx
+- kubectl 1.33.3
+- Helm 3.18.6
+- doctl 1.139.0 (DigitalOcean CLI)
+- Docker CLI v28.3.3+ with buildx (Security Update - fixes CVE-2025-54388)
 - GitHub CLI
 
 ### Security & Validation
 - kubeconform 0.7.0 - Kubernetes manifest validation
-- kubesec 2.14.2 - Security risk analysis
-- Trivy 0.65.0 - Vulnerability scanner
+- kubesec 2.14.2 - Security risk analysis (built with Go 1.24.6+)
+- Trivy 0.65.0 - Vulnerability scanner (built with Go 1.24.6+)
+- Docker buildx - Latest version (built with Go 1.24.6+)
+
+**Security Note**: All Go-based tools are compiled from source using Go 1.24.6 to address CVE-2025-47907 and related stdlib vulnerabilities.
 
 ### Database Clients
 - PostgreSQL client
@@ -212,6 +215,26 @@ cd scripts/
 4. **Resource Limits** - Always set CPU/memory limits
 5. **Network Policies** - Implement Kubernetes network policies (recommended)
 6. **RBAC** - Use minimal permissions for service accounts
+
+### 🛡️ Security Fixes
+
+**CVE-2025-54388 (MEDIUM)** - Fixed Docker firewalld vulnerability:
+- **Issue**: Moby's firewalld reload makes container ports accessible by removing iptables rules
+- **Impact**: Docker versions before 28.3.3 fail to recreate rules that block external access to containers
+- **Fix**: Updated Docker CLI to v28.3.3+ from official Docker repository (was v27.5.1 from Ubuntu packages)
+- **Components**: Docker CLI with buildx integration
+
+**CVE-2025-47907 (HIGH)** - Fixed Go stdlib vulnerabilities in database/sql Postgres operations:
+- **Trivy**: Built from source with Go 1.24.6+ (was stdlib v1.24.4)
+- **kubesec**: Built from source with Go 1.24.6+ (was stdlib v1.23.1)  
+- **docker-buildx**: Built from source with Go 1.24.6+ (was stdlib v1.24.5)
+
+**CVE-2025-55199 & CVE-2025-55198 (MEDIUM)** - Fixed Helm vulnerabilities:
+- **CVE-2025-55199**: Helm Chart JSON Schema Denial of Service vulnerability
+- **CVE-2025-55198**: Helm YAML Parsing Panic vulnerability
+- **Helm**: Updated to v3.18.6 (from v3.18.4) to address memory exhaustion and panic issues
+
+All Go-based security tools now use the latest Go compiler to ensure no vulnerable stdlib versions are present.
 
 ## 🐛 Troubleshooting
 
