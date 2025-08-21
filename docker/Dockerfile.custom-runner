@@ -151,8 +151,8 @@ RUN mkdir -p $GOPATH/trivy-src && \
     cd / && \
     rm -rf $GOPATH/trivy-src
 
-# Clean up Go installation and cache after building all tools
-RUN rm -rf /usr/local/go $GOPATH $GOCACHE
+# Clean up Go installation and all build caches after building all tools
+RUN rm -rf /usr/local/go /tmp/go-builds /tmp/go-builds-cache
 
 # Install Docker buildx 0.27.0 (pre-built binary - released August 2025, built with secure Go version)
 RUN wget https://github.com/docker/buildx/releases/download/v0.27.0/buildx-v0.27.0.linux-amd64 && \
