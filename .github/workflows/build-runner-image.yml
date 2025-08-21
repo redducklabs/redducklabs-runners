@@ -55,8 +55,13 @@ jobs:
       - name: Log in to DigitalOcean Container Registry
         run: |
           echo "🔐 Authenticating with DigitalOcean Container Registry..."
-          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
-          doctl registry login --expiry-seconds 3600
+          echo "🔧 Working around corrupted doctl binary by using docker login directly..."
+          
+          # Use docker login directly with DO token
+          # DigitalOcean registry accepts the token as both username and password
+          echo "${{ secrets.DO_TOKEN }}" | docker login ${{ env.REGISTRY }} --username ${{ secrets.DO_TOKEN }} --password-stdin
+          
+          echo "✅ Successfully authenticated with DigitalOcean Container Registry"
       
       - name: Extract metadata
         id: meta
@@ -153,8 +158,13 @@ jobs:
       - name: Authenticate with DigitalOcean Registry (for Trivy)
         run: |
           echo "🔐 Authenticating with registry for Trivy scan..."
-          doctl auth init --access-token ${{ secrets.DO_TOKEN }}
-          doctl registry login --expiry-seconds 3600
+          echo "🔧 Working around corrupted doctl binary by using docker login directly..."
+          
+          # Use docker login directly with DO token
+          # DigitalOcean registry accepts the token as both username and password
+          echo "${{ secrets.DO_TOKEN }}" | docker login ${{ env.REGISTRY }} --username ${{ secrets.DO_TOKEN }} --password-stdin
+          
+          echo "✅ Successfully authenticated with DigitalOcean Container Registry for Trivy"
       
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.32.0
