@@ -162,7 +162,8 @@ runs:
         fi
         
         # Download checksums
-        CHECKSUMS_URL="https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/checksums.txt"
+        CHECKSUMS_FILE="doctl-${DOCTL_VERSION#v}-checksums.sha256"
+        CHECKSUMS_URL="https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/${CHECKSUMS_FILE}"
         if ! curl -fsSL -o checksums.txt "${CHECKSUMS_URL}"; then
           echo "❌ Error: Failed to download checksums"
           exit 1
