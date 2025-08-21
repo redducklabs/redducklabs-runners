@@ -94,6 +94,28 @@ jobs:
           docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest terraform version
           echo "Image verification complete!"
       
+      - name: Verify Docker security fix (CVE-2025-54388)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "🔒 Verifying Docker CLI v28.3.3+ for CVE-2025-54388 fix..."
+          DOCKER_VERSION=$(docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "Docker CLI version in image: $DOCKER_VERSION"
+          
+          # Verify version is 28.3.3 or higher
+          DOCKER_MAJOR=$(echo $DOCKER_VERSION | cut -d. -f1)
+          DOCKER_MINOR=$(echo $DOCKER_VERSION | cut -d. -f2)
+          DOCKER_PATCH=$(echo $DOCKER_VERSION | cut -d. -f3)
+          
+          if [[ $DOCKER_MAJOR -gt 28 ]] || \
+             [[ $DOCKER_MAJOR -eq 28 && $DOCKER_MINOR -gt 3 ]] || \
+             [[ $DOCKER_MAJOR -eq 28 && $DOCKER_MINOR -eq 3 && $DOCKER_PATCH -ge 3 ]]; then
+            echo "✅ Docker CLI v$DOCKER_VERSION is secure (CVE-2025-54388 fixed)"
+          else
+            echo "❌ Docker CLI v$DOCKER_VERSION is vulnerable to CVE-2025-54388"
+            echo "Required: v28.3.3 or higher"
+            exit 1
+          fi
+      
       - name: Update deployment values (main branch only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
