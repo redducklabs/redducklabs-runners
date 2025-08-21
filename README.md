@@ -101,7 +101,7 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 ### Security & Validation
 - kubeconform 0.7.0 - Kubernetes manifest validation
 - kubesec 2.14.2 - Security risk analysis (built with Go 1.24.6+)
-- Trivy 0.65.0 - Vulnerability scanner (built with Go 1.24.6+)
+- Trivy (source build) - Vulnerability scanner with go-getter v1.7.9 security fix
 - Docker buildx - Latest version (built with Go 1.24.6+)
 
 **Security Note**: All Go-based tools are compiled from source using Go 1.24.6 to address CVE-2025-47907 and related stdlib vulnerabilities.
@@ -233,6 +233,13 @@ cd scripts/
 - **CVE-2025-55199**: Helm Chart JSON Schema Denial of Service vulnerability
 - **CVE-2025-55198**: Helm YAML Parsing Panic vulnerability
 - **Helm**: Updated to v3.18.6 (from v3.18.4) to address memory exhaustion and panic issues
+
+**CVE-2025-8959 (TBD)** - Fixed go-getter vulnerability in Trivy:
+- **Issue**: go-getter v1.7.8 contains security vulnerability CVE-2025-8959
+- **Impact**: Security vulnerability in HashiCorp's go-getter library used by Trivy
+- **Fix**: Build Trivy from source using PR #9361 branch with go-getter v1.7.9 update
+- **Status**: Temporary source build until official Trivy release includes the fix
+- **Components**: Trivy vulnerability scanner
 
 All Go-based security tools now use the latest Go compiler to ensure no vulnerable stdlib versions are present.
 
