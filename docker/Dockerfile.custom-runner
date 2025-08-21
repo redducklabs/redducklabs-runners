@@ -89,17 +89,17 @@ RUN wget https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconfo
     mv kubeconform /usr/local/bin && \
     rm kubeconform-linux-amd64.tar.gz
 
-# Install Go 1.24.6 to build security tools from source
-RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
-    rm go1.24.6.linux-amd64.tar.gz
+# Install Go 1.23.12 to build security tools from source
+RUN wget https://go.dev/dl/go1.23.12.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.23.12.linux-amd64.tar.gz && \
+    rm go1.23.12.linux-amd64.tar.gz
 
 # Set Go environment
 ENV PATH=/usr/local/go/bin:$PATH
 ENV GOPATH=/tmp/go
 ENV GO111MODULE=on
 
-# Install kubesec from source with Go 1.24.6
+# Install kubesec from source with Go 1.23.12
 RUN cd /tmp && \
     git clone https://github.com/controlplaneio/kubesec.git && \
     cd kubesec && \
@@ -107,7 +107,7 @@ RUN cd /tmp && \
     /usr/local/go/bin/go build -o /usr/local/bin/kubesec ./cmd/kubesec && \
     cd / && rm -rf /tmp/kubesec
 
-# Install Trivy from source with Go 1.24.6
+# Install Trivy from source with Go 1.23.12
 RUN cd /tmp && \
     git clone https://github.com/aquasecurity/trivy.git && \
     cd trivy && \
@@ -115,7 +115,7 @@ RUN cd /tmp && \
     /usr/local/go/bin/go build -o /usr/local/bin/trivy ./cmd/trivy && \
     cd / && rm -rf /tmp/trivy
 
-# Install latest Docker buildx from source with Go 1.24.6
+# Install latest Docker buildx from source with Go 1.23.12
 RUN cd /tmp && \
     git clone https://github.com/docker/buildx.git && \
     cd buildx && \
