@@ -92,9 +92,9 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 
 ### Infrastructure Tools
 - Terraform 1.12.2
-- kubectl 1.33.0
-- Helm 3.17.4
-- doctl 1.138.0 (DigitalOcean CLI)
+- kubectl 1.33.3
+- Helm 3.18.6
+- doctl 1.139.0 (DigitalOcean CLI)
 - Docker CLI with buildx
 - GitHub CLI
 
@@ -222,6 +222,11 @@ cd scripts/
 - **Trivy**: Built from source with Go 1.24.6+ (was stdlib v1.24.4)
 - **kubesec**: Built from source with Go 1.24.6+ (was stdlib v1.23.1)  
 - **docker-buildx**: Built from source with Go 1.24.6+ (was stdlib v1.24.5)
+
+**CVE-2025-55199 & CVE-2025-55198 (MEDIUM)** - Fixed Helm vulnerabilities:
+- **CVE-2025-55199**: Helm Chart JSON Schema Denial of Service vulnerability
+- **CVE-2025-55198**: Helm YAML Parsing Panic vulnerability
+- **Helm**: Updated to v3.18.6 (from v3.18.4) to address memory exhaustion and panic issues
 
 All Go-based security tools now use the latest Go compiler to ensure no vulnerable stdlib versions are present.
 
