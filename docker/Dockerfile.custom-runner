@@ -40,73 +40,72 @@ WORKDIR /tmp/unified-go-build
 
 # Download and build ALL Go tools in a single RUN command to prevent layer caching of test fixtures
 RUN set -euo pipefail && \
-    # Create build directories
-    mkdir -p kubectl-src doctl-src kubeconform-src kubesec-src trivy-src /tmp/binaries && \
+    # Create build directories and set base path
+    BASE_DIR="/tmp/unified-go-build" && \
+    mkdir -p "${BASE_DIR}"/{kubectl-src,doctl-src,kubeconform-src,kubesec-src,trivy-src} /tmp/binaries && \
     \
-    # Clone all repositories using build arguments with error checking
+    # Clone all repositories using absolute paths with error checking
     echo "Cloning kubectl..." && \
-    cd kubectl-src && git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git || { echo "Failed to clone kubectl"; exit 1; } && \
+    (cd "${BASE_DIR}/kubectl-src" && git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git) || { echo "Failed to clone kubectl"; exit 1; } && \
     echo "Cloning doctl..." && \
-    cd ../doctl-src && git clone --depth 1 --branch ${DOCTL_VERSION} https://github.com/digitalocean/doctl.git || { echo "Failed to clone doctl"; exit 1; } && \
+    (cd "${BASE_DIR}/doctl-src" && git clone --depth 1 --branch ${DOCTL_VERSION} https://github.com/digitalocean/doctl.git) || { echo "Failed to clone doctl"; exit 1; } && \
     echo "Cloning kubeconform..." && \
-    cd ../kubeconform-src && git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git || { echo "Failed to clone kubeconform"; exit 1; } && \
+    (cd "${BASE_DIR}/kubeconform-src" && git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git) || { echo "Failed to clone kubeconform"; exit 1; } && \
     echo "Cloning kubesec..." && \
-    cd ../kubesec-src && git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git || { echo "Failed to clone kubesec"; exit 1; } && \
+    (cd "${BASE_DIR}/kubesec-src" && git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git) || { echo "Failed to clone kubesec"; exit 1; } && \
     echo "Cloning trivy..." && \
-    cd ../trivy-src && git clone https://github.com/aquasecurity/trivy.git || { echo "Failed to clone trivy"; exit 1; } && \
-    cd trivy && git checkout $(git describe --tags $(git rev-list --tags --max-count=1)) && cd .. && \
+    (cd "${BASE_DIR}/trivy-src" && git clone https://github.com/aquasecurity/trivy.git && cd trivy && git checkout $(git describe --tags $(git rev-list --tags --max-count=1))) || { echo "Failed to clone trivy"; exit 1; } && \
     \
-    # Build kubectl with validation
+    # Build kubectl with validation using subshell
     echo "Building kubectl..." && \
-    cd kubernetes && \
-    go mod download || { echo "Failed to download kubectl dependencies"; exit 1; } && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl || { echo "Failed to build kubectl"; exit 1; } && \
+    (cd "${BASE_DIR}/kubectl-src/kubernetes" && \
+     go mod download && \
+     go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl) || { echo "Failed to build kubectl"; exit 1; } && \
     [ -f /tmp/binaries/kubectl ] || { echo "kubectl binary not found after build"; exit 1; } && \
     \
-    # Build doctl with validation
+    # Build doctl with validation using subshell
     echo "Building doctl..." && \
-    cd ../../doctl-src/doctl && \
-    go mod download || { echo "Failed to download doctl dependencies"; exit 1; } && \
-    go build -ldflags="-w -s" -o /tmp/binaries/doctl ./cmd/doctl || { echo "Failed to build doctl"; exit 1; } && \
+    (cd "${BASE_DIR}/doctl-src/doctl" && \
+     go mod download && \
+     go build -ldflags="-w -s" -o /tmp/binaries/doctl ./cmd/doctl) || { echo "Failed to build doctl"; exit 1; } && \
     [ -f /tmp/binaries/doctl ] || { echo "doctl binary not found after build"; exit 1; } && \
     \
-    # Build kubeconform with validation
+    # Build kubeconform with validation using subshell
     echo "Building kubeconform..." && \
-    cd ../../kubeconform-src/kubeconform && \
-    go mod download || { echo "Failed to download kubeconform dependencies"; exit 1; } && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform || { echo "Failed to build kubeconform"; exit 1; } && \
+    (cd "${BASE_DIR}/kubeconform-src/kubeconform" && \
+     go mod download && \
+     go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform) || { echo "Failed to build kubeconform"; exit 1; } && \
     [ -f /tmp/binaries/kubeconform ] || { echo "kubeconform binary not found after build"; exit 1; } && \
     \
-    # Build kubesec with updated crypto dependencies and validation
+    # Build kubesec with updated crypto dependencies and validation using subshell
     echo "Building kubesec..." && \
-    cd ../../kubesec-src/kubesec && \
-    go get -u golang.org/x/crypto@latest || { echo "Failed to update crypto dependency"; exit 1; } && \
-    go mod tidy || { echo "Failed to tidy kubesec modules"; exit 1; } && \
-    go mod download || { echo "Failed to download kubesec dependencies"; exit 1; } && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubesec . || { echo "Failed to build kubesec"; exit 1; } && \
+    (cd "${BASE_DIR}/kubesec-src/kubesec" && \
+     go get -u golang.org/x/crypto@latest && \
+     go mod tidy && \
+     go mod download && \
+     go build -ldflags="-w -s" -o /tmp/binaries/kubesec .) || { echo "Failed to build kubesec"; exit 1; } && \
     [ -f /tmp/binaries/kubesec ] || { echo "kubesec binary not found after build"; exit 1; } && \
     \
-    # Build Trivy with go-getter security fix and validation
+    # Build Trivy with go-getter security fix and validation using subshell
     echo "Building trivy..." && \
-    cd ../../trivy-src/trivy && \
-    go get -u github.com/hashicorp/go-getter@${GO_GETTER_VERSION} || { echo "Failed to update go-getter dependency"; exit 1; } && \
-    go mod tidy || { echo "Failed to tidy trivy modules"; exit 1; } && \
-    go mod download || { echo "Failed to download trivy dependencies"; exit 1; } && \
-    go build -ldflags="-w -s" -o /tmp/binaries/trivy ./cmd/trivy || { echo "Failed to build trivy"; exit 1; } && \
+    (cd "${BASE_DIR}/trivy-src/trivy" && \
+     go get -u github.com/hashicorp/go-getter@${GO_GETTER_VERSION} && \
+     go mod tidy && \
+     go mod download && \
+     go build -ldflags="-w -s" -o /tmp/binaries/trivy ./cmd/trivy) || { echo "Failed to build trivy"; exit 1; } && \
     [ -f /tmp/binaries/trivy ] || { echo "trivy binary not found after build"; exit 1; } && \
     \
     # Strip debug symbols from all binaries with validation
     echo "Stripping debug symbols..." && \
-    cd /tmp/binaries && \
-    for binary in kubectl doctl kubeconform kubesec trivy; do \
-        [ -f "$binary" ] || { echo "Binary $binary not found for stripping"; exit 1; } && \
-        strip "$binary" || { echo "Failed to strip $binary"; exit 1; } \
-    done && \
+    (cd /tmp/binaries && \
+     for binary in kubectl doctl kubeconform kubesec trivy; do \
+         [ -f "$binary" ] || { echo "Binary $binary not found for stripping"; exit 1; } && \
+         strip "$binary" || { echo "Failed to strip $binary"; exit 1; } \
+     done) && \
     \
     # Aggressive cleanup - remove ALL Go-related files in the same layer
     # This prevents test certificates and private keys from persisting in any layer
     echo "Performing cleanup..." && \
-    cd / && \
     rm -rf /tmp/unified-go-build /tmp/unified-go-cache /go/pkg /root/.cache/go-build /usr/local/go && \
     rm -rf /go/src /go/bin && \
     # Clean up any remaining Go module caches
