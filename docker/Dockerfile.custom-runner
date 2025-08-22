@@ -10,12 +10,20 @@ ARG HELM_VERSION=v3.18.6
 ARG TERRAFORM_VERSION=1.12.2-1
 ARG DOCKER_VERSION=5:28.3.3-1~ubuntu.22.04~jammy
 ARG BUILDX_VERSION=v0.27.0
+ARG BUILDX_CHECKSUM=4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06
 ARG PYTHON_VERSION=3.13
 ARG NODE_VERSION=22.x
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:latest
 
 # Stage 1: Go builder - Build all Go tools with unified cache management
 FROM golang:${GO_VERSION}-alpine AS go-builder
+
+# Re-declare build arguments needed in this stage
+ARG KUBECTL_VERSION
+ARG DOCTL_VERSION
+ARG KUBECONFORM_VERSION
+ARG KUBESEC_VERSION
+ARG GO_GETTER_VERSION
 
 # Install git and build tools
 RUN apk add --no-cache git build-base
@@ -111,6 +119,9 @@ RUN set -euo pipefail && \
 # Stage 2: Python builder - Install Python tools separately
 FROM python:${PYTHON_VERSION}-slim AS python-builder
 
+# Re-declare build arguments needed in this stage
+ARG PYTHON_VERSION
+
 # Install Python development tools in isolated layer
 RUN pip install --no-cache-dir --target /tmp/python-packages \
     black flake8 mypy ruff pytest pytest-cov \
@@ -118,6 +129,16 @@ RUN pip install --no-cache-dir --target /tmp/python-packages \
 
 # Stage 3: Final image - Copy only binaries and runtime files, zero build artifacts
 FROM ${ACTIONS_RUNNER_BASE}
+
+# Re-declare build arguments needed in this stage
+ARG GO_VERSION
+ARG PYTHON_VERSION
+ARG NODE_VERSION
+ARG HELM_VERSION
+ARG TERRAFORM_VERSION
+ARG DOCKER_VERSION
+ARG BUILDX_VERSION
+ARG BUILDX_CHECKSUM
 
 # Switch to root for installation
 USER root
