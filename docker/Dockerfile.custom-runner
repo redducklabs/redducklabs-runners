@@ -58,7 +58,7 @@ RUN set -euo pipefail && \
     \
     # Build kubectl with validation
     echo "Building kubectl..." && \
-    cd kubectl-src/kubernetes && \
+    cd kubernetes && \
     go mod download || { echo "Failed to download kubectl dependencies"; exit 1; } && \
     go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl || { echo "Failed to build kubectl"; exit 1; } && \
     [ -f /tmp/binaries/kubectl ] || { echo "kubectl binary not found after build"; exit 1; } && \
