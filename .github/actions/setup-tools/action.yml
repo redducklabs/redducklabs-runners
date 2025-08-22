@@ -5,15 +5,15 @@ inputs:
   kubectl-version:
     description: 'kubectl version to install'
     required: false
-    default: 'v1.33.0'
+    default: 'v1.33.3'
   helm-version:
     description: 'Helm version to install'
     required: false
-    default: 'v3.17.4'
+    default: 'v3.18.6'
   doctl-version:
     description: 'doctl version to install'
     required: false
-    default: 'v1.138.0'
+    default: 'v1.139.0'
   install-jq:
     description: 'Install jq package'
     required: false
@@ -130,9 +130,8 @@ runs:
         
         chmod 700 get_helm.sh
         
-        # Install Helm with specific version
+        # Install Helm with specific version (--no-sudo installs to /usr/local/bin by default)
         DESIRED_VERSION="${{ inputs.helm-version }}" ./get_helm.sh --no-sudo
-        sudo mv ~/.local/bin/helm /usr/local/bin/helm || sudo mv ./linux-amd64/helm /usr/local/bin/helm
         
         # Verify installation
         helm version
@@ -163,7 +162,8 @@ runs:
         fi
         
         # Download checksums
-        CHECKSUMS_URL="https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/checksums.txt"
+        CHECKSUMS_FILE="doctl-${DOCTL_VERSION#v}-checksums.sha256"
+        CHECKSUMS_URL="https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/${CHECKSUMS_FILE}"
         if ! curl -fsSL -o checksums.txt "${CHECKSUMS_URL}"; then
           echo "❌ Error: Failed to download checksums"
           exit 1
