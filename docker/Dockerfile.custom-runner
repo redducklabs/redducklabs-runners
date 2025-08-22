@@ -1,19 +1,142 @@
-# Use the official GitHub Actions runner as base
-# Note: Container runtime tools (containerd, docker-proxy, dockerd, runc) from base image
-# CVE-2025-47907 affects these components - monitoring for updated base image releases
-FROM ghcr.io/actions/actions-runner:latest
+# Multi-stage build to eliminate false positive security alerts and optimize image size
+# Build arguments for version management
+ARG GO_VERSION=1.24.6
+ARG KUBECTL_VERSION=v1.33.3
+ARG DOCTL_VERSION=v1.139.0
+ARG KUBECONFORM_VERSION=v0.7.0
+ARG KUBESEC_VERSION=v2.14.2
+ARG GO_GETTER_VERSION=v1.7.9
+ARG HELM_VERSION=v3.18.6
+ARG TERRAFORM_VERSION=1.12.2-1
+ARG DOCKER_VERSION=5:28.3.3-1~ubuntu.22.04~jammy
+ARG BUILDX_VERSION=v0.27.0
+ARG PYTHON_VERSION=3.13
+ARG NODE_VERSION=22.x
+ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:latest
 
-# Switch to root to install tools
+# Stage 1: Go builder - Build all Go tools with unified cache management
+FROM golang:${GO_VERSION}-alpine AS go-builder
+
+# Install git and build tools
+RUN apk add --no-cache git build-base
+
+# Set environment for unified Go builds
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOARCH=amd64
+ENV GOPATH=/tmp/unified-go-build
+ENV GOCACHE=/tmp/unified-go-cache
+
+# Create single unified build directory
+WORKDIR /tmp/unified-go-build
+
+# Download and build ALL Go tools in a single RUN command to prevent layer caching of test fixtures
+RUN set -euo pipefail && \
+    # Create build directories
+    mkdir -p kubectl-src doctl-src kubeconform-src kubesec-src trivy-src /tmp/binaries && \
+    \
+    # Clone all repositories using build arguments with error checking
+    echo "Cloning kubectl..." && \
+    cd kubectl-src && git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git || { echo "Failed to clone kubectl"; exit 1; } && \
+    echo "Cloning doctl..." && \
+    cd ../doctl-src && git clone --depth 1 --branch ${DOCTL_VERSION} https://github.com/digitalocean/doctl.git || { echo "Failed to clone doctl"; exit 1; } && \
+    echo "Cloning kubeconform..." && \
+    cd ../kubeconform-src && git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git || { echo "Failed to clone kubeconform"; exit 1; } && \
+    echo "Cloning kubesec..." && \
+    cd ../kubesec-src && git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git || { echo "Failed to clone kubesec"; exit 1; } && \
+    echo "Cloning trivy..." && \
+    cd ../trivy-src && git clone https://github.com/aquasecurity/trivy.git || { echo "Failed to clone trivy"; exit 1; } && \
+    cd trivy && git checkout $(git describe --tags $(git rev-list --tags --max-count=1)) && cd .. && \
+    \
+    # Build kubectl with validation
+    echo "Building kubectl..." && \
+    cd kubectl-src/kubernetes && \
+    go mod download || { echo "Failed to download kubectl dependencies"; exit 1; } && \
+    go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl || { echo "Failed to build kubectl"; exit 1; } && \
+    [ -f /tmp/binaries/kubectl ] || { echo "kubectl binary not found after build"; exit 1; } && \
+    \
+    # Build doctl with validation
+    echo "Building doctl..." && \
+    cd ../../doctl-src/doctl && \
+    go mod download || { echo "Failed to download doctl dependencies"; exit 1; } && \
+    go build -ldflags="-w -s" -o /tmp/binaries/doctl ./cmd/doctl || { echo "Failed to build doctl"; exit 1; } && \
+    [ -f /tmp/binaries/doctl ] || { echo "doctl binary not found after build"; exit 1; } && \
+    \
+    # Build kubeconform with validation
+    echo "Building kubeconform..." && \
+    cd ../../kubeconform-src/kubeconform && \
+    go mod download || { echo "Failed to download kubeconform dependencies"; exit 1; } && \
+    go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform || { echo "Failed to build kubeconform"; exit 1; } && \
+    [ -f /tmp/binaries/kubeconform ] || { echo "kubeconform binary not found after build"; exit 1; } && \
+    \
+    # Build kubesec with updated crypto dependencies and validation
+    echo "Building kubesec..." && \
+    cd ../../kubesec-src/kubesec && \
+    go get -u golang.org/x/crypto@latest || { echo "Failed to update crypto dependency"; exit 1; } && \
+    go mod tidy || { echo "Failed to tidy kubesec modules"; exit 1; } && \
+    go mod download || { echo "Failed to download kubesec dependencies"; exit 1; } && \
+    go build -ldflags="-w -s" -o /tmp/binaries/kubesec . || { echo "Failed to build kubesec"; exit 1; } && \
+    [ -f /tmp/binaries/kubesec ] || { echo "kubesec binary not found after build"; exit 1; } && \
+    \
+    # Build Trivy with go-getter security fix and validation
+    echo "Building trivy..." && \
+    cd ../../trivy-src/trivy && \
+    go get -u github.com/hashicorp/go-getter@${GO_GETTER_VERSION} || { echo "Failed to update go-getter dependency"; exit 1; } && \
+    go mod tidy || { echo "Failed to tidy trivy modules"; exit 1; } && \
+    go mod download || { echo "Failed to download trivy dependencies"; exit 1; } && \
+    go build -ldflags="-w -s" -o /tmp/binaries/trivy ./cmd/trivy || { echo "Failed to build trivy"; exit 1; } && \
+    [ -f /tmp/binaries/trivy ] || { echo "trivy binary not found after build"; exit 1; } && \
+    \
+    # Strip debug symbols from all binaries with validation
+    echo "Stripping debug symbols..." && \
+    cd /tmp/binaries && \
+    for binary in kubectl doctl kubeconform kubesec trivy; do \
+        [ -f "$binary" ] || { echo "Binary $binary not found for stripping"; exit 1; } && \
+        strip "$binary" || { echo "Failed to strip $binary"; exit 1; } \
+    done && \
+    \
+    # Aggressive cleanup - remove ALL Go-related files in the same layer
+    # This prevents test certificates and private keys from persisting in any layer
+    echo "Performing cleanup..." && \
+    cd / && \
+    rm -rf /tmp/unified-go-build /tmp/unified-go-cache /go/pkg /root/.cache/go-build /usr/local/go && \
+    rm -rf /go/src /go/bin && \
+    # Clean up any remaining Go module caches
+    find / -name "*.mod" -type f -delete 2>/dev/null || true && \
+    find / -name "*.sum" -type f -delete 2>/dev/null || true && \
+    find / -name "testdata" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find / -name "*_test.go" -type f -delete 2>/dev/null || true && \
+    echo "Go tools build completed successfully"
+
+# Stage 2: Python builder - Install Python tools separately
+FROM python:${PYTHON_VERSION}-slim AS python-builder
+
+# Install Python development tools in isolated layer
+RUN pip install --no-cache-dir --target /tmp/python-packages \
+    black flake8 mypy ruff pytest pytest-cov \
+    requests boto3 pyyaml
+
+# Stage 3: Final image - Copy only binaries and runtime files, zero build artifacts
+FROM ${ACTIONS_RUNNER_BASE}
+
+# Switch to root for installation
 USER root
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
-# Update and install basic dependencies
+# Set Go environment variables (these will be used after Go installation)
+ENV GOROOT=/usr/local/go
+ENV GOPATH=/home/runner/go
+ENV PATH=${GOROOT}/bin:${GOPATH}/bin:${PATH}
+ENV GO111MODULE=on
+ENV CGO_ENABLED=1
+
+# Update and install runtime dependencies only (no build tools)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl wget git build-essential \
+    curl wget git \
     libpq-dev gettext-base \
     ca-certificates gnupg lsb-release \
     software-properties-common \
@@ -22,154 +145,93 @@ RUN apt-get update && \
     sudo && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python 3.13
+# Install Python runtime using build argument
 RUN add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
-    apt-get install -y python3.13 python3.13-dev python3.13-venv && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 && \
-    update-alternatives --install /usr/bin/python python /usr/bin/python3.13 1 && \
+    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-venv && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Install pip for Python 3.13
-RUN python3.13 -m ensurepip && \
-    python3.13 -m pip install --upgrade pip setuptools wheel
+# Install pip for Python using build argument
+RUN python${PYTHON_VERSION} -m ensurepip && \
+    python${PYTHON_VERSION} -m pip install --upgrade pip setuptools wheel
 
-# Install Node.js 22.x and npm (Security Update - fixes CVE-2024-21538)
-# Using latest Node.js 22.x LTS with updated cross-spawn dependency
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+# Copy Python packages from builder
+COPY --from=python-builder /tmp/python-packages /usr/local/lib/python${PYTHON_VERSION}/dist-packages/
+
+# Install Node.js and npm (Security Update - fixes CVE-2024-21538)
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
     apt-get install -y nodejs && \
     npm install -g npm@latest pnpm@latest && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.24.6 for building all Go-based tools (fixes CVE-2025-47907, CVE-2025-22874, CVE-2025-22869, CVE-2024-45337, CVE-2025-8959)
-RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.6.linux-amd64.tar.gz && \
-    rm go1.24.6.linux-amd64.tar.gz
+# Install clean Go runtime for CI workflows (no module cache or test fixtures)
+RUN set -ex && \
+    GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz" && \
+    cd /tmp && \
+    wget "https://golang.org/dl/${GO_TARBALL}" && \
+    tar -C /usr/local -xzf "${GO_TARBALL}" && \
+    rm -f "${GO_TARBALL}" && \
+    # Verify Go installation
+    /usr/local/go/bin/go version
 
-# Set Go environment variables for all builds
-ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPATH=/tmp/go-builds
-ENV GOCACHE=/tmp/go-builds-cache
+# Copy all Go binaries from builder
+COPY --from=go-builder /tmp/binaries/* /usr/local/bin/
 
-# Build kubectl 1.33.3 from source with secure Go 1.24.6+ (fixes CVE-2025-47907)
-RUN mkdir -p $GOPATH/kubectl-src && \
-    cd $GOPATH/kubectl-src && \
-    git clone --depth 1 --branch v1.33.3 https://github.com/kubernetes/kubernetes.git && \
-    cd kubernetes && \
-    go mod download && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o kubectl ./cmd/kubectl && \
-    mv kubectl /usr/local/bin/kubectl && \
-    chmod +x /usr/local/bin/kubectl && \
-    cd / && \
-    rm -rf $GOPATH/kubectl-src
+# Set executable permissions on all Go binaries
+RUN chmod +x /usr/local/bin/kubectl /usr/local/bin/doctl /usr/local/bin/kubeconform /usr/local/bin/kubesec /usr/local/bin/trivy
 
-# Install Helm 3.18.6 (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
+# Install Helm (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
 RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
     chmod 700 get_helm.sh && \
-    DESIRED_VERSION=v3.18.6 ./get_helm.sh && \
+    DESIRED_VERSION=${HELM_VERSION} ./get_helm.sh && \
     rm get_helm.sh
 
-# Build doctl 1.139.0 from source with secure Go 1.24.6+ (fixes CVE-2025-47907)
-RUN mkdir -p $GOPATH/doctl-src && \
-    cd $GOPATH/doctl-src && \
-    git clone --depth 1 --branch v1.139.0 https://github.com/digitalocean/doctl.git && \
-    cd doctl && \
-    go mod download && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o doctl ./cmd/doctl && \
-    mv doctl /usr/local/bin/doctl && \
-    chmod +x /usr/local/bin/doctl && \
-    cd / && \
-    rm -rf $GOPATH/doctl-src
-
-# Install Terraform 1.12.2
+# Install Terraform using build argument
 RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list && \
     apt-get update && \
-    apt-get install -y terraform=1.12.2-1 && \
+    apt-get install -y terraform=${TERRAFORM_VERSION} && \
     rm -rf /var/lib/apt/lists/*
 
-# Install PostgreSQL client and Redis tools
-RUN apt-get update && \
+# Install database tools, Docker CLI, and GitHub CLI in single optimized layer
+RUN set -ex && \
+    # Install PostgreSQL client and Redis tools \
+    apt-get update && \
     apt-get install -y postgresql-client redis-tools && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Docker CLI v28.3.3+ (Security Update - fixes CVE-2025-54388)
-RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    # Install Docker CLI (Security Update - fixes CVE-2025-54388) \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
     apt-get update && \
-    apt-get install -y docker-ce-cli=5:28.3.3-1~ubuntu.22.04~jammy && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    apt-get install -y docker-ce-cli=${DOCKER_VERSION} && \
+    # Install GitHub CLI \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
     apt-get install gh -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Build kubeconform 0.7.0 from source with secure Go 1.24.6+ (fixes CVE-2025-22874)
-RUN mkdir -p $GOPATH/kubeconform-src && \
-    cd $GOPATH/kubeconform-src && \
-    git clone --depth 1 --branch v0.7.0 https://github.com/yannh/kubeconform.git && \
-    cd kubeconform && \
-    go mod download && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o kubeconform ./cmd/kubeconform && \
-    mv kubeconform /usr/local/bin/kubeconform && \
-    chmod +x /usr/local/bin/kubeconform && \
-    cd / && \
-    rm -rf $GOPATH/kubeconform-src
-
-# Build kubesec 2.14.2 from source with secure Go 1.24.6+ (fixes CVE-2025-22869 & CVE-2024-45337)
-# This ensures the latest golang.org/x/crypto/ssh packages are used
-RUN mkdir -p $GOPATH/kubesec-src && \
-    cd $GOPATH/kubesec-src && \
-    git clone --depth 1 --branch v2.14.2 https://github.com/controlplaneio/kubesec.git && \
-    cd kubesec && \
-    go get -u golang.org/x/crypto@latest && \
-    go mod tidy && \
-    go mod download && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o kubesec . && \
-    mv kubesec /usr/local/bin/kubesec && \
-    chmod +x /usr/local/bin/kubesec && \
-    cd / && \
-    rm -rf $GOPATH/kubesec-src
-
-# Build Trivy from source with go-getter v1.7.9+ security fix (fixes CVE-2025-8959)
-# Using latest stable release with updated dependencies
-RUN mkdir -p $GOPATH/trivy-src && \
-    cd $GOPATH/trivy-src && \
-    git clone https://github.com/aquasecurity/trivy.git && \
-    cd trivy && \
-    git checkout $(git describe --tags $(git rev-list --tags --max-count=1)) && \
-    go get -u github.com/hashicorp/go-getter@v1.7.9 && \
-    go mod tidy && \
-    go mod download && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o trivy ./cmd/trivy && \
-    mv trivy /usr/local/bin/trivy && \
-    chmod +x /usr/local/bin/trivy && \
-    cd / && \
-    rm -rf $GOPATH/trivy-src
-
-# Clean up Go installation and all build caches after building all tools
-# Also clean up Go module cache to prevent Trivy scan timeouts
-RUN rm -rf /usr/local/go /tmp/go-builds /tmp/go-builds-cache /go/pkg /root/.cache/go-build
-
-# Install Docker buildx 0.27.0 (pre-built binary - released August 2025, built with secure Go version)
-RUN wget https://github.com/docker/buildx/releases/download/v0.27.0/buildx-v0.27.0.linux-amd64 && \
-    chmod +x buildx-v0.27.0.linux-amd64 && \
-    mv buildx-v0.27.0.linux-amd64 /usr/local/bin/docker-buildx && \
+# Install Docker buildx with checksum verification (pre-built binary - released August 2025, built with secure Go version)
+RUN set -ex && \
+    BUILDX_CHECKSUM="4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06" && \
+    wget https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64 && \
+    echo "${BUILDX_CHECKSUM}  buildx-${BUILDX_VERSION}.linux-amd64" | sha256sum -c - && \
+    chmod +x buildx-${BUILDX_VERSION}.linux-amd64 && \
+    mv buildx-${BUILDX_VERSION}.linux-amd64 /usr/local/bin/docker-buildx && \
     mkdir -p /usr/local/lib/docker/cli-plugins && \
     cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 
-# Install Python development tools
-RUN python3.13 -m pip install --no-cache-dir \
-    black flake8 mypy ruff pytest pytest-cov \
-    requests boto3 pyyaml
-
-# Clean up installation files and caches
+# Final cleanup - remove installation files and caches (keep clean Go runtime)
 RUN apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    # Clean up any Python caches
+    find /usr -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr -name "*.pyc" -type f -delete 2>/dev/null || true && \
+    # Ensure Go workspace is clean for runner user
+    mkdir -p /home/runner/go/{bin,src,pkg} && \
+    chown -R runner:runner /home/runner/go
 
 # Clean kubectl config to ensure no inherited contexts
 RUN rm -rf /root/.kube /home/runner/.kube
