@@ -1,7 +1,7 @@
 # Multi-stage build to eliminate false positive security alerts and optimize image size
 # Build arguments for version management
 ARG GO_VERSION=1.24.6
-ARG KUBECTL_VERSION=v1.33.3
+ARG KUBECTL_VERSION=v1.33.4
 ARG DOCTL_VERSION=v1.139.0
 ARG KUBECONFORM_VERSION=v0.7.0
 ARG KUBESEC_VERSION=v2.14.2
