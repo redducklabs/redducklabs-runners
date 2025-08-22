@@ -47,30 +47,35 @@ RUN set -euo pipefail && \
 # Clone repositories in separate steps for better error isolation  
 RUN set -euo pipefail && \
     BASE_DIR="/tmp/unified-go-build" && \
+    mkdir -p "${BASE_DIR}/kubectl-src" && \
     echo "Cloning kubectl..." && \
     cd "${BASE_DIR}/kubectl-src" && \
     git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git
 
 RUN set -euo pipefail && \
     BASE_DIR="/tmp/unified-go-build" && \
+    mkdir -p "${BASE_DIR}/doctl-src" && \
     echo "Cloning doctl..." && \
     cd "${BASE_DIR}/doctl-src" && \
     git clone --depth 1 --branch ${DOCTL_VERSION} https://github.com/digitalocean/doctl.git
 
 RUN set -euo pipefail && \
     BASE_DIR="/tmp/unified-go-build" && \
+    mkdir -p "${BASE_DIR}/kubeconform-src" && \
     echo "Cloning kubeconform..." && \
     cd "${BASE_DIR}/kubeconform-src" && \
     git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git
 
 RUN set -euo pipefail && \
     BASE_DIR="/tmp/unified-go-build" && \
+    mkdir -p "${BASE_DIR}/kubesec-src" && \
     echo "Cloning kubesec..." && \
     cd "${BASE_DIR}/kubesec-src" && \
     git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git
 
 RUN set -euo pipefail && \
     BASE_DIR="/tmp/unified-go-build" && \
+    mkdir -p "${BASE_DIR}/trivy-src" && \
     echo "Cloning trivy..." && \
     cd "${BASE_DIR}/trivy-src" && \
     git clone --depth 1 https://github.com/aquasecurity/trivy.git
