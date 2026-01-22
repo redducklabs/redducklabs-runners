@@ -38,7 +38,7 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: redducklabs-runners
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -144,7 +144,7 @@ jobs:
             });
 
   security-scan:
-    runs-on: redducklabs-runners
+    runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     needs: build-and-push
     permissions:
