@@ -1,6 +1,7 @@
 # Multi-stage build to eliminate false positive security alerts and optimize image size
 # Build arguments for version management
-ARG GO_VERSION=1.24.6
+ARG GO_VERSION=1.24.12
+ARG TRIVY_VERSION=v0.67.2
 ARG KUBECTL_VERSION=v1.33.4
 ARG DOCTL_VERSION=v1.139.0
 ARG KUBECONFORM_VERSION=v0.7.0
@@ -24,6 +25,7 @@ ARG DOCTL_VERSION
 ARG KUBECONFORM_VERSION
 ARG KUBESEC_VERSION
 ARG GO_GETTER_VERSION
+ARG TRIVY_VERSION
 
 # Install git and build tools
 RUN apk add --no-cache git build-base
@@ -78,7 +80,7 @@ RUN set -euo pipefail && \
     mkdir -p "${BASE_DIR}/trivy-src" && \
     echo "Cloning trivy..." && \
     cd "${BASE_DIR}/trivy-src" && \
-    git clone --depth 1 https://github.com/aquasecurity/trivy.git
+    git clone --depth 1 --branch ${TRIVY_VERSION} https://github.com/aquasecurity/trivy.git
 
 # Build all tools and perform cleanup in single RUN to prevent layer caching of secrets
 RUN set -euo pipefail && \
