@@ -1,6 +1,6 @@
 # Multi-stage build to eliminate false positive security alerts and optimize image size
 # Build arguments for version management
-ARG GO_VERSION=1.24.12
+ARG GO_VERSION=1.25.9
 ARG TRIVY_VERSION=v0.60.0
 ARG KUBECTL_VERSION=v1.33.4
 ARG DOCTL_VERSION=v1.139.0
