@@ -12,6 +12,13 @@ ARG TERRAFORM_VERSION=1.12.2-1
 ARG BUILDX_VERSION=v0.27.0
 ARG BUILDX_CHECKSUM=4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06
 ARG PYTHON_VERSION=3.13
+# Pinned python-build-standalone release; provides a self-contained Python with no
+# Launchpad/PPA dependency at runtime. Update by checking
+# https://github.com/astral-sh/python-build-standalone/releases and refreshing the
+# SHA256 from the SHA256SUMS asset.
+ARG PYTHON_BUILD_RELEASE=20260414
+ARG PYTHON_FULL_VERSION=3.13.13
+ARG PYTHON_TARBALL_SHA256=e5ec3b2c5693215d153c434ac018e75511b2c4f96d2bce30468a477cb3a89d5e
 ARG NODE_VERSION=22.x
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 
@@ -174,20 +181,33 @@ RUN apt-get update && \
     sudo && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python runtime using build argument
-RUN add-apt-repository -y ppa:deadsnakes/ppa && \
-    apt-get update && \
-    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-venv && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
-    update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 && \
-    rm -rf /var/lib/apt/lists/*
+# Install Python via python-build-standalone (no Launchpad/PPA dependency)
+# The install_only tarball ships a relocatable CPython with stdlib + pip already
+# bundled and statically links openssl/sqlite/etc., so the only runtime
+# requirement is glibc which is already present in the actions-runner base.
+ARG PYTHON_BUILD_RELEASE
+ARG PYTHON_FULL_VERSION
+ARG PYTHON_TARBALL_SHA256
+ENV PATH=/opt/python/bin:${PATH}
+RUN set -eux && \
+    PYTHON_TARBALL="cpython-${PYTHON_FULL_VERSION}+${PYTHON_BUILD_RELEASE}-x86_64-unknown-linux-gnu-install_only.tar.gz" && \
+    cd /tmp && \
+    wget -q "https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD_RELEASE}/${PYTHON_TARBALL}" && \
+    echo "${PYTHON_TARBALL_SHA256}  ${PYTHON_TARBALL}" | sha256sum -c - && \
+    tar -xzf "${PYTHON_TARBALL}" -C /opt && \
+    rm -f "${PYTHON_TARBALL}" && \
+    update-alternatives --install /usr/bin/python3 python3 /opt/python/bin/python3 100 && \
+    update-alternatives --install /usr/bin/python  python  /opt/python/bin/python3 100 && \
+    update-alternatives --install /usr/bin/pip3    pip3    /opt/python/bin/pip3    100 && \
+    update-alternatives --install /usr/bin/pip     pip     /opt/python/bin/pip3    100 && \
+    python3 --version && \
+    python3 -m pip --version
 
-# Install pip for Python using build argument
-RUN python${PYTHON_VERSION} -m ensurepip && \
-    python${PYTHON_VERSION} -m pip install --upgrade pip setuptools wheel
+# Upgrade bundled pip/setuptools/wheel
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Copy Python packages from builder
-COPY --from=python-builder /tmp/python-packages /usr/local/lib/python${PYTHON_VERSION}/dist-packages/
+# Copy Python packages from builder into the standalone Python's site-packages
+COPY --from=python-builder /tmp/python-packages /opt/python/lib/python${PYTHON_VERSION}/site-packages/
 
 # Install Node.js and npm (Security Update - fixes CVE-2024-21538)
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
