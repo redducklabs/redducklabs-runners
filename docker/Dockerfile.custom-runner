@@ -162,6 +162,21 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
+# Remove any Launchpad PPAs inherited from the actions-runner base image so
+# this build is independent of Launchpad availability. The base image enables
+# git-core/ppa for a newer git; we don't need it (Ubuntu noble's git is fine
+# for CI use), and Launchpad has had recurring connect/handshake failures
+# that turn rebuilds into a coin flip. Every other apt source we use
+# (Ubuntu archive, NodeSource, HashiCorp, Docker, GitHub CLI) is non-PPA.
+RUN set -eux && \
+    for f in /etc/apt/sources.list.d/*; do \
+        [ -f "$f" ] || continue; \
+        if grep -qE 'ppa\.launchpad(content)?\.net' "$f" 2>/dev/null; then \
+            echo "Removing Launchpad PPA source: $f"; \
+            rm -f "$f"; \
+        fi; \
+    done
+
 # Set Go environment variables (these will be used after Go installation)
 ENV GOROOT=/usr/local/go
 ENV GOPATH=/home/runner/go
