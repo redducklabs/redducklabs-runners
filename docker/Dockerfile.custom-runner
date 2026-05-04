@@ -209,10 +209,16 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy Python packages from builder into the standalone Python's site-packages
 COPY --from=python-builder /tmp/python-packages /opt/python/lib/python${PYTHON_VERSION}/site-packages/
 
-# Install Node.js and npm (Security Update - fixes CVE-2024-21538)
+# Install Node.js and pnpm (Security Update - fixes CVE-2024-21538)
+# Use corepack (bundled with Node.js) to manage pnpm rather than the global npm
+# CLI: NodeSource's nodejs 22.22.2-1nodesource1 ships a corrupt npm bundle
+# (missing transitive 'promise-retry') that crashes any `npm install -g`
+# invocation. Corepack avoids invoking the broken npm and is the modern,
+# Node-team-recommended way to manage package managers anyway.
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
     apt-get install -y nodejs && \
-    npm install -g npm@latest pnpm@latest && \
+    corepack enable && \
+    corepack prepare pnpm@latest --activate && \
     rm -rf /var/lib/apt/lists/*
 
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
