@@ -13,7 +13,7 @@ ARG BUILDX_VERSION=v0.27.0
 ARG BUILDX_CHECKSUM=4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06
 ARG PYTHON_VERSION=3.13
 ARG NODE_VERSION=22.x
-ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:latest
+ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 
 # Stage 1: Go builder - Build all Go tools with unified cache management
 FROM golang:${GO_VERSION}-alpine AS go-builder
