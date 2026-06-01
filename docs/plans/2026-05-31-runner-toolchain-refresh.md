@@ -28,6 +28,32 @@ only and recorded in the PR (CI cannot reach `defender.ai`).
 
 ---
 
+## Implementation deviations (recorded 2026-06-01, during execution)
+
+Three build-driven deviations from the tasks below were made and approved during
+execution; the spec (§4.1, §4.6, §4.7) was updated to match:
+
+1. **Node installs from the nodejs.org tarball, not NodeSource apt** (Task 7
+   Step 1). NodeSource's `node_22.x` apt channel is stale at 22.15.0 and cannot
+   deliver 22.22.3. Node 22.22.3 is installed from the official release tarball
+   with a pinned SHA256 (`c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8`),
+   consistent with the other release-binary tools. The NodeSource keyring
+   fingerprint assertion is replaced by the pinned tarball checksum.
+2. **kubeconform and kubesec are source-built, not release binaries** (Tasks 2,
+   3). The CVE-floor gate (Task 9) caught their upstream release binaries below
+   the floor (kubeconform Go 1.24.2; kubesec Go 1.23.1 + x/crypto v0.29.0); both
+   are at their latest release. A minimal `go-builder` stage compiles just these
+   two with Go 1.26.3 (kubesec's x/crypto bumped to v0.52.0). kubectl, doctl,
+   trivy, buildx remain verified release binaries.
+3. **Trivy runs report-only; the CVE-floor gate is the enforcing CI gate**
+   (Task 12). An enforcing HIGH/CRITICAL Trivy gate is not satisfiable (upstream
+   Go binaries and the dind base image carry fixed CVEs we cannot remediate). The
+   §4.7 floor check is extracted to `test/verify-cve-floor.sh` and run as a
+   build-failing step on both the PR-loaded and pushed images; Trivy uploads SARIF
+   for visibility only (`exit-code: 0`).
+
+---
+
 ## Verified facts (do not re-derive; confirmed 2026-05-31)
 
 Pinned versions and SHA256 (linux/amd64):

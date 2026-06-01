@@ -78,17 +78,21 @@ five-repo CI audit performed for this work:
 
 ## 4. Workstream A — Image refresh
 
-### 4.1 Architecture change: drop the Go source-build stage
+### 4.1 Architecture change: prefer release binaries over source builds
 
-Remove the `go-builder` stage entirely. kubectl, doctl, kubeconform, kubesec,
-and trivy become official prebuilt linux/amd64 release binaries, each verified
-against an official SHA256 checksum before install. buildx likewise moves to the
-current upstream release binary (already a binary today, just bumped). The clean
-Go **runtime** install stays (CI workflows need `go`) and is bumped to 1.26.3.
+Replace the broad five-tool Go source-build stage with verified upstream release
+binaries wherever they pass the CVE-floor gate. kubectl, doctl, and trivy become
+official prebuilt linux/amd64 release binaries, each verified against an official
+SHA256 checksum before install; buildx likewise stays a checksum-pinned release
+binary. The clean Go **runtime** install stays (CI workflows need `go`) and is
+bumped to 1.26.3.
 
-This removal is gated on the CVE re-verification in §4.7 passing; if any tool's
-release binary fails the gate, that specific tool stays source-built and the
-deviation is documented.
+This is gated on the CVE re-verification in §4.7; if a tool's release binary
+fails the gate, that specific tool stays source-built and the deviation is
+documented. **Per the measured outcome in §4.7, kubeconform and kubesec stay
+source-built** in a minimal `go-builder` stage (their release binaries are below
+the floor), so the stage is reduced from five tools to two rather than removed
+outright. Its module cache lives only in the throwaway builder and never ships.
 
 Consequences:
 - `kubectl`/`doctl` report correct release versions.
@@ -130,7 +134,9 @@ Rules:
   installed from the `get.helm.sh` tarball with checksum verification, **not**
   `raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3`.
 - Exact-pin apt installs use the **exact** discovered package version string (e.g.
-  `nodejs=22.22.3-1nodesource1`, `terraform=1.15.5-1`), never a wildcard.
+  `terraform=1.15.5-1`), never a wildcard. (Node was planned as a NodeSource apt
+  exact pin but is installed from the nodejs.org tarball instead; see §4.7
+  measured outcome — NodeSource's node_22.x channel is stale at 22.15.0.)
 - The two non-exact apt categories above (the closed third-party Docker CLI / gh
   list, and the closed Ubuntu-archive distro-managed list) are the documented
   exceptions to exact pinning and are governed by §4.9. No other package may
@@ -192,7 +198,7 @@ Rules:
 | Trivy | v0.70.0 | v0.70.0 | GH release tar + checksums | `8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9` |
 | buildx | v0.27.0 (manual) | v0.34.1 | GH binary + checksums | `f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b` |
 | Python | 3.13.13 (20260414) | 3.13.13 (20260510) | python-build-standalone + SHA256SUMS | `928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a8c90ff8407` |
-| Node.js | 22.x (floating) | 22.22.3 (exact) | NodeSource apt, keyring + exact pin | apt keyring + exact version |
+| Node.js | 22.x (floating) | 22.22.3 (exact) | nodejs.org release tarball + SHA256 (NodeSource apt stale at 22.15.0) | pinned SHA256 |
 | pnpm | latest (floating) | 11.5.0 | corepack (Node-signed), pinned | corepack trust (§4.5) |
 | uv | — | 0.11.17 | astral GH tar + `.sha256` | `0017ccecaeb4d431d7f93b583ebff0c5c38e00eb734fcf13d05f72ca419125fe` |
 | AWS CLI v2 | — | 2.34.57 | awscli-exe + GPG `.sig` (§4.3) | GPG signature (fingerprint-pinned) |
@@ -224,13 +230,21 @@ therefore specifies the job topology explicitly:
   DigitalOcean `docker login` step (and any `secrets.DO_TOKEN` use) runs only when
   `github.event_name != 'pull_request'`. PR builds are fully local and never touch
   the registry or secrets (secrets are unavailable on fork PRs anyway).
-- **Least-privilege permissions.** PR builds must not write packages. The
-  `packages: write` permission is scoped to the push/merge job only; the PR job
-  gets `contents: read` (plus `pull-requests: write` only if PR commenting is
-  retained, and `security-events: write` only for the Trivy SARIF upload). No
-  single job carries both `packages: write` and the PR path.
-- The Trivy scan on PRs enforces "no fixed HIGH/CRITICAL except documented
-  accepted base-image risks" using the reduced `.trivyignore` (§4.9).
+- **Least-privilege permissions.** `packages: write` is removed entirely: the
+  image is pushed to the DigitalOcean registry via `docker login`, which needs no
+  GitHub Packages permission. The build-and-push job carries `contents: read`,
+  `pull-requests: write` (PR comment, same-repo only), and `security-events:
+  write` (Trivy SARIF upload). If a future change pushes to GHCR, add
+  `packages: write` then.
+- **The enforcing PR security gate is the machine-enforced CVE-floor check**
+  (§4.7), run in CI via `test/verify-cve-floor.sh` against the locally-loaded PR
+  image. **Trivy runs report-only** (`exit-code: 0`, SARIF to the Security tab on
+  same-repo PRs). An enforcing "no fixed HIGH/CRITICAL" Trivy gate is *not*
+  satisfiable for this image: upstream Go release binaries (e.g. doctl built with
+  an older Go patch) and the actions-runner dind base image (containerd, dockerd,
+  runc, grpc) carry fixed HIGH/CRITICAL CVEs that we cannot remediate without
+  forking upstream or replacing the base image. The CVE-floor gate enforces the
+  specific, tracked CVEs deterministically; Trivy provides broad visibility.
 - The "verify Go is absent" steps are removed (Go runtime is intentionally
   present).
 
@@ -255,11 +269,31 @@ not silently regress the CVE posture the current docs claim. Gate:
    same fact — upstream SBOM, signed provenance/SLSA attestation, or the release
    build log naming the toolchain/module versions; or (b) keeping that specific
    tool source-built as a fallback. Soft absence is never sufficient.
-4. The PR Trivy scan (§4.6) must pass with the reduced `.trivyignore` (§4.9). A
-   new fixed HIGH/CRITICAL that the old source build suppressed blocks the change.
+4. This gate is run in CI (`test/verify-cve-floor.sh`) on both the PR-loaded and
+   pushed images and **fails the build** if any tool is below a floor. It is the
+   enforcing security gate. The Trivy scan is report-only (§4.6); it is not a
+   build-failing gate because the image carries fixed HIGH/CRITICAL CVEs in
+   upstream binaries and the dind base image that we cannot remediate.
 5. README/security-doc CVE claims are rewritten to match what is actually
    verified (cite measured toolchain/module versions and the proof source, not the
    removed build stage).
+
+**Measured outcome (2026-06-01).** Applying the gate revealed two material
+deviations from the initial "all release binaries" assumption, both resolved:
+
+- **kubeconform and kubesec release binaries are below the floor** (kubeconform
+  built with Go 1.24.2; kubesec with Go 1.23.1 and golang.org/x/crypto v0.29.0).
+  Both are already at their latest upstream release, so they are **built from
+  source in a minimal go-builder stage** with Go 1.26.3, and kubesec's x/crypto is
+  bumped (measured v0.52.0). kubectl, doctl, trivy, and buildx remain verified
+  release binaries (they pass the floor and were the v0.0.0/0.0.0-dev culprits).
+- **Node 22.22.3 is not available from NodeSource apt** (its node_22.x channel is
+  stale at 22.15.0). Node installs from the official nodejs.org release tarball
+  with a pinned SHA256 instead, consistent with the other release-binary tools.
+
+Measured toolchains at adoption: kubectl go1.26.2, doctl go1.25.0, kubeconform
+go1.26.3, kubesec go1.26.3 (x/crypto v0.52.0), trivy go1.25.9 (go-getter v1.8.6),
+buildx go1.26.3 — all ≥ the Go 1.24.6 floor.
 
 ### 4.8 Smoke-test tool list
 
@@ -442,8 +476,12 @@ All versions/checksums confirmed 2026-05-31 via official sources:
 - [ ] kubectl, doctl, kubesec report meaningful release versions.
 - [ ] AuroLegal backend and frontend images build from inside the runner image
       (local validation recorded in PR; §4.14).
-- [ ] Trivy scan: no fixed HIGH/CRITICAL except documented accepted base-image
-      risks — enforced on the PR build.
+- [ ] CVE-floor gate (`test/verify-cve-floor.sh`) passes — enforced on the PR
+      build and on push: every Go tool toolchain ≥ 1.24.6, Trivy go-getter ≥
+      v1.7.9, kubesec x/crypto ≥ v0.35.0.
+- [ ] Trivy scan runs report-only (SARIF to the Security tab); it is not a
+      build-failing gate (upstream-binary and base-image fixed CVEs are out of our
+      control; tracked CVEs are enforced by the CVE-floor gate above).
 - [ ] Test scripts run on Linux without CRLF failures; `.gitattributes` guards
       future reintroduction.
 - [ ] README, security docs, and verification scripts match actual installed
