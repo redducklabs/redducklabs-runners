@@ -9,10 +9,11 @@ ARG KUBECTL_VERSION=v1.36.1
 ARG KUBECTL_SHA256=629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
 ARG DOCTL_VERSION=v1.160.0
 ARG DOCTL_SHA256=b0a23eb02a213e6418e6d5b7dcd5207b6b70a5a5b15e8fcaadc0b8715ac0a735
+# kubeconform and kubesec are built from source in the go-builder stage (their
+# upstream release binaries are below the CVE floor), so only the version pins
+# are needed here -- no download checksum.
 ARG KUBECONFORM_VERSION=v0.7.0
-ARG KUBECONFORM_SHA256=c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
 ARG KUBESEC_VERSION=v2.14.2
-ARG KUBESEC_SHA256=bc252e35f01bc4f133a49404315da3ccfed0209cc9baba33883eaeca0656f35c
 ARG HELM_VERSION=v3.21.0
 ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
 ARG TERRAFORM_VERSION=1.15.5-1
@@ -32,7 +33,48 @@ ARG NODE_VERSION=22.22.3
 ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 
-# Stage 1: Python builder - Install Python tools separately
+# Stage 1: Go builder - build ONLY kubeconform and kubesec from source with a
+# current Go toolchain. Their upstream release binaries ship below this image's
+# CVE floor (kubeconform built with Go 1.24.2; kubesec with Go 1.23.1 and
+# golang.org/x/crypto v0.29.0 -> CVE-2025-22869 / CVE-2024-45337), and both are
+# already at their latest release, so a newer release binary cannot fix it. We
+# compile them with Go ${GO_VERSION} and bump kubesec's x/crypto. kubectl, doctl,
+# trivy, and buildx use verified upstream release binaries in the final stage;
+# the module cache here lives only in this throwaway stage and never ships.
+FROM golang:${GO_VERSION}-alpine AS go-builder
+
+# Re-declare build arguments needed in this stage
+ARG KUBECONFORM_VERSION
+ARG KUBESEC_VERSION
+
+RUN apk add --no-cache git build-base binutils
+
+ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOARCH=amd64
+
+RUN set -eux && \
+    mkdir -p /tmp/binaries && \
+    # kubeconform (toolchain floor only; built with current Go)
+    git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git /tmp/kubeconform-src && \
+    cd /tmp/kubeconform-src && \
+    go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform && \
+    /tmp/binaries/kubeconform -v && \
+    # kubesec: bump golang.org/x/crypto to address CVE-2025-22869 / CVE-2024-45337,
+    # build with current Go, and stamp the version so `kubesec version` is real.
+    git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git /tmp/kubesec-src && \
+    cd /tmp/kubesec-src && \
+    go get golang.org/x/crypto@latest && \
+    go mod tidy && \
+    go build -ldflags="-w -s -X github.com/controlplaneio/kubesec/v2/cmd.version=${KUBESEC_VERSION}" -o /tmp/binaries/kubesec . && \
+    /tmp/binaries/kubesec version && \
+    strip /tmp/binaries/kubeconform /tmp/binaries/kubesec && \
+    # confirm the toolchain/x-crypto floors locally before they leave this stage
+    go version -m /tmp/binaries/kubeconform | awk 'NR==1{print "kubeconform "$2}' && \
+    go version -m /tmp/binaries/kubesec | awk 'NR==1{print "kubesec "$2}' && \
+    go version -m /tmp/binaries/kubesec | awk '/golang.org\/x\/crypto/{print "kubesec x/crypto "$3; exit}'
+
+# Stage 2: Python builder - Install Python tools separately
 FROM python:${PYTHON_VERSION}-slim AS python-builder
 
 # Re-declare build arguments needed in this stage
@@ -43,7 +85,7 @@ RUN pip install --no-cache-dir --target /tmp/python-packages \
     black flake8 mypy ruff pytest pytest-cov pytest-mock \
     requests boto3 pyyaml
 
-# Stage 2: Final image - Copy only binaries and runtime files, zero build artifacts
+# Stage 3: Final image - Copy only binaries and runtime files, zero build artifacts
 FROM ${ACTIONS_RUNNER_BASE}
 
 # Re-declare build arguments needed in this stage
@@ -55,10 +97,6 @@ ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ARG DOCTL_VERSION
 ARG DOCTL_SHA256
-ARG KUBECONFORM_VERSION
-ARG KUBECONFORM_SHA256
-ARG KUBESEC_VERSION
-ARG KUBESEC_SHA256
 ARG PYTHON_VERSION
 ARG NODE_VERSION
 ARG NODE_SHA256
@@ -169,9 +207,11 @@ RUN set -eux && \
     rm -f "${GO_TARBALL}" && \
     /usr/local/go/bin/go version
 
-# Install kubectl, doctl, kubeconform, kubesec from official release binaries
-# (verified SHA256). Replaces the removed source-build stage; fixes the bogus
-# version metadata that source builds produced.
+# Install kubectl and doctl from official release binaries (verified SHA256).
+# These were the tools whose source builds produced bogus v0.0.0 / 0.0.0-dev
+# version metadata; release binaries fix that and pass the CVE floor.
+# kubeconform and kubesec come from the go-builder stage (their release binaries
+# are below the CVE floor); see the COPY --from=go-builder line below.
 RUN set -eux && \
     cd /tmp && \
     # kubectl
@@ -182,19 +222,16 @@ RUN set -eux && \
     wget -q "https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/doctl-${DOCTL_VERSION#v}-linux-amd64.tar.gz" -O doctl.tgz && \
     echo "${DOCTL_SHA256}  doctl.tgz" | sha256sum -c - && \
     tar -xzf doctl.tgz && install -m 0755 doctl /usr/local/bin/doctl && \
-    # kubeconform
-    wget -q "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -O kubeconform.tgz && \
-    echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c - && \
-    tar -xzf kubeconform.tgz && install -m 0755 kubeconform /usr/local/bin/kubeconform && \
-    # kubesec
-    wget -q "https://github.com/controlplaneio/kubesec/releases/download/${KUBESEC_VERSION}/kubesec_linux_amd64.tar.gz" -O kubesec.tgz && \
-    echo "${KUBESEC_SHA256}  kubesec.tgz" | sha256sum -c - && \
-    tar -xzf kubesec.tgz && install -m 0755 kubesec /usr/local/bin/kubesec && \
     # cleanup
-    rm -f /tmp/kubectl /tmp/doctl /tmp/doctl.tgz /tmp/kubeconform /tmp/kubeconform.tgz /tmp/kubesec /tmp/kubesec.tgz && \
+    rm -f /tmp/kubectl /tmp/doctl /tmp/doctl.tgz && \
     # verify meaningful (non-0.0.0) versions
     kubectl version --client -o json | grep -q '"gitVersion": "v1.36' && \
-    doctl version | grep -q '1.160' && \
+    doctl version | grep -q '1.160'
+
+# Copy source-built kubeconform and kubesec from the go-builder stage.
+COPY --from=go-builder /tmp/binaries/kubeconform /tmp/binaries/kubesec /usr/local/bin/
+RUN set -eux && \
+    chmod 0755 /usr/local/bin/kubeconform /usr/local/bin/kubesec && \
     kubeconform -v && \
     kubesec version
 
