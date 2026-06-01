@@ -138,16 +138,25 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy Python packages from builder into the standalone Python's site-packages
 COPY --from=python-builder /tmp/python-packages /opt/python/lib/python${PYTHON_VERSION}/site-packages/
 
-# Install Node.js and pnpm (Security Update - fixes CVE-2024-21538)
-# Use corepack (bundled with Node.js) to manage pnpm rather than the global npm
-# CLI: NodeSource's nodejs 22.22.2-1nodesource1 ships a corrupt npm bundle
-# (missing transitive 'promise-retry') that crashes any `npm install -g`
-# invocation. Corepack avoids invoking the broken npm and is the modern,
-# Node-team-recommended way to manage package managers anyway.
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
-    apt-get install -y nodejs && \
+# Install Node.js from NodeSource via an explicit keyring (no curl|bash),
+# asserting the key fingerprint, then exact-pin the package. pnpm via corepack.
+# Corepack (bundled with Node.js) manages pnpm rather than the global npm CLI:
+# NodeSource's nodejs bundle has shipped a corrupt npm (missing transitive
+# 'promise-retry') that crashes `npm install -g`. Corepack avoids the broken npm
+# and is the Node-team-recommended way to manage package managers anyway.
+RUN set -eux && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+        gpg --dearmor -o /usr/share/keyrings/nodesource.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/nodesource.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" && \
+    echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION} nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
+    apt-get install -y "nodejs=${NODE_PKG_VERSION}" && \
+    node --version && \
     corepack enable && \
-    corepack prepare pnpm@latest --activate && \
+    corepack prepare pnpm@11.5.0 --activate && \
+    pnpm --version && \
     rm -rf /var/lib/apt/lists/*
 
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
@@ -211,29 +220,37 @@ RUN set -eux && \
     rm -rf /tmp/helm.tgz /tmp/linux-amd64 && \
     helm version --short
 
-# Install Terraform using build argument
-RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list && \
+# Install Terraform (exact pin) from HashiCorp apt with key fingerprint assertion.
+RUN set -eux && \
+    wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/hashicorp-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "798AEC654E5C15428C8E42EEAA16FCBCA621E701" && \
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
     apt-get update && \
     apt-get install -y terraform=${TERRAFORM_VERSION} && \
+    terraform version && \
     rm -rf /var/lib/apt/lists/*
 
-# Install database tools, Docker CLI, and GitHub CLI in single optimized layer
-RUN set -ex && \
-    # Install PostgreSQL client and Redis tools \
+# Database tools (Ubuntu archive), Docker CLI + Compose (floating, key-verified),
+# GitHub CLI (floating, key-verified). docker-compose-plugin provides
+# `docker compose`. Docker CLI floor (>=28.3.3) is enforced by the smoke test.
+RUN set -eux && \
     apt-get update && \
     apt-get install -y postgresql-client redis-tools && \
-    # Install Docker CLI (Security Update - fixes CVE-2025-54388) \
+    # Docker apt repo + fingerprint
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-    apt-get update && \
-    apt-get install -y docker-ce-cli && \
-    # Install GitHub CLI \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/docker-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list && \
+    # GitHub CLI apt repo + fingerprint
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    gpg --show-keys --with-colons /usr/share/keyrings/githubcli-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "2C6106201985B60E6C7AC87323F3D4EA75716059" && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
-    apt-get install gh -y && \
+    apt-get install -y docker-ce-cli docker-compose-plugin gh && \
+    docker --version && docker compose version && gh --version && \
     rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI v2 with GPG signature verification and build-time expiry
