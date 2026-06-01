@@ -159,6 +159,35 @@ RUN set -eux && \
     rm -f "${GO_TARBALL}" && \
     /usr/local/go/bin/go version
 
+# Install kubectl, doctl, kubeconform, kubesec from official release binaries
+# (verified SHA256). Replaces the removed source-build stage; fixes the bogus
+# version metadata that source builds produced.
+RUN set -eux && \
+    cd /tmp && \
+    # kubectl
+    wget -q "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c - && \
+    install -m 0755 kubectl /usr/local/bin/kubectl && \
+    # doctl
+    wget -q "https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/doctl-${DOCTL_VERSION#v}-linux-amd64.tar.gz" -O doctl.tgz && \
+    echo "${DOCTL_SHA256}  doctl.tgz" | sha256sum -c - && \
+    tar -xzf doctl.tgz && install -m 0755 doctl /usr/local/bin/doctl && \
+    # kubeconform
+    wget -q "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -O kubeconform.tgz && \
+    echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c - && \
+    tar -xzf kubeconform.tgz && install -m 0755 kubeconform /usr/local/bin/kubeconform && \
+    # kubesec
+    wget -q "https://github.com/controlplaneio/kubesec/releases/download/${KUBESEC_VERSION}/kubesec_linux_amd64.tar.gz" -O kubesec.tgz && \
+    echo "${KUBESEC_SHA256}  kubesec.tgz" | sha256sum -c - && \
+    tar -xzf kubesec.tgz && install -m 0755 kubesec /usr/local/bin/kubesec && \
+    # cleanup
+    rm -f /tmp/kubectl /tmp/doctl /tmp/doctl.tgz /tmp/kubeconform /tmp/kubeconform.tgz /tmp/kubesec /tmp/kubesec.tgz && \
+    # verify meaningful (non-0.0.0) versions
+    kubectl version --client -o json | grep -q '"gitVersion": "v1.36' && \
+    doctl version | grep -q '1.160' && \
+    kubeconform -v && \
+    kubesec version
+
 # Download pre-built trivy binary (avoids Go version compatibility issues)
 RUN set -ex && \
     TRIVY_VERSION_NUM=$(echo ${TRIVY_VERSION} | sed 's/^v//') && \
