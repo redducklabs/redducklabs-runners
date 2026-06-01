@@ -172,9 +172,14 @@ distro-managed. Everything else is pinned + checksum/GPG-verified.
 **AWS CLI signing key rotation**: the AWS CLI v2 signing key (fingerprint
 `A6310ACC4672475C`, full `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`) is
 committed at `docker/aws-cli-public.key` and its documented expiry is
-**2026-07-07** — the build fails loudly after that date by design. To rotate:
-replace `docker/aws-cli-public.key` with the new key from the official AWS CLI
-install guide and update the pinned fingerprint in the Dockerfile.
+**2026-07-07**. Expiry is enforced two ways: the Dockerfile checks it during the
+AWS install layer, **and** `test/verify-aws-key-expiry.sh` runs on the host in CI
+(cache-independent), so an expired key fails the build even if the Docker layer
+cache would otherwise reuse the AWS layer. To rotate: replace
+`docker/aws-cli-public.key` with the new key from the official AWS CLI install
+guide and update the pinned fingerprint in the Dockerfile and in
+`test/verify-aws-key-expiry.sh`. Locally, `--no-cache` (or bumping
+`AWSCLI_VERSION`) forces the in-image check to re-run.
 
 ## 🎮 GitHub Actions Management
 

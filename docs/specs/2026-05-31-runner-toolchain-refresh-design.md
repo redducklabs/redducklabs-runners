@@ -178,6 +178,12 @@ Rules:
   current build time** (step 2 above). Combined with the signature check (step 3),
   the build fails loudly once AWS's documented 2026-07-07 expiry passes — by our
   own check, not by hoping gpg flags it. This is intended, not a regression.
+  - **Cache-independent enforcement:** the in-Dockerfile check lives in a
+    cacheable RUN layer, so a GHA-cached rebuild after expiry could skip it.
+    `test/verify-aws-key-expiry.sh` therefore re-checks the committed key on the
+    host in CI (a `build-and-push` step that runs on every event), independent of
+    Docker layer cache, so expiry always fails the build. Locally, `--no-cache`
+    or bumping `AWSCLI_VERSION` forces the in-image check to re-run.
 - **Rotation procedure (documented in README):** when AWS publishes the next
   signing key, (1) obtain the new ASCII-armored key and its full fingerprint from
   the AWS install guide over HTTPS, (2) replace the committed key file and the
