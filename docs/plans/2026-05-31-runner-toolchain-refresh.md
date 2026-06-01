@@ -7,16 +7,19 @@ verified tool versions; replace Go source-builds with official release binaries;
 add uv/AWS CLI/bc/libmagic1/pytest-mock; fix CRLF durably; and enforce issue #12
 acceptance on the PR build.
 
-**Architecture:** Single-stage-plus-python-builder Dockerfile. The Go builder
-stage is deleted; kubectl/doctl/kubeconform/kubesec/trivy/buildx install from
-official prebuilt linux/amd64 binaries with SHA256 verification. AWS CLI v2 uses
-GPG verification with a pinned, expiry-enforced key. Node/Terraform use exact apt
-pins; Docker CLI/gh and a closed list of Ubuntu-archive packages float by policy.
-A clean Go 1.26.3 runtime stays for CI workflows.
+**Architecture:** Multi-stage Dockerfile (go-builder + python-builder + final).
+kubectl/doctl/trivy/buildx install from official prebuilt linux/amd64 binaries
+with SHA256 verification; **kubeconform and kubesec are source-built** in a
+minimal go-builder stage because their release binaries are below the CVE floor
+(see the "Implementation deviations" note above and §4.7 in the spec). AWS CLI v2
+uses GPG verification with a pinned, expiry-enforced key. Terraform uses an exact
+apt pin; **Node installs from the nodejs.org release tarball** (NodeSource apt is
+stale at 22.15.0); Docker CLI/gh and a closed list of Ubuntu-archive packages
+float by policy. A clean Go 1.26.3 runtime stays for CI workflows.
 
 **Tech Stack:** Docker (multi-stage), Bash, GitHub Actions, Trivy, Python
-(python-build-standalone), Node (NodeSource), apt (HashiCorp/Docker/GitHub
-keyrings).
+(python-build-standalone), Node (nodejs.org release tarball), apt
+(HashiCorp/Docker/GitHub keyrings).
 
 **Spec:** `docs/specs/2026-05-31-runner-toolchain-refresh-design.md`
 
