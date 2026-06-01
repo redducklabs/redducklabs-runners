@@ -1,135 +1,84 @@
-# Multi-stage build to eliminate false positive security alerts and optimize image size
-# Build arguments for version management
-ARG GO_VERSION=1.25.9
+# Multi-stage build: go-builder (kubeconform + kubesec only) + python-builder +
+# final runtime. Most Go tools (kubectl, doctl, trivy, buildx) install as verified
+# official release binaries; kubeconform and kubesec are source-built because their
+# release binaries are below the CVE floor. See
+# docs/specs/2026-05-31-runner-toolchain-refresh-design.md.
+ARG GO_VERSION=1.26.3
+ARG GO_SHA256=2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556
 ARG TRIVY_VERSION=v0.70.0
-ARG KUBECTL_VERSION=v1.33.4
-ARG DOCTL_VERSION=v1.139.0
+ARG TRIVY_SHA256=8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+ARG KUBECTL_VERSION=v1.36.1
+ARG KUBECTL_SHA256=629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
+ARG DOCTL_VERSION=v1.160.0
+ARG DOCTL_SHA256=b0a23eb02a213e6418e6d5b7dcd5207b6b70a5a5b15e8fcaadc0b8715ac0a735
+# kubeconform and kubesec are built from source in the go-builder stage (their
+# upstream release binaries are below the CVE floor), so only the version pins
+# are needed here -- no download checksum.
 ARG KUBECONFORM_VERSION=v0.7.0
 ARG KUBESEC_VERSION=v2.14.2
-ARG HELM_VERSION=v3.18.6
-ARG TERRAFORM_VERSION=1.12.2-1
-# Docker CLI installed as latest version (no longer pinning to specific Ubuntu release)
-ARG BUILDX_VERSION=v0.27.0
-ARG BUILDX_CHECKSUM=4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06
+# Pinned x/crypto for the kubesec source build (CVE-2025-22869 / CVE-2024-45337).
+# Keep deterministic; the CVE-floor gate enforces >= v0.35.0.
+ARG KUBESEC_XCRYPTO_VERSION=v0.52.0
+ARG HELM_VERSION=v3.21.0
+ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
+ARG TERRAFORM_VERSION=1.15.5-1
+ARG BUILDX_VERSION=v0.34.1
+ARG BUILDX_SHA256=f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b
+ARG UV_VERSION=0.11.17
+ARG UV_SHA256=0017ccecaeb4d431d7f93b583ebff0c5c38e00eb734fcf13d05f72ca419125fe
+ARG AWSCLI_VERSION=2.34.57
 ARG PYTHON_VERSION=3.13
-# Pinned python-build-standalone release; provides a self-contained Python with no
-# Launchpad/PPA dependency at runtime. Update by checking
-# https://github.com/astral-sh/python-build-standalone/releases and refreshing the
-# SHA256 from the SHA256SUMS asset.
-ARG PYTHON_BUILD_RELEASE=20260414
+ARG PYTHON_BUILD_RELEASE=20260510
 ARG PYTHON_FULL_VERSION=3.13.13
-ARG PYTHON_TARBALL_SHA256=e5ec3b2c5693215d153c434ac018e75511b2c4f96d2bce30468a477cb3a89d5e
-ARG NODE_VERSION=22.x
+ARG PYTHON_TARBALL_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a8c90ff8407
+# Node installs from the official nodejs.org release tarball (verified SHA256),
+# not NodeSource apt: NodeSource's node_22.x deb channel is stale at 22.15.0 and
+# cannot deliver 22.22.3 (the current Node 22 LTS).
+ARG NODE_VERSION=22.22.3
+ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 
-# Stage 1: Go builder - Build all Go tools with unified cache management
+# Stage 1: Go builder - build ONLY kubeconform and kubesec from source with a
+# current Go toolchain. Their upstream release binaries ship below this image's
+# CVE floor (kubeconform built with Go 1.24.2; kubesec with Go 1.23.1 and
+# golang.org/x/crypto v0.29.0 -> CVE-2025-22869 / CVE-2024-45337), and both are
+# already at their latest release, so a newer release binary cannot fix it. We
+# compile them with Go ${GO_VERSION} and bump kubesec's x/crypto. kubectl, doctl,
+# trivy, and buildx use verified upstream release binaries in the final stage;
+# the module cache here lives only in this throwaway stage and never ships.
 FROM golang:${GO_VERSION}-alpine AS go-builder
 
 # Re-declare build arguments needed in this stage
-ARG KUBECTL_VERSION
-ARG DOCTL_VERSION
 ARG KUBECONFORM_VERSION
 ARG KUBESEC_VERSION
+ARG KUBESEC_XCRYPTO_VERSION
 
-# Install git and build tools
-RUN apk add --no-cache git build-base
+RUN apk add --no-cache git build-base binutils
 
-# Set environment for unified Go builds
 ENV CGO_ENABLED=0
 ENV GOOS=linux
 ENV GOARCH=amd64
-ENV GOPATH=/tmp/unified-go-build
-ENV GOCACHE=/tmp/unified-go-cache
 
-# Create single unified build directory
-WORKDIR /tmp/unified-go-build
-
-# Download and build Go tools in multiple steps for better error tracking
-# Note: trivy is downloaded as pre-built binary in final stage to avoid Go version issues
-RUN set -euo pipefail && \
-    # Set base directory
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}"/{kubectl-src,doctl-src,kubeconform-src,kubesec-src} /tmp/binaries
-
-# Clone repositories in separate steps for better error isolation  
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/kubectl-src" && \
-    echo "Cloning kubectl..." && \
-    cd "${BASE_DIR}/kubectl-src" && \
-    git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git
-
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/doctl-src" && \
-    echo "Cloning doctl..." && \
-    cd "${BASE_DIR}/doctl-src" && \
-    git clone --depth 1 --branch ${DOCTL_VERSION} https://github.com/digitalocean/doctl.git
-
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/kubeconform-src" && \
-    echo "Cloning kubeconform..." && \
-    cd "${BASE_DIR}/kubeconform-src" && \
-    git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git
-
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/kubesec-src" && \
-    echo "Cloning kubesec..." && \
-    cd "${BASE_DIR}/kubesec-src" && \
-    git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git
-
-# Build all tools and perform cleanup in single RUN to prevent layer caching of secrets
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    \
-    # Build kubectl
-    echo "Building kubectl..." && \
-    cd "${BASE_DIR}/kubectl-src/kubernetes" && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl && \
-    [ -f /tmp/binaries/kubectl ] || { echo "kubectl binary not found"; exit 1; } && \
-    \
-    # Build doctl  
-    echo "Building doctl..." && \
-    cd "${BASE_DIR}/doctl-src/doctl" && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/doctl ./cmd/doctl && \
-    [ -f /tmp/binaries/doctl ] || { echo "doctl binary not found"; exit 1; } && \
-    \
-    # Build kubeconform
-    echo "Building kubeconform..." && \
-    cd "${BASE_DIR}/kubeconform-src/kubeconform" && \
-    go mod download && \
+RUN set -eux && \
+    mkdir -p /tmp/binaries && \
+    # kubeconform (toolchain floor only; built with current Go)
+    git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git /tmp/kubeconform-src && \
+    cd /tmp/kubeconform-src && \
     go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform && \
-    [ -f /tmp/binaries/kubeconform ] || { echo "kubeconform binary not found"; exit 1; } && \
-    \
-    # Build kubesec with crypto update
-    echo "Building kubesec..." && \
-    cd "${BASE_DIR}/kubesec-src/kubesec" && \
-    go get -u golang.org/x/crypto@latest && \
+    /tmp/binaries/kubeconform -v && \
+    # kubesec: bump golang.org/x/crypto to address CVE-2025-22869 / CVE-2024-45337,
+    # build with current Go, and stamp the version so `kubesec version` is real.
+    git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git /tmp/kubesec-src && \
+    cd /tmp/kubesec-src && \
+    go get "golang.org/x/crypto@${KUBESEC_XCRYPTO_VERSION}" && \
     go mod tidy && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubesec . && \
-    [ -f /tmp/binaries/kubesec ] || { echo "kubesec binary not found"; exit 1; } && \
-    \
-    # Strip debug symbols (trivy downloaded as pre-built binary in final stage)
-    echo "Stripping debug symbols..." && \
-    cd /tmp/binaries && \
-    for binary in kubectl doctl kubeconform kubesec; do \
-        strip "$binary" || { echo "Failed to strip $binary"; exit 1; } \
-    done && \
-    \
-    # Aggressive cleanup - remove ALL Go-related files in the same layer
-    echo "Performing cleanup..." && \
-    rm -rf /tmp/unified-go-build /tmp/unified-go-cache /go/pkg /root/.cache/go-build /usr/local/go && \
-    rm -rf /go/src /go/bin && \
-    find / -name "*.mod" -type f -delete 2>/dev/null || true && \
-    find / -name "*.sum" -type f -delete 2>/dev/null || true && \
-    find / -name "testdata" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find / -name "*_test.go" -type f -delete 2>/dev/null || true && \
-    echo "Go tools build completed successfully"
+    go build -ldflags="-w -s -X github.com/controlplaneio/kubesec/v2/cmd.version=${KUBESEC_VERSION}" -o /tmp/binaries/kubesec . && \
+    /tmp/binaries/kubesec version && \
+    strip /tmp/binaries/kubeconform /tmp/binaries/kubesec && \
+    # confirm the toolchain/x-crypto floors locally before they leave this stage
+    go version -m /tmp/binaries/kubeconform | awk 'NR==1{print "kubeconform "$2}' && \
+    go version -m /tmp/binaries/kubesec | awk 'NR==1{print "kubesec "$2}' && \
+    go version -m /tmp/binaries/kubesec | awk '/golang.org\/x\/crypto/{print "kubesec x/crypto "$3; exit}'
 
 # Stage 2: Python builder - Install Python tools separately
 FROM python:${PYTHON_VERSION}-slim AS python-builder
@@ -139,7 +88,7 @@ ARG PYTHON_VERSION
 
 # Install Python development tools in isolated layer
 RUN pip install --no-cache-dir --target /tmp/python-packages \
-    black flake8 mypy ruff pytest pytest-cov \
+    black flake8 mypy ruff pytest pytest-cov pytest-mock \
     requests boto3 pyyaml
 
 # Stage 3: Final image - Copy only binaries and runtime files, zero build artifacts
@@ -147,13 +96,24 @@ FROM ${ACTIONS_RUNNER_BASE}
 
 # Re-declare build arguments needed in this stage
 ARG GO_VERSION
+ARG GO_SHA256
 ARG TRIVY_VERSION
+ARG TRIVY_SHA256
+ARG KUBECTL_VERSION
+ARG KUBECTL_SHA256
+ARG DOCTL_VERSION
+ARG DOCTL_SHA256
 ARG PYTHON_VERSION
 ARG NODE_VERSION
+ARG NODE_SHA256
 ARG HELM_VERSION
+ARG HELM_SHA256
 ARG TERRAFORM_VERSION
 ARG BUILDX_VERSION
-ARG BUILDX_CHECKSUM
+ARG BUILDX_SHA256
+ARG UV_VERSION
+ARG UV_SHA256
+ARG AWSCLI_VERSION
 
 # Switch to root for installation
 USER root
@@ -189,6 +149,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl wget git \
     libpq-dev gettext-base \
+    bc libmagic1 \
     ca-certificates gnupg lsb-release \
     software-properties-common \
     apt-transport-https \
@@ -224,84 +185,156 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy Python packages from builder into the standalone Python's site-packages
 COPY --from=python-builder /tmp/python-packages /opt/python/lib/python${PYTHON_VERSION}/site-packages/
 
-# Install Node.js and pnpm (Security Update - fixes CVE-2024-21538)
-# Use corepack (bundled with Node.js) to manage pnpm rather than the global npm
-# CLI: NodeSource's nodejs 22.22.2-1nodesource1 ships a corrupt npm bundle
-# (missing transitive 'promise-retry') that crashes any `npm install -g`
-# invocation. Corepack avoids invoking the broken npm and is the modern,
-# Node-team-recommended way to manage package managers anyway.
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
-    apt-get install -y nodejs && \
+# Install Node.js from the official nodejs.org release tarball (verified SHA256).
+# NodeSource's node_22.x apt channel is stale at 22.15.0 and cannot deliver the
+# current 22.22.3 LTS, so we pin and checksum the upstream binary instead, in
+# line with the other release-binary tools in this image. pnpm via corepack
+# (bundled with Node); we never `npm install -g`.
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -O node.tgz && \
+    echo "${NODE_SHA256}  node.tgz" | sha256sum -c - && \
+    tar -xzf node.tgz -C /usr/local --strip-components=1 --no-same-owner \
+        --exclude='*/CHANGELOG.md' --exclude='*/LICENSE' --exclude='*/README.md' && \
+    rm -f /tmp/node.tgz && \
+    node --version && \
+    npm --version && \
     corepack enable && \
-    corepack prepare pnpm@latest --activate && \
-    rm -rf /var/lib/apt/lists/*
+    corepack prepare pnpm@11.5.0 --activate && \
+    pnpm --version
 
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
-RUN set -ex && \
+RUN set -eux && \
     GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz" && \
     cd /tmp && \
-    wget "https://golang.org/dl/${GO_TARBALL}" && \
+    wget -q "https://go.dev/dl/${GO_TARBALL}" && \
+    echo "${GO_SHA256}  ${GO_TARBALL}" | sha256sum -c - && \
     tar -C /usr/local -xzf "${GO_TARBALL}" && \
     rm -f "${GO_TARBALL}" && \
-    # Verify Go installation
     /usr/local/go/bin/go version
 
-# Copy Go binaries from builder (kubectl, doctl, kubeconform, kubesec)
-COPY --from=go-builder /tmp/binaries/* /usr/local/bin/
+# Install kubectl and doctl from official release binaries (verified SHA256).
+# These were the tools whose source builds produced bogus v0.0.0 / 0.0.0-dev
+# version metadata; release binaries fix that and pass the CVE floor.
+# kubeconform and kubesec come from the go-builder stage (their release binaries
+# are below the CVE floor); see the COPY --from=go-builder line below.
+RUN set -eux && \
+    cd /tmp && \
+    # kubectl
+    wget -q "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c - && \
+    install -m 0755 kubectl /usr/local/bin/kubectl && \
+    # doctl
+    wget -q "https://github.com/digitalocean/doctl/releases/download/${DOCTL_VERSION}/doctl-${DOCTL_VERSION#v}-linux-amd64.tar.gz" -O doctl.tgz && \
+    echo "${DOCTL_SHA256}  doctl.tgz" | sha256sum -c - && \
+    tar -xzf doctl.tgz && install -m 0755 doctl /usr/local/bin/doctl && \
+    # cleanup
+    rm -f /tmp/kubectl /tmp/doctl /tmp/doctl.tgz && \
+    # verify meaningful (non-0.0.0) versions
+    kubectl version --client -o json | grep -q '"gitVersion": "v1.36' && \
+    doctl version | grep -q '1.160'
 
-# Set executable permissions on Go binaries
-RUN chmod +x /usr/local/bin/kubectl /usr/local/bin/doctl /usr/local/bin/kubeconform /usr/local/bin/kubesec
+# Copy source-built kubeconform and kubesec from the go-builder stage.
+COPY --from=go-builder /tmp/binaries/kubeconform /tmp/binaries/kubesec /usr/local/bin/
+RUN set -eux && \
+    chmod 0755 /usr/local/bin/kubeconform /usr/local/bin/kubesec && \
+    kubeconform -v && \
+    kubesec version
 
-# Download pre-built trivy binary (avoids Go version compatibility issues)
-RUN set -ex && \
-    TRIVY_VERSION_NUM=$(echo ${TRIVY_VERSION} | sed 's/^v//') && \
-    wget -q "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION_NUM}_Linux-64bit.tar.gz" -O /tmp/trivy.tar.gz && \
-    tar -xzf /tmp/trivy.tar.gz -C /tmp && \
-    mv /tmp/trivy /usr/local/bin/trivy && \
-    chmod +x /usr/local/bin/trivy && \
-    rm -f /tmp/trivy.tar.gz /tmp/LICENSE /tmp/README.md && \
+# Download pre-built trivy binary (verified SHA256)
+RUN set -eux && \
+    TRIVY_NUM="${TRIVY_VERSION#v}" && \
+    cd /tmp && \
+    wget -q "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_NUM}_Linux-64bit.tar.gz" -O trivy.tgz && \
+    echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c - && \
+    tar -xzf trivy.tgz trivy && \
+    install -m 0755 trivy /usr/local/bin/trivy && \
+    rm -f /tmp/trivy /tmp/trivy.tgz && \
     trivy --version
 
-# Install Helm (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
-RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
-    chmod 700 get_helm.sh && \
-    DESIRED_VERSION=${HELM_VERSION} ./get_helm.sh && \
-    rm get_helm.sh
+# Install Helm from the official release tarball with checksum verification
+# (no curl|bash get-helm-3 script).
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -O helm.tgz && \
+    echo "${HELM_SHA256}  helm.tgz" | sha256sum -c - && \
+    tar -xzf helm.tgz && \
+    install -m 0755 linux-amd64/helm /usr/local/bin/helm && \
+    rm -rf /tmp/helm.tgz /tmp/linux-amd64 && \
+    helm version --short
 
-# Install Terraform using build argument
-RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list && \
+# Install Terraform (exact pin) from HashiCorp apt with key fingerprint assertion.
+RUN set -eux && \
+    wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/hashicorp-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "798AEC654E5C15428C8E42EEAA16FCBCA621E701" && \
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
     apt-get update && \
-    apt-get install -y terraform=${TERRAFORM_VERSION} && \
+    apt-get install -y --no-install-recommends terraform=${TERRAFORM_VERSION} && \
+    terraform version && \
     rm -rf /var/lib/apt/lists/*
 
-# Install database tools, Docker CLI, and GitHub CLI in single optimized layer
-RUN set -ex && \
-    # Install PostgreSQL client and Redis tools \
+# Database tools (Ubuntu archive), Docker CLI + Compose (floating, key-verified),
+# GitHub CLI (floating, key-verified). docker-compose-plugin provides
+# `docker compose`. Docker CLI floor (>=28.3.3) is enforced by the smoke test.
+RUN set -eux && \
     apt-get update && \
-    apt-get install -y postgresql-client redis-tools && \
-    # Install Docker CLI (Security Update - fixes CVE-2025-54388) \
+    apt-get install -y --no-install-recommends postgresql-client redis-tools && \
+    # Docker apt repo + fingerprint
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-    apt-get update && \
-    apt-get install -y docker-ce-cli && \
-    # Install GitHub CLI \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/docker-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list && \
+    # GitHub CLI apt repo + fingerprint
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    gpg --show-keys --with-colons /usr/share/keyrings/githubcli-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "2C6106201985B60E6C7AC87323F3D4EA75716059" && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
-    apt-get install gh -y && \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin gh && \
+    docker --version && docker compose version && gh --version && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker buildx with checksum verification (pre-built binary - released August 2025, built with secure Go version)
-RUN set -ex && \
-    BUILDX_CHECKSUM="4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06" && \
-    wget https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64 && \
-    echo "${BUILDX_CHECKSUM}  buildx-${BUILDX_VERSION}.linux-amd64" | sha256sum -c - && \
-    chmod +x buildx-${BUILDX_VERSION}.linux-amd64 && \
-    mv buildx-${BUILDX_VERSION}.linux-amd64 /usr/local/bin/docker-buildx && \
+# Install AWS CLI v2 with GPG signature verification and build-time expiry
+# enforcement. Key fingerprint is pinned; see docs/specs for rotation procedure.
+COPY aws-cli-public.key /tmp/aws-cli-public.key
+RUN set -eux && \
+    cd /tmp && \
+    gpg --import /tmp/aws-cli-public.key && \
+    gpg --fingerprint A6310ACC4672475C | tr -d ' \n' | grep -q "FB5DB77FD5C118B80511ADA8A6310ACC4672475C" && \
+    EXP="$(gpg --with-colons --list-keys A6310ACC4672475C | awk -F: '/^pub:/{print $7; exit}')" && \
+    [ -n "$EXP" ] && [ "$EXP" -gt "$(date +%s)" ] && \
+    wget -q "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" -O awscliv2.zip && \
+    wget -q "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip.sig" -O awscliv2.zip.sig && \
+    gpg --verify awscliv2.zip.sig awscliv2.zip && \
+    unzip -q awscliv2.zip && \
+    ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip /tmp/awscliv2.zip.sig /tmp/aws-cli-public.key && \
+    aws --version
+
+# Install uv (Python package manager) from the official release tarball
+# (verified SHA256).
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -O uv.tgz && \
+    echo "${UV_SHA256}  uv.tgz" | sha256sum -c - && \
+    tar -xzf uv.tgz && \
+    install -m 0755 uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv && \
+    install -m 0755 uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/uvx && \
+    rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu && \
+    uv --version
+
+# Install Docker buildx (verified SHA256)
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" -O docker-buildx && \
+    echo "${BUILDX_SHA256}  docker-buildx" | sha256sum -c - && \
+    install -m 0755 docker-buildx /usr/local/bin/docker-buildx && \
     mkdir -p /usr/local/lib/docker/cli-plugins && \
-    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx && \
+    rm -f /tmp/docker-buildx && \
+    docker buildx version
 
 # Final cleanup - remove installation files and caches (keep clean Go runtime)
 RUN apt-get clean && \

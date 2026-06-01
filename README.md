@@ -5,14 +5,14 @@ Deploy secure, scalable GitHub Actions self-hosted runners on Kubernetes with co
 ## 🚀 Features
 
 - **GitHub-First Deployment**: Deploy and manage runners directly from GitHub Actions - no local setup required!
-- **Complete Development Environment**: Python 3.13, Node.js 22, Terraform, kubectl, Helm, and more
-- **Security Tools**: kubeconform 0.7.0, kubesec 2.14.2, Trivy 0.65.0
+- **Complete Development Environment**: Python 3.13, Node.js 22, uv, AWS CLI v2, Terraform, kubectl, Helm, and more
+- **Security Tools**: kubeconform 0.7.0, kubesec 2.14.2, Trivy 0.70.0
 - **Docker-in-Docker Support**: Build containers within runners
 - **Auto-scaling**: Configurable min/max runner instances (2-4 default, 4-8 maximum)
 - **Production Ready**: Resource limits, health checks, and monitoring
 - **GitHub Workflows**: Deploy, scale, monitor, and emergency stop - all from GitHub UI
 - **Dual Configuration**: Template versions for reuse and production configs for Red Duck Labs
-- **🛡️ Security Optimized**: Multi-stage Docker build eliminates false positive alerts and reduces image size by 60-80%
+- **🛡️ Security Optimized**: Multi-stage build with SHA256/GPG-verified tools and a machine-enforced CVE-floor gate
 
 ## 📋 Prerequisites
 
@@ -87,29 +87,99 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 ## 🔧 Included Tools
 
 ### Development Tools
-- Python 3.13.6 with pip, black, flake8, mypy, ruff, pytest
-- Node.js 22.x with npm 11.5.2, pnpm
-- Git, curl, wget, jq, zip, unzip
+- Python 3.13.13 with pip, black, flake8, mypy, ruff, pytest, pytest-mock
+- Node.js 22.22.3 with npm, pnpm 11.5.0 (via corepack)
+- uv 0.11.17 (Python package/installer manager)
+- Go 1.26.3 runtime (for CI workflows that build Go)
+- Git, curl, wget, jq, zip, unzip, bc, libmagic1
 
 ### Infrastructure Tools
-- Terraform 1.12.2
-- kubectl 1.33.3
-- Helm 3.18.6
-- doctl 1.139.0 (DigitalOcean CLI)
-- Docker CLI v28.3.3+ with buildx (Security Update - fixes CVE-2025-54388)
+- Terraform 1.15.5
+- kubectl 1.36.1
+- Helm 3.21.0
+- doctl 1.160.0 (DigitalOcean CLI)
+- AWS CLI v2 2.34.57 (GPG-verified, pinned signing key)
+- Docker CLI v28.3.3+ with buildx 0.34.1 and Compose plugin (CVE-2025-54388)
 - GitHub CLI
 
 ### Security & Validation
 - kubeconform 0.7.0 - Kubernetes manifest validation
-- kubesec 2.14.2 - Security risk analysis (built with Go 1.24.6+)
-- Trivy (source build) - Vulnerability scanner with go-getter v1.7.9 security fix
-- Docker buildx - Latest version (built with Go 1.24.6+)
+- kubesec 2.14.2 - Security risk analysis
+- Trivy 0.70.0 - Vulnerability scanner
+- Docker buildx 0.34.1
 
-**Security Note**: All Go-based tools are compiled from source using Go 1.24.6 to address CVE-2025-47907 and related stdlib vulnerabilities.
+**Tool installation strategy**: kubectl, doctl, Trivy, and buildx are official
+upstream **release binaries** verified against a pinned SHA256 before install
+(this fixes the bogus `v0.0.0` / `0.0.0-dev` version strings the old source
+builds produced). kubeconform and kubesec are **source-built** with Go 1.26.3 in
+a throwaway builder stage because their upstream release binaries are built below
+this image's CVE floor (and both are already at their latest release); kubesec's
+`golang.org/x/crypto` is bumped (measured v0.52.0). Helm and Node install from
+official release tarballs with pinned checksums (no `curl | bash`). AWS CLI v2 is
+GPG-verified against a committed, fingerprint-pinned signing key. A clean Go
+runtime stays for CI use.
+
+**CVE floor (machine-enforced at build time and in CI** via
+`test/verify-cve-floor.sh`**)**: every Go tool's toolchain ≥ Go 1.24.6
+(CVE-2025-47907), Trivy's `hashicorp/go-getter` ≥ v1.7.9 (CVE-2025-8959), and
+kubesec's `golang.org/x/crypto` ≥ v0.35.0 (CVE-2025-22869 / CVE-2024-45337).
+Measured at adoption: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.26.3,
+kubesec go1.26.3 (x/crypto v0.52.0), trivy go1.25.9 (go-getter v1.8.6), buildx
+go1.26.3. Trivy's full HIGH/CRITICAL scan runs **report-only** (SARIF to the
+Security tab) because upstream release binaries and the dind base image carry
+fixed CVEs we cannot remediate; the deterministic CVE-floor gate is the enforcing
+check.
+
+**PowerShell is intentionally excluded.** Consumers needing `run.ps1`-style
+parity should use a Linux-equivalent shell script.
 
 ### Database Clients
 - PostgreSQL client
 - Redis tools
+
+## 📦 Software Versions
+
+**Last version check: 2026-05-31.**
+
+| Tool | Version | Source / pin |
+|------|---------|--------------|
+| Python | 3.13.13 (python-build-standalone rel 20260510) | tarball + SHA256 |
+| Node.js | 22.22.3 | nodejs.org tarball + SHA256 |
+| pnpm | 11.5.0 | corepack |
+| uv | 0.11.17 | release tarball + SHA256 |
+| Go (runtime) | 1.26.3 | go.dev tarball + SHA256 |
+| Terraform | 1.15.5 | HashiCorp apt, keyring fingerprint + exact pin |
+| kubectl | 1.36.1 | release binary + SHA256 |
+| Helm | 3.21.0 | get.helm.sh tarball + SHA256 |
+| doctl | 1.160.0 | release binary + SHA256 |
+| AWS CLI | v2 2.34.57 | bundle + GPG (pinned key) |
+| kubeconform | 0.7.0 | source-built (Go 1.26.3) |
+| kubesec | 2.14.2 | source-built (Go 1.26.3, x/crypto v0.52.0) |
+| Trivy | 0.70.0 | release tarball + SHA256 |
+| buildx | 0.34.1 | release binary + SHA256 |
+| Docker CLI / Compose | floating (>= 28.3.3 enforced) | Docker apt, keyring fingerprint |
+| GitHub CLI | floating | GitHub apt, keyring fingerprint |
+
+**Package pinning policy**: third-party apt repos (NodeSource was dropped;
+HashiCorp, Docker, GitHub CLI) install via an explicit keyring whose full
+fingerprint is asserted before use. Node and Terraform are exact-version sources
+(Node via nodejs.org tarball + SHA256; Terraform via apt exact pin). Docker
+CLI/Compose-plugin and GitHub CLI **float** (key-verified; Docker CLI has a smoke
+floor of 28.3.3). Ubuntu-archive packages (`postgresql-client`, `redis-tools`,
+`bc`, `libmagic1`, `gettext-base`, `libpq-dev`, base runtime deps) float as
+distro-managed. Everything else is pinned + checksum/GPG-verified.
+
+**AWS CLI signing key rotation**: the AWS CLI v2 signing key (fingerprint
+`A6310ACC4672475C`, full `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`) is
+committed at `docker/aws-cli-public.key` and its documented expiry is
+**2026-07-07**. Expiry is enforced two ways: the Dockerfile checks it during the
+AWS install layer, **and** `test/verify-aws-key-expiry.sh` runs on the host in CI
+(cache-independent), so an expired key fails the build even if the Docker layer
+cache would otherwise reuse the AWS layer. To rotate: replace
+`docker/aws-cli-public.key` with the new key from the official AWS CLI install
+guide and update the pinned fingerprint in the Dockerfile and in
+`test/verify-aws-key-expiry.sh`. Locally, `--no-cache` (or bumping
+`AWSCLI_VERSION`) forces the in-image check to re-run.
 
 ## 🎮 GitHub Actions Management
 
@@ -231,24 +301,27 @@ cd scripts/
 - **Fix**: Updated Docker CLI to v28.3.3+ from official Docker repository (was v27.5.1 from Ubuntu packages)
 - **Components**: Docker CLI with buildx integration
 
-**CVE-2025-47907 (HIGH)** - Fixed Go stdlib vulnerabilities in database/sql Postgres operations:
-- **Trivy**: Built from source with Go 1.24.6+ (was stdlib v1.24.4)
-- **kubesec**: Built from source with Go 1.24.6+ (was stdlib v1.23.1)  
-- **docker-buildx**: Built from source with Go 1.24.6+ (was stdlib v1.24.5)
+**CVE-2025-47907 (HIGH)** - Go stdlib vulnerability (database/sql, Postgres):
+- Enforced via the CVE-floor gate: every Go tool's toolchain must be ≥ Go 1.24.6.
+- Measured: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.26.3, kubesec
+  go1.26.3, trivy go1.25.9, buildx go1.26.3 — all above the floor.
 
 **CVE-2025-55199 & CVE-2025-55198 (MEDIUM)** - Fixed Helm vulnerabilities:
 - **CVE-2025-55199**: Helm Chart JSON Schema Denial of Service vulnerability
 - **CVE-2025-55198**: Helm YAML Parsing Panic vulnerability
-- **Helm**: Updated to v3.18.6 (from v3.18.4) to address memory exhaustion and panic issues
+- **Helm**: Updated to v3.21.0 (tarball + pinned SHA256).
 
-**CVE-2025-8959 (TBD)** - Fixed go-getter vulnerability in Trivy:
-- **Issue**: go-getter v1.7.8 contains security vulnerability CVE-2025-8959
-- **Impact**: Security vulnerability in HashiCorp's go-getter library used by Trivy
-- **Fix**: Build Trivy from source using PR #9361 branch with go-getter v1.7.9 update
-- **Status**: Temporary source build until official Trivy release includes the fix
-- **Components**: Trivy vulnerability scanner
+**CVE-2025-8959** - go-getter vulnerability in Trivy:
+- **Fix**: Trivy 0.70.0's release binary embeds `hashicorp/go-getter` v1.8.6
+  (≥ v1.7.9). Verified by the CVE-floor gate; no source build needed.
 
-All Go-based security tools now use the latest Go compiler to ensure no vulnerable stdlib versions are present.
+**CVE-2025-22869 / CVE-2024-45337** - golang.org/x/crypto (SSH) in kubesec:
+- **Fix**: kubesec is source-built with `x/crypto` bumped to v0.52.0
+  (≥ v0.35.0). Verified by the CVE-floor gate.
+
+The CVE-floor gate (`test/verify-cve-floor.sh`) enforces these specific CVE
+fixes deterministically at build time and in CI. Trivy's broad HIGH/CRITICAL scan
+is report-only (see "Included Tools").
 
 ## 🐛 Troubleshooting
 
@@ -279,20 +352,19 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
 The runner image uses a comprehensive multi-stage build process to eliminate security false positives and optimize size:
 
 **Security Improvements:**
-- **Zero False Positives**: Eliminates 30+ false positive security alerts from Go module test fixtures
-- **Clean Final Image**: No build artifacts, test certificates, or private keys in the final image
-- **Optimized Scanning**: Faster Trivy scans with `.trivyignore` configuration
-- **CVE Compliance**: All tools built with latest Go 1.24.6+ addressing recent CVEs
-
-**Performance Benefits:**
-- **60-80% Size Reduction**: Multi-stage build eliminates unnecessary dependencies
-- **Faster Builds**: Unified Go build process with shared caching
-- **Improved CI/CD**: Optimized workflows with better resource utilization
+- **Verified supply chain**: release binaries are SHA256-pinned; apt third-party
+  repos use keyrings with asserted fingerprints; AWS CLI is GPG-verified.
+- **Clean Final Image**: the Go builder is a throwaway stage; its module cache and
+  source trees never reach the final image.
+- **CVE-floor gate**: Go toolchains, go-getter, and x/crypto are enforced at build
+  time and in CI (`test/verify-cve-floor.sh`).
 
 **Build Stages:**
-1. **Go Builder Stage**: Builds all Go tools (kubectl, doctl, kubeconform, kubesec, trivy) in unified environment
-2. **Python Builder Stage**: Installs Python development tools in isolation
-3. **Final Runtime Stage**: Copies only necessary binaries and runtime dependencies
+1. **Go Builder Stage**: source-builds kubeconform and kubesec with Go 1.26.3
+   (their upstream release binaries are below the CVE floor).
+2. **Python Builder Stage**: Installs Python development tools in isolation.
+3. **Final Runtime Stage**: installs release binaries (kubectl, doctl, Trivy,
+   buildx, Node, Helm, uv, AWS CLI) and copies the two source-built Go tools.
 
 For detailed technical information, see [docs/DOCKERFILE-SECURITY-REFACTOR.md](docs/DOCKERFILE-SECURITY-REFACTOR.md).
 

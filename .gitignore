@@ -10,6 +10,9 @@
 *.crt
 secrets/
 config/secrets/
+# Exception: AWS CLI v2 *public* signing key (not a secret) must be committed so
+# the runner image can GPG-verify the AWS CLI bundle at build time.
+!docker/aws-cli-public.key
 
 # Kubernetes secrets
 *-secret.yaml

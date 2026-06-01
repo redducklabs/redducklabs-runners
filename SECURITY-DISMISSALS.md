@@ -9,6 +9,14 @@ The vulnerabilities listed in this document originate from the official GitHub A
 2. Requiring maintenance of a completely custom runner implementation
 3. Losing official support and updates from GitHub
 
+> **Scanner posture (2026 refresh):** Trivy's full HIGH/CRITICAL image scan runs
+> **report-only** (SARIF to the Security tab) precisely because base-image
+> components like these — and fixed CVEs embedded in upstream Go release binaries
+> — cannot be remediated from this repo. The **enforcing** build/CI gate is the
+> deterministic CVE-floor check (`test/verify-cve-floor.sh`): Go toolchains ≥
+> 1.24.6, Trivy go-getter ≥ v1.7.9, kubesec x/crypto ≥ v0.35.0. New criticals in
+> the base image continue to be reviewed and recorded here.
+
 ## Risk Assessment Philosophy
 
 These dismissals follow the principle of **Informed Risk Acceptance** where:

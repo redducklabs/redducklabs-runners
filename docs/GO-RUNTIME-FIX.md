@@ -1,5 +1,12 @@
 # Go Runtime Fix - Critical Functionality Restoration
 
+> **Update (2026 toolchain refresh):** the clean Go runtime is now **Go 1.26.3**
+> (was 1.24.6). The broad five-tool Go source-build stage was replaced by release
+> binaries for kubectl/doctl/trivy/buildx; a **minimal** `go-builder` stage
+> remains only to source-build kubeconform and kubesec (their release binaries
+> are below the CVE floor). This document concerns the clean Go **runtime** in the
+> final image; version numbers below are historical unless noted.
+
 ## Issue Summary
 
 The Dockerfile refactor removed Go completely from the final image, breaking functionality for CI workflows that depend on Go being available. Line 213 in the original Dockerfile: `rm -rf /usr/local/go /go /root/.cache/go-build 2>/dev/null || true` eliminated the Go runtime entirely.
@@ -15,7 +22,7 @@ The security refactor was designed to eliminate false positive security alerts f
 
 ### 1. Clean Go Runtime Installation
 
-Added a clean Go 1.24.6 installation in the final stage:
+Added a clean Go 1.26.3 installation in the final stage:
 
 ```dockerfile
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
@@ -84,7 +91,7 @@ Updated `.trivyignore` to exclude the clean Go installation:
 
 ## Functionality Restored
 
-✅ **Go 1.24.6 available** - `go` command in PATH  
+✅ **Go 1.26.3 available** - `go` command in PATH  
 ✅ **Environment variables set** - GOROOT, GOPATH, PATH configured  
 ✅ **Module support** - `go mod init`, `go mod tidy` working  
 ✅ **Compilation support** - `go build`, `go run` working  
