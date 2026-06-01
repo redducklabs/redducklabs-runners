@@ -1,137 +1,35 @@
-# Multi-stage build to eliminate false positive security alerts and optimize image size
-# Build arguments for version management
-ARG GO_VERSION=1.25.9
+# Multi-stage build: python-builder + final runtime. Go tools install as
+# official release binaries (no source build). See
+# docs/specs/2026-05-31-runner-toolchain-refresh-design.md.
+ARG GO_VERSION=1.26.3
+ARG GO_SHA256=2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556
 ARG TRIVY_VERSION=v0.70.0
-ARG KUBECTL_VERSION=v1.33.4
-ARG DOCTL_VERSION=v1.139.0
+ARG TRIVY_SHA256=8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+ARG KUBECTL_VERSION=v1.36.1
+ARG KUBECTL_SHA256=629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
+ARG DOCTL_VERSION=v1.160.0
+ARG DOCTL_SHA256=b0a23eb02a213e6418e6d5b7dcd5207b6b70a5a5b15e8fcaadc0b8715ac0a735
 ARG KUBECONFORM_VERSION=v0.7.0
+ARG KUBECONFORM_SHA256=c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
 ARG KUBESEC_VERSION=v2.14.2
-ARG HELM_VERSION=v3.18.6
-ARG TERRAFORM_VERSION=1.12.2-1
-# Docker CLI installed as latest version (no longer pinning to specific Ubuntu release)
-ARG BUILDX_VERSION=v0.27.0
-ARG BUILDX_CHECKSUM=4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06
+ARG KUBESEC_SHA256=bc252e35f01bc4f133a49404315da3ccfed0209cc9baba33883eaeca0656f35c
+ARG HELM_VERSION=v3.21.0
+ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
+ARG TERRAFORM_VERSION=1.15.5-1
+ARG BUILDX_VERSION=v0.34.1
+ARG BUILDX_SHA256=f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b
+ARG UV_VERSION=0.11.17
+ARG UV_SHA256=0017ccecaeb4d431d7f93b583ebff0c5c38e00eb734fcf13d05f72ca419125fe
+ARG AWSCLI_VERSION=2.34.57
 ARG PYTHON_VERSION=3.13
-# Pinned python-build-standalone release; provides a self-contained Python with no
-# Launchpad/PPA dependency at runtime. Update by checking
-# https://github.com/astral-sh/python-build-standalone/releases and refreshing the
-# SHA256 from the SHA256SUMS asset.
-ARG PYTHON_BUILD_RELEASE=20260414
+ARG PYTHON_BUILD_RELEASE=20260510
 ARG PYTHON_FULL_VERSION=3.13.13
-ARG PYTHON_TARBALL_SHA256=e5ec3b2c5693215d153c434ac018e75511b2c4f96d2bce30468a477cb3a89d5e
+ARG PYTHON_TARBALL_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a8c90ff8407
 ARG NODE_VERSION=22.x
+ARG NODE_PKG_VERSION=22.22.3-1nodesource1
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 
-# Stage 1: Go builder - Build all Go tools with unified cache management
-FROM golang:${GO_VERSION}-alpine AS go-builder
-
-# Re-declare build arguments needed in this stage
-ARG KUBECTL_VERSION
-ARG DOCTL_VERSION
-ARG KUBECONFORM_VERSION
-ARG KUBESEC_VERSION
-
-# Install git and build tools
-RUN apk add --no-cache git build-base
-
-# Set environment for unified Go builds
-ENV CGO_ENABLED=0
-ENV GOOS=linux
-ENV GOARCH=amd64
-ENV GOPATH=/tmp/unified-go-build
-ENV GOCACHE=/tmp/unified-go-cache
-
-# Create single unified build directory
-WORKDIR /tmp/unified-go-build
-
-# Download and build Go tools in multiple steps for better error tracking
-# Note: trivy is downloaded as pre-built binary in final stage to avoid Go version issues
-RUN set -euo pipefail && \
-    # Set base directory
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}"/{kubectl-src,doctl-src,kubeconform-src,kubesec-src} /tmp/binaries
-
-# Clone repositories in separate steps for better error isolation  
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/kubectl-src" && \
-    echo "Cloning kubectl..." && \
-    cd "${BASE_DIR}/kubectl-src" && \
-    git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git
-
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/doctl-src" && \
-    echo "Cloning doctl..." && \
-    cd "${BASE_DIR}/doctl-src" && \
-    git clone --depth 1 --branch ${DOCTL_VERSION} https://github.com/digitalocean/doctl.git
-
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/kubeconform-src" && \
-    echo "Cloning kubeconform..." && \
-    cd "${BASE_DIR}/kubeconform-src" && \
-    git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git
-
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    mkdir -p "${BASE_DIR}/kubesec-src" && \
-    echo "Cloning kubesec..." && \
-    cd "${BASE_DIR}/kubesec-src" && \
-    git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git
-
-# Build all tools and perform cleanup in single RUN to prevent layer caching of secrets
-RUN set -euo pipefail && \
-    BASE_DIR="/tmp/unified-go-build" && \
-    \
-    # Build kubectl
-    echo "Building kubectl..." && \
-    cd "${BASE_DIR}/kubectl-src/kubernetes" && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl && \
-    [ -f /tmp/binaries/kubectl ] || { echo "kubectl binary not found"; exit 1; } && \
-    \
-    # Build doctl  
-    echo "Building doctl..." && \
-    cd "${BASE_DIR}/doctl-src/doctl" && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/doctl ./cmd/doctl && \
-    [ -f /tmp/binaries/doctl ] || { echo "doctl binary not found"; exit 1; } && \
-    \
-    # Build kubeconform
-    echo "Building kubeconform..." && \
-    cd "${BASE_DIR}/kubeconform-src/kubeconform" && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform && \
-    [ -f /tmp/binaries/kubeconform ] || { echo "kubeconform binary not found"; exit 1; } && \
-    \
-    # Build kubesec with crypto update
-    echo "Building kubesec..." && \
-    cd "${BASE_DIR}/kubesec-src/kubesec" && \
-    go get -u golang.org/x/crypto@latest && \
-    go mod tidy && \
-    go mod download && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubesec . && \
-    [ -f /tmp/binaries/kubesec ] || { echo "kubesec binary not found"; exit 1; } && \
-    \
-    # Strip debug symbols (trivy downloaded as pre-built binary in final stage)
-    echo "Stripping debug symbols..." && \
-    cd /tmp/binaries && \
-    for binary in kubectl doctl kubeconform kubesec; do \
-        strip "$binary" || { echo "Failed to strip $binary"; exit 1; } \
-    done && \
-    \
-    # Aggressive cleanup - remove ALL Go-related files in the same layer
-    echo "Performing cleanup..." && \
-    rm -rf /tmp/unified-go-build /tmp/unified-go-cache /go/pkg /root/.cache/go-build /usr/local/go && \
-    rm -rf /go/src /go/bin && \
-    find / -name "*.mod" -type f -delete 2>/dev/null || true && \
-    find / -name "*.sum" -type f -delete 2>/dev/null || true && \
-    find / -name "testdata" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find / -name "*_test.go" -type f -delete 2>/dev/null || true && \
-    echo "Go tools build completed successfully"
-
-# Stage 2: Python builder - Install Python tools separately
+# Stage 1: Python builder - Install Python tools separately
 FROM python:${PYTHON_VERSION}-slim AS python-builder
 
 # Re-declare build arguments needed in this stage
@@ -142,18 +40,33 @@ RUN pip install --no-cache-dir --target /tmp/python-packages \
     black flake8 mypy ruff pytest pytest-cov \
     requests boto3 pyyaml
 
-# Stage 3: Final image - Copy only binaries and runtime files, zero build artifacts
+# Stage 2: Final image - Copy only binaries and runtime files, zero build artifacts
 FROM ${ACTIONS_RUNNER_BASE}
 
 # Re-declare build arguments needed in this stage
 ARG GO_VERSION
+ARG GO_SHA256
 ARG TRIVY_VERSION
+ARG TRIVY_SHA256
+ARG KUBECTL_VERSION
+ARG KUBECTL_SHA256
+ARG DOCTL_VERSION
+ARG DOCTL_SHA256
+ARG KUBECONFORM_VERSION
+ARG KUBECONFORM_SHA256
+ARG KUBESEC_VERSION
+ARG KUBESEC_SHA256
 ARG PYTHON_VERSION
 ARG NODE_VERSION
+ARG NODE_PKG_VERSION
 ARG HELM_VERSION
+ARG HELM_SHA256
 ARG TERRAFORM_VERSION
 ARG BUILDX_VERSION
-ARG BUILDX_CHECKSUM
+ARG BUILDX_SHA256
+ARG UV_VERSION
+ARG UV_SHA256
+ARG AWSCLI_VERSION
 
 # Switch to root for installation
 USER root
@@ -237,20 +150,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
-RUN set -ex && \
+RUN set -eux && \
     GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz" && \
     cd /tmp && \
-    wget "https://golang.org/dl/${GO_TARBALL}" && \
+    wget -q "https://go.dev/dl/${GO_TARBALL}" && \
+    echo "${GO_SHA256}  ${GO_TARBALL}" | sha256sum -c - && \
     tar -C /usr/local -xzf "${GO_TARBALL}" && \
     rm -f "${GO_TARBALL}" && \
-    # Verify Go installation
     /usr/local/go/bin/go version
-
-# Copy Go binaries from builder (kubectl, doctl, kubeconform, kubesec)
-COPY --from=go-builder /tmp/binaries/* /usr/local/bin/
-
-# Set executable permissions on Go binaries
-RUN chmod +x /usr/local/bin/kubectl /usr/local/bin/doctl /usr/local/bin/kubeconform /usr/local/bin/kubesec
 
 # Download pre-built trivy binary (avoids Go version compatibility issues)
 RUN set -ex && \
