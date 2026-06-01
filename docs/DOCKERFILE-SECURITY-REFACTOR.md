@@ -1,6 +1,37 @@
 # Dockerfile Security Refactor - Multi-Stage Build Implementation
 
-## Overview
+## Current architecture (2026 toolchain refresh — authoritative)
+
+> The 2026 toolchain refresh changed the tool-installation strategy. **This
+> section is authoritative**; the historical sections below describe the earlier
+> five-tool source-build approach and are retained for context only.
+
+- **Release binaries (SHA256-pinned):** `kubectl`, `doctl`, `trivy`, `buildx`,
+  plus Node.js, Helm, and uv install from official upstream release artifacts
+  verified against a pinned SHA256 before install. This fixed the bogus
+  `v0.0.0` / `0.0.0-dev` version strings the old source builds produced.
+- **Source-built (Go 1.26.3) in a minimal `go-builder` stage:** `kubeconform`
+  and `kubesec` only. Their upstream release binaries are built below this
+  image's CVE floor (kubeconform Go 1.24.2; kubesec Go 1.23.1 + x/crypto
+  v0.29.0), and both are at their latest release, so they are compiled with Go
+  1.26.3 and kubesec's `golang.org/x/crypto` is bumped to v0.52.0. The builder's
+  module cache lives only in the throwaway stage and never reaches the final
+  image.
+- **AWS CLI v2:** GPG-verified against a committed, fingerprint-pinned signing
+  key with build-time expiry enforcement.
+- **apt third-party repos:** installed via explicit keyrings whose full
+  fingerprints are asserted before use (HashiCorp, Docker, GitHub CLI).
+- **CVE-floor gate (`test/verify-cve-floor.sh`):** machine-enforced at build time
+  and in CI — every Go tool toolchain ≥ Go 1.24.6, Trivy go-getter ≥ v1.7.9,
+  kubesec x/crypto ≥ v0.35.0. Trivy's full HIGH/CRITICAL scan is **report-only**
+  (upstream-binary and dind base-image fixed CVEs cannot be remediated here).
+- **Go runtime:** a clean Go 1.26.3 stays in the final image for CI workflows.
+
+Measured toolchains at adoption (2026-06-01): kubectl go1.26.2, doctl go1.25.0,
+kubeconform go1.26.3, kubesec go1.26.3 (x/crypto v0.52.0), trivy go1.25.9
+(go-getter v1.8.6), buildx go1.26.3.
+
+## Overview (historical — superseded by the section above)
 
 This document describes the comprehensive Dockerfile refactor implemented to eliminate false positive security alerts and optimize the image size for the redducklabs-runners project.
 
@@ -207,20 +238,20 @@ docker run --rm image trivy --version
 **Security Enhancement**: All versions are now managed through build arguments to eliminate hardcoded versions:
 
 ```dockerfile
-# Build arguments for version management
-ARG GO_VERSION=1.24.6
-ARG KUBECTL_VERSION=v1.33.3
-ARG DOCTL_VERSION=v1.139.0
-ARG KUBECONFORM_VERSION=v0.7.0
-ARG KUBESEC_VERSION=v2.14.2
-ARG GO_GETTER_VERSION=v1.7.9
-ARG HELM_VERSION=v3.18.6
-ARG TERRAFORM_VERSION=1.12.2-1
-ARG DOCKER_VERSION=5:28.3.3-1~ubuntu.22.04~jammy
-ARG BUILDX_VERSION=v0.27.0
-ARG PYTHON_VERSION=3.13
-ARG NODE_VERSION=22.x
-ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:latest
+# Build arguments for version management (current values, 2026 refresh)
+ARG GO_VERSION=1.26.3
+ARG KUBECTL_VERSION=v1.36.1
+ARG DOCTL_VERSION=v1.160.0
+ARG KUBECONFORM_VERSION=v0.7.0   # source-built
+ARG KUBESEC_VERSION=v2.14.2      # source-built, x/crypto bumped
+ARG HELM_VERSION=v3.21.0
+ARG TERRAFORM_VERSION=1.15.5-1
+ARG BUILDX_VERSION=v0.34.1
+ARG UV_VERSION=0.11.17
+ARG AWSCLI_VERSION=2.34.57
+ARG PYTHON_FULL_VERSION=3.13.13
+ARG NODE_VERSION=22.22.3          # nodejs.org tarball (NodeSource apt is stale)
+ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 ```
 
 **Benefits**:
@@ -311,16 +342,12 @@ RUN set -euo pipefail && \
 
 ### 1. CVE Fixes Maintained
 
-All current CVE fixes are preserved:
-- **CVE-2025-47907**: Go 1.24.6+ for all builds
-- **CVE-2025-22874**: kubeconform with latest Go
-- **CVE-2025-22869**: kubesec with updated crypto
-- **CVE-2024-45337**: kubesec security updates  
-- **CVE-2025-8959**: Trivy with go-getter v1.7.9+
-- **CVE-2025-54388**: Docker CLI v28.3.3+
-- **CVE-2024-21538**: Node.js 22.x latest
-- **CVE-2025-55199**: Helm 3.18.6
-- **CVE-2025-55198**: Helm 3.18.6
+All current CVE fixes are enforced by the CVE-floor gate (measured 2026-06-01):
+- **CVE-2025-47907**: every Go tool toolchain ≥ Go 1.24.6 (measured go1.25.0–1.26.3)
+- **CVE-2025-22869 / CVE-2024-45337**: kubesec `x/crypto` v0.52.0 (≥ v0.35.0)
+- **CVE-2025-8959**: Trivy `go-getter` v1.8.6 (≥ v1.7.9)
+- **CVE-2025-54388**: Docker CLI ≥ v28.3.3 (smoke-enforced)
+- **CVE-2025-55199 / CVE-2025-55198**: Helm 3.21.0
 
 ### 2. Build Security
 
