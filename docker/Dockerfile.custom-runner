@@ -25,8 +25,11 @@ ARG PYTHON_VERSION=3.13
 ARG PYTHON_BUILD_RELEASE=20260510
 ARG PYTHON_FULL_VERSION=3.13.13
 ARG PYTHON_TARBALL_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a8c90ff8407
-ARG NODE_VERSION=22.x
-ARG NODE_PKG_VERSION=22.22.3-1nodesource1
+# Node installs from the official nodejs.org release tarball (verified SHA256),
+# not NodeSource apt: NodeSource's node_22.x deb channel is stale at 22.15.0 and
+# cannot deliver 22.22.3 (the current Node 22 LTS).
+ARG NODE_VERSION=22.22.3
+ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
 
 # Stage 1: Python builder - Install Python tools separately
@@ -58,7 +61,7 @@ ARG KUBESEC_VERSION
 ARG KUBESEC_SHA256
 ARG PYTHON_VERSION
 ARG NODE_VERSION
-ARG NODE_PKG_VERSION
+ARG NODE_SHA256
 ARG HELM_VERSION
 ARG HELM_SHA256
 ARG TERRAFORM_VERSION
@@ -138,26 +141,23 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy Python packages from builder into the standalone Python's site-packages
 COPY --from=python-builder /tmp/python-packages /opt/python/lib/python${PYTHON_VERSION}/site-packages/
 
-# Install Node.js from NodeSource via an explicit keyring (no curl|bash),
-# asserting the key fingerprint, then exact-pin the package. pnpm via corepack.
-# Corepack (bundled with Node.js) manages pnpm rather than the global npm CLI:
-# NodeSource's nodejs bundle has shipped a corrupt npm (missing transitive
-# 'promise-retry') that crashes `npm install -g`. Corepack avoids the broken npm
-# and is the Node-team-recommended way to manage package managers anyway.
+# Install Node.js from the official nodejs.org release tarball (verified SHA256).
+# NodeSource's node_22.x apt channel is stale at 22.15.0 and cannot deliver the
+# current 22.22.3 LTS, so we pin and checksum the upstream binary instead, in
+# line with the other release-binary tools in this image. pnpm via corepack
+# (bundled with Node); we never `npm install -g`.
 RUN set -eux && \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-        gpg --dearmor -o /usr/share/keyrings/nodesource.gpg && \
-    gpg --show-keys --with-colons /usr/share/keyrings/nodesource.gpg | \
-        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" && \
-    echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION} nodistro main" \
-        > /etc/apt/sources.list.d/nodesource.list && \
-    apt-get update && \
-    apt-get install -y "nodejs=${NODE_PKG_VERSION}" && \
+    cd /tmp && \
+    wget -q "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -O node.tgz && \
+    echo "${NODE_SHA256}  node.tgz" | sha256sum -c - && \
+    tar -xzf node.tgz -C /usr/local --strip-components=1 --no-same-owner \
+        --exclude='*/CHANGELOG.md' --exclude='*/LICENSE' --exclude='*/README.md' && \
+    rm -f /tmp/node.tgz && \
     node --version && \
+    npm --version && \
     corepack enable && \
     corepack prepare pnpm@11.5.0 --activate && \
-    pnpm --version && \
-    rm -rf /var/lib/apt/lists/*
+    pnpm --version
 
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
 RUN set -eux && \
