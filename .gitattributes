@@ -16,5 +16,6 @@
 *.pem  binary
 *.crt  binary
 *.key  binary
-# The AWS CLI public signing key is ASCII-armored text; keep it LF, not binary.
-docker/aws-cli-public.key text eol=lf
+# The AWS CLI public signing key is ASCII-armored text; keep it LF and diffable
+# (the *.key binary macro above unsets diff) so reviewers can inspect the key.
+docker/aws-cli-public.key text diff eol=lf

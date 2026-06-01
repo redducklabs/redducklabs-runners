@@ -1,5 +1,7 @@
-# Multi-stage build: python-builder + final runtime. Go tools install as
-# official release binaries (no source build). See
+# Multi-stage build: go-builder (kubeconform + kubesec only) + python-builder +
+# final runtime. Most Go tools (kubectl, doctl, trivy, buildx) install as verified
+# official release binaries; kubeconform and kubesec are source-built because their
+# release binaries are below the CVE floor. See
 # docs/specs/2026-05-31-runner-toolchain-refresh-design.md.
 ARG GO_VERSION=1.26.3
 ARG GO_SHA256=2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556
@@ -14,6 +16,9 @@ ARG DOCTL_SHA256=b0a23eb02a213e6418e6d5b7dcd5207b6b70a5a5b15e8fcaadc0b8715ac0a73
 # are needed here -- no download checksum.
 ARG KUBECONFORM_VERSION=v0.7.0
 ARG KUBESEC_VERSION=v2.14.2
+# Pinned x/crypto for the kubesec source build (CVE-2025-22869 / CVE-2024-45337).
+# Keep deterministic; the CVE-floor gate enforces >= v0.35.0.
+ARG KUBESEC_XCRYPTO_VERSION=v0.52.0
 ARG HELM_VERSION=v3.21.0
 ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
 ARG TERRAFORM_VERSION=1.15.5-1
@@ -46,6 +51,7 @@ FROM golang:${GO_VERSION}-alpine AS go-builder
 # Re-declare build arguments needed in this stage
 ARG KUBECONFORM_VERSION
 ARG KUBESEC_VERSION
+ARG KUBESEC_XCRYPTO_VERSION
 
 RUN apk add --no-cache git build-base binutils
 
@@ -64,7 +70,7 @@ RUN set -eux && \
     # build with current Go, and stamp the version so `kubesec version` is real.
     git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git /tmp/kubesec-src && \
     cd /tmp/kubesec-src && \
-    go get golang.org/x/crypto@latest && \
+    go get "golang.org/x/crypto@${KUBESEC_XCRYPTO_VERSION}" && \
     go mod tidy && \
     go build -ldflags="-w -s -X github.com/controlplaneio/kubesec/v2/cmd.version=${KUBESEC_VERSION}" -o /tmp/binaries/kubesec . && \
     /tmp/binaries/kubesec version && \
