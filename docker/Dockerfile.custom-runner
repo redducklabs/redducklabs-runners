@@ -37,7 +37,7 @@ ARG PYTHON_VERSION
 
 # Install Python development tools in isolated layer
 RUN pip install --no-cache-dir --target /tmp/python-packages \
-    black flake8 mypy ruff pytest pytest-cov \
+    black flake8 mypy ruff pytest pytest-cov pytest-mock \
     requests boto3 pyyaml
 
 # Stage 2: Final image - Copy only binaries and runtime files, zero build artifacts
@@ -102,6 +102,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl wget git \
     libpq-dev gettext-base \
+    bc libmagic1 \
     ca-certificates gnupg lsb-release \
     software-properties-common \
     apt-transport-https \
@@ -251,6 +252,18 @@ RUN set -eux && \
     ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli && \
     rm -rf /tmp/aws /tmp/awscliv2.zip /tmp/awscliv2.zip.sig /tmp/aws-cli-public.key && \
     aws --version
+
+# Install uv (Python package manager) from the official release tarball
+# (verified SHA256).
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -O uv.tgz && \
+    echo "${UV_SHA256}  uv.tgz" | sha256sum -c - && \
+    tar -xzf uv.tgz && \
+    install -m 0755 uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv && \
+    install -m 0755 uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/uvx && \
+    rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu && \
+    uv --version
 
 # Install Docker buildx (verified SHA256)
 RUN set -eux && \
