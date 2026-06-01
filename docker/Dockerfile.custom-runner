@@ -235,6 +235,23 @@ RUN set -ex && \
     apt-get install gh -y && \
     rm -rf /var/lib/apt/lists/*
 
+# Install AWS CLI v2 with GPG signature verification and build-time expiry
+# enforcement. Key fingerprint is pinned; see docs/specs for rotation procedure.
+COPY aws-cli-public.key /tmp/aws-cli-public.key
+RUN set -eux && \
+    cd /tmp && \
+    gpg --import /tmp/aws-cli-public.key && \
+    gpg --fingerprint A6310ACC4672475C | tr -d ' \n' | grep -q "FB5DB77FD5C118B80511ADA8A6310ACC4672475C" && \
+    EXP="$(gpg --with-colons --list-keys A6310ACC4672475C | awk -F: '/^pub:/{print $7; exit}')" && \
+    [ -n "$EXP" ] && [ "$EXP" -gt "$(date +%s)" ] && \
+    wget -q "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" -O awscliv2.zip && \
+    wget -q "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip.sig" -O awscliv2.zip.sig && \
+    gpg --verify awscliv2.zip.sig awscliv2.zip && \
+    unzip -q awscliv2.zip && \
+    ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip /tmp/awscliv2.zip.sig /tmp/aws-cli-public.key && \
+    aws --version
+
 # Install Docker buildx (verified SHA256)
 RUN set -eux && \
     cd /tmp && \
