@@ -43,7 +43,7 @@ test_go_in_container() {
     # Test 2: Check Go version matches expected version
     echo "🔍 Test 2: Checking Go version..."
     GO_VERSION_ACTUAL=$(docker exec "$container_name" go version | awk '{print $3}' | sed 's/go//')
-    GO_VERSION_EXPECTED="1.24.6"
+    GO_VERSION_EXPECTED="1.26.3"
     
     if [[ "$GO_VERSION_ACTUAL" == "$GO_VERSION_EXPECTED" ]]; then
         echo "✅ Go version correct: $GO_VERSION_ACTUAL"
@@ -142,7 +142,7 @@ fi
 # Run the tests
 if test_go_in_container; then
     echo "🎊 SUCCESS: Go runtime fix verified! The runner now has:"
-    echo "   ✅ Go 1.24.6 runtime available"
+    echo "   ✅ Go 1.26.3 runtime available"
     echo "   ✅ Proper environment variables set"
     echo "   ✅ Clean workspace for runner user"
     echo "   ✅ No cached modules or test fixtures"

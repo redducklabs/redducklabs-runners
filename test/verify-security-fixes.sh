@@ -1,6 +1,13 @@
 #!/bin/bash
 # Verify security fixes in the redducklabs runners
-# This script checks that known CVEs have been resolved
+# This script checks that known CVEs have been resolved.
+#
+# Note: the Go-based tools (kubectl, doctl, kubeconform, kubesec, trivy, buildx)
+# are now installed as official upstream release binaries, not built from source.
+# Their Go toolchain and module versions (e.g. go-getter, golang.org/x/crypto)
+# are verified by the machine-enforced CVE gate documented in
+# docs/specs/2026-05-31-runner-toolchain-refresh-design.md and measured at build
+# time, rather than being controlled by an in-image source build.
 
 set -e
 

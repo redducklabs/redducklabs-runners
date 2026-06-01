@@ -39,26 +39,30 @@ test_tool() {
 }
 
 # Test each tool
-test_tool "Python 3.13" "python3 --version"
-test_tool "Node.js 22" "node --version"
+test_tool "Python 3.13.13" "python3 --version"
+test_tool "Node.js 22.22.3" "node --version"
 test_tool "npm" "npm --version"
 test_tool "pnpm" "pnpm --version"
-test_tool "Terraform 1.12.2" "terraform version -json | jq -r .terraform_version"
-test_tool "kubectl 1.33.3" "kubectl version --client -o json | jq -r .clientVersion.gitVersion"
-test_tool "Helm 3.18.6" "helm version --short"
-test_tool "doctl 1.139.0" "doctl version"
+test_tool "uv" "uv --version"
+test_tool "Terraform 1.15.5" "terraform version -json | jq -r .terraform_version"
+test_tool "kubectl 1.36.1" "kubectl version --client -o json | jq -r .clientVersion.gitVersion"
+test_tool "Helm 3.21.0" "helm version --short"
+test_tool "doctl 1.160.0" "doctl version"
+test_tool "AWS CLI" "aws --version"
 test_tool "Docker CLI" "docker --version"
+test_tool "Docker Compose" "docker compose version"
 test_tool "GitHub CLI" "gh --version | head -1"
 test_tool "PostgreSQL client" "psql --version"
 test_tool "Redis CLI" "redis-cli --version"
 test_tool "Git" "git --version"
 test_tool "curl" "curl --version | head -1"
 test_tool "jq" "jq --version"
+test_tool "bc" "bc --version | head -1"
 
 # Test Python packages
 echo -e "${BLUE}Testing Python packages:${NC}"
 kubectl exec -n arc-runners "$RUNNER_POD" -c runner -- python3 -c "
-import black, flake8, mypy, ruff, pytest, requests, boto3, yaml
+import black, flake8, mypy, ruff, pytest, pytest_mock, requests, boto3, yaml
 print('✓ All Python packages available')
 "
 echo ""
@@ -66,7 +70,7 @@ echo ""
 # Test security tools
 test_tool "kubeconform 0.7.0" "kubeconform -v"
 test_tool "kubesec 2.14.2" "kubesec version"
-test_tool "Trivy 0.65.0" "trivy version | grep Version"
+test_tool "Trivy 0.70.0" "trivy version | grep Version"
 
 echo "====================================================="
 echo -e "${GREEN}All tools verified successfully in redducklabs runners!${NC}"
