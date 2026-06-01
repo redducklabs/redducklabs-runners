@@ -41,18 +41,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-      pull-requests: write
-    
+      pull-requests: write     # PR comment (same-repo only; no-op on forks)
+      security-events: write   # Trivy SARIF upload (push and same-repo PRs)
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
-      
+
+
       - name: Log in to DigitalOcean Container Registry
+        if: github.event_name != 'pull_request'
         run: |
           echo "🔐 Authenticating with DigitalOcean Container Registry..."
           echo "🔧 Working around corrupted doctl binary by using docker login directly..."
@@ -80,12 +81,79 @@ jobs:
           context: ./docker
           file: ./docker/Dockerfile.custom-runner
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ github.event_name == 'pull_request' && 'rdl-runner:pr' || steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           no-cache: ${{ github.event.inputs.force_rebuild == 'true' }}
           platforms: linux/amd64
+
+      - name: Smoke test PR image
+        if: github.event_name == 'pull_request'
+        run: |
+          set -e
+          IMG=rdl-runner:pr
+          docker run --rm "$IMG" bash -c '
+            set -e
+            node --version; pnpm --version; python3 --version; uv --version
+            go version; terraform version
+            kubectl version --client -o json | grep gitVersion
+            helm version --short; doctl version
+            docker --version; docker buildx version; docker compose version
+            gh --version | head -1; aws --version; trivy --version
+            kubeconform -v; kubesec version; psql --version; redis-cli --version
+            bc --version | head -1
+            python3 -c "import pytest_mock"
+            echo ALL_TOOLS_OK'
+          docker run --rm "$IMG" doctl version | grep -q 1.160
+          docker run --rm "$IMG" kubectl version --client -o json | grep -q '"gitVersion": "v1.36'
+          docker run --rm "$IMG" kubesec version | grep -vq '0.0.0'
+          DV=$(docker run --rm "$IMG" docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "Docker CLI: $DV"
+          LOW=$(printf '%s\n28.3.3\n' "$DV" | sort -V | head -1)
+          [ "$LOW" = "28.3.3" ] || { echo "FAIL: Docker CLI $DV < 28.3.3 (CVE-2025-54388)"; exit 1; }
+          echo "OK Docker CLI floor"
+
+      - name: CVE floor gate (PR image, enforcing)
+        if: github.event_name == 'pull_request'
+        run: bash test/verify-cve-floor.sh rdl-runner:pr
+
+      - name: Trivy scan PR image (report-only)
+        # Report-only: an enforcing HIGH/CRITICAL gate is not satisfiable here
+        # (upstream Go release binaries and the dind base image carry fixed CVEs
+        # we cannot remediate). The enforcing security gate is the CVE floor
+        # check above; Trivy provides visibility via logs and the SARIF upload.
+        if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: rdl-runner:pr
+          format: table
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          timeout: '30m'
+          trivyignores: '.trivyignore'
+
+      - name: Trivy SARIF (reporting, same-repo PRs only)
+        # Forks get a read-only token; skip SARIF there so reporting-permission
+        # failures never mask or replace the enforcing gate above.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: rdl-runner:pr
+          format: sarif
+          output: trivy-results.sarif
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          timeout: '30m'
+          trivyignores: '.trivyignore'
+
+      - name: Upload PR Trivy SARIF
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
       
       - name: Verify image
         if: github.event_name != 'pull_request'
@@ -107,9 +175,9 @@ jobs:
           echo "Docker CLI version in image: $DOCKER_VERSION"
           
           # Verify version is 28.3.3 or higher
-          DOCKER_MAJOR=$(echo $DOCKER_VERSION | cut -d. -f1)
-          DOCKER_MINOR=$(echo $DOCKER_VERSION | cut -d. -f2)
-          DOCKER_PATCH=$(echo $DOCKER_VERSION | cut -d. -f3)
+          DOCKER_MAJOR=$(echo "$DOCKER_VERSION" | cut -d. -f1)
+          DOCKER_MINOR=$(echo "$DOCKER_VERSION" | cut -d. -f2)
+          DOCKER_PATCH=$(echo "$DOCKER_VERSION" | cut -d. -f3)
           
           if [[ $DOCKER_MAJOR -gt 28 ]] || \
              [[ $DOCKER_MAJOR -eq 28 && $DOCKER_MINOR -gt 3 ]] || \
@@ -131,7 +199,8 @@ jobs:
           echo "Built image: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest"
       
       - name: Comment on PR
-        if: github.event_name == 'pull_request'
+        # Same-repo PRs only: fork PRs get a read-only token and cannot comment.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
@@ -140,7 +209,7 @@ jobs:
               owner,
               repo,
               issue_number: number,
-              body: `🐳 Docker image build completed successfully!\n\nImage: \`${{ env.REGISTRY }}/${{ env.REPOSITORY }}:pr-${number}\`\n\nThe image has been built and can be tested, but won't be pushed to the registry until this PR is merged.`
+              body: `🐳 Runner image built, smoke-tested, and Trivy-scanned on this PR.\n\nThe image is built and loaded locally as \`rdl-runner:pr\` for verification; it is not pushed to the registry until this PR is merged to \`main\`.`
             });
 
   security-scan:
@@ -166,7 +235,23 @@ jobs:
           
           echo "✅ Successfully authenticated with DigitalOcean Container Registry for Trivy"
       
-      - name: Run Trivy vulnerability scanner
+      - name: CVE floor gate (pushed image, enforcing)
+        run: bash test/verify-cve-floor.sh ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
+
+      - name: Run Trivy vulnerability scanner (report-only)
+        # Report-only (see PR job): the enforcing gate is the CVE floor check
+        # above. Trivy provides visibility via logs and the SARIF upload.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
+          format: table
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          timeout: '30m'
+          trivyignores: '.trivyignore'
+
+      - name: Run Trivy vulnerability scanner (SARIF report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
@@ -177,33 +262,36 @@ jobs:
           timeout: '30m'
           trivyignores: '.trivyignore'
       
-      - name: Verify image optimization and security improvements
+      - name: Verify image tools and meaningful versions
         if: github.event_name != 'pull_request'
         run: |
-          echo "🔍 Verifying security improvements..."
-          
+          echo "🔍 Verifying pushed image tools..."
+          IMG=${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest
+
           # Check final image size
-          IMAGE_SIZE=$(docker images ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest --format "table {{.Size}}" | tail -n1)
+          IMAGE_SIZE=$(docker images "$IMG" --format "{{.Size}}" | tail -n1)
           echo "Final image size: $IMAGE_SIZE"
-          
-          # Verify no Go installation exists in final image
-          echo "🚫 Verifying Go installation is completely removed..."
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest which go || echo "✅ Go binary not found in final image (expected)"
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest test ! -d /usr/local/go && echo "✅ Go installation directory removed"
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest test ! -d /go && echo "✅ GOPATH directory removed"
-          
-          # Verify no build artifacts remain
-          echo "🧹 Verifying build artifacts are removed..."
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest find / -name "*.mod" -o -name "*.sum" -o -name "testdata" -type d 2>/dev/null | wc -l | grep -q "^0$" && echo "✅ No Go module files found"
-          
-          # Verify all required binaries are present and functional
-          echo "🔧 Verifying all tools are functional..."
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest kubectl version --client
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest doctl version
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest kubeconform -v
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest kubesec version
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest trivy --version
-          echo "✅ All Go-based tools are functional"
+
+          # Clean Go runtime is intentionally present for CI workflows.
+          docker run --rm "$IMG" go version
+
+          # Full tool surface + meaningful (non-0.0.0) versions for the
+          # release-binary and source-built tools.
+          docker run --rm "$IMG" bash -c '
+            set -e
+            node --version; pnpm --version; python3 --version; uv --version
+            terraform version; helm version --short
+            kubectl version --client -o json | grep gitVersion
+            doctl version; aws --version; trivy --version
+            kubeconform -v; kubesec version
+            docker --version; docker buildx version; docker compose version
+            gh --version | head -1; psql --version; redis-cli --version
+            bc --version | head -1
+            python3 -c "import pytest_mock"'
+          docker run --rm "$IMG" kubectl version --client -o json | grep -q '"gitVersion": "v1.36'
+          docker run --rm "$IMG" doctl version | grep -q 1.160
+          docker run --rm "$IMG" kubesec version | grep -vq '0.0.0'
+          echo "✅ All tools present and reporting real versions"
       
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
@@ -223,9 +311,10 @@ jobs:
             echo "Critical vulnerabilities: $CRITICAL_COUNT"
             echo "High vulnerabilities: $HIGH_COUNT"
             echo ""
-            echo "✅ Multi-stage build successfully eliminates Go module test fixture false positives"
-            echo "✅ Image optimized with unified build process"
-            echo "✅ Zero build artifacts in final image"
+            echo "✅ Go tools are pinned/verified release binaries (kubectl, doctl,"
+            echo "   trivy, buildx) or source-built with a current Go toolchain"
+            echo "   (kubeconform, kubesec); CVE floor enforced at build time"
+            echo "✅ go-builder module cache stays in the throwaway stage, not the image"
           else
             echo "⚠️ Trivy results file not found"
           fi
