@@ -1,0 +1,20 @@
+* text=auto eol=lf
+*.sh   text eol=lf
+*.bash text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+# binaries / fixtures — never normalize
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.pdf  binary
+*.gz   binary
+*.tgz  binary
+*.tar  binary
+*.zip  binary
+*.pem  binary
+*.crt  binary
+*.key  binary
+# The AWS CLI public signing key is ASCII-armored text; keep it LF, not binary.
+docker/aws-cli-public.key text eol=lf
