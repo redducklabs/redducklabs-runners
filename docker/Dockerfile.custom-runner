@@ -270,7 +270,7 @@ RUN set -eux && \
         awk -F: '/^fpr:/{print $10; exit}' | grep -qx "798AEC654E5C15428C8E42EEAA16FCBCA621E701" && \
     echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
     apt-get update && \
-    apt-get install -y terraform=${TERRAFORM_VERSION} && \
+    apt-get install -y --no-install-recommends terraform=${TERRAFORM_VERSION} && \
     terraform version && \
     rm -rf /var/lib/apt/lists/*
 
@@ -279,7 +279,7 @@ RUN set -eux && \
 # `docker compose`. Docker CLI floor (>=28.3.3) is enforced by the smoke test.
 RUN set -eux && \
     apt-get update && \
-    apt-get install -y postgresql-client redis-tools && \
+    apt-get install -y --no-install-recommends postgresql-client redis-tools && \
     # Docker apt repo + fingerprint
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
     gpg --show-keys --with-colons /usr/share/keyrings/docker-archive-keyring.gpg | \
@@ -292,7 +292,7 @@ RUN set -eux && \
         awk -F: '/^fpr:/{print $10; exit}' | grep -qx "2C6106201985B60E6C7AC87323F3D4EA75716059" && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
-    apt-get install -y docker-ce-cli docker-compose-plugin gh && \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin gh && \
     docker --version && docker compose version && gh --version && \
     rm -rf /var/lib/apt/lists/*
 
