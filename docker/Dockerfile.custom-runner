@@ -188,21 +188,27 @@ RUN set -eux && \
     kubeconform -v && \
     kubesec version
 
-# Download pre-built trivy binary (avoids Go version compatibility issues)
-RUN set -ex && \
-    TRIVY_VERSION_NUM=$(echo ${TRIVY_VERSION} | sed 's/^v//') && \
-    wget -q "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION_NUM}_Linux-64bit.tar.gz" -O /tmp/trivy.tar.gz && \
-    tar -xzf /tmp/trivy.tar.gz -C /tmp && \
-    mv /tmp/trivy /usr/local/bin/trivy && \
-    chmod +x /usr/local/bin/trivy && \
-    rm -f /tmp/trivy.tar.gz /tmp/LICENSE /tmp/README.md && \
+# Download pre-built trivy binary (verified SHA256)
+RUN set -eux && \
+    TRIVY_NUM="${TRIVY_VERSION#v}" && \
+    cd /tmp && \
+    wget -q "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_NUM}_Linux-64bit.tar.gz" -O trivy.tgz && \
+    echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c - && \
+    tar -xzf trivy.tgz trivy && \
+    install -m 0755 trivy /usr/local/bin/trivy && \
+    rm -f /tmp/trivy /tmp/trivy.tgz && \
     trivy --version
 
-# Install Helm (Security Update - fixes CVE-2025-55199 & CVE-2025-55198)
-RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && \
-    chmod 700 get_helm.sh && \
-    DESIRED_VERSION=${HELM_VERSION} ./get_helm.sh && \
-    rm get_helm.sh
+# Install Helm from the official release tarball with checksum verification
+# (no curl|bash get-helm-3 script).
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -O helm.tgz && \
+    echo "${HELM_SHA256}  helm.tgz" | sha256sum -c - && \
+    tar -xzf helm.tgz && \
+    install -m 0755 linux-amd64/helm /usr/local/bin/helm && \
+    rm -rf /tmp/helm.tgz /tmp/linux-amd64 && \
+    helm version --short
 
 # Install Terraform using build argument
 RUN wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
@@ -229,15 +235,16 @@ RUN set -ex && \
     apt-get install gh -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker buildx with checksum verification (pre-built binary - released August 2025, built with secure Go version)
-RUN set -ex && \
-    BUILDX_CHECKSUM="4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06" && \
-    wget https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64 && \
-    echo "${BUILDX_CHECKSUM}  buildx-${BUILDX_VERSION}.linux-amd64" | sha256sum -c - && \
-    chmod +x buildx-${BUILDX_VERSION}.linux-amd64 && \
-    mv buildx-${BUILDX_VERSION}.linux-amd64 /usr/local/bin/docker-buildx && \
+# Install Docker buildx (verified SHA256)
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" -O docker-buildx && \
+    echo "${BUILDX_SHA256}  docker-buildx" | sha256sum -c - && \
+    install -m 0755 docker-buildx /usr/local/bin/docker-buildx && \
     mkdir -p /usr/local/lib/docker/cli-plugins && \
-    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx && \
+    rm -f /tmp/docker-buildx && \
+    docker buildx version
 
 # Final cleanup - remove installation files and caches (keep clean Go runtime)
 RUN apt-get clean && \
