@@ -110,10 +110,12 @@ Every externally downloaded artifact MUST be verified before use, by one of:
 - **apt (approved floating third-party exception)** — install of the repo's
   current stable version from a fingerprint-verified third-party keyring, for a
   small, **closed** list of security-sensitive tools where we deliberately want
-  upstream fixes and pinning would delay CVE patches: Docker CLI `docker-ce-cli`
-  and GitHub CLI `gh` only. Each requires (a) the keyring fingerprint check and
-  (b) a smoke-test version floor that fails the build on regression (Docker CLI ≥
-  28.3.3 for CVE-2025-54388; gh present and runnable). See §4.9.
+  upstream fixes and pinning would delay CVE patches: Docker CLI `docker-ce-cli`,
+  Docker Compose `docker-compose-plugin` (same Docker apt repo/keyring), and
+  GitHub CLI `gh`. Each requires (a) the keyring fingerprint check and (b) a
+  smoke-test gate that fails the build on regression (Docker CLI ≥ 28.3.3 for
+  CVE-2025-54388; `docker compose version` runnable; gh present and runnable).
+  See §4.9.
 - **apt (Ubuntu archive distro-managed runtime deps)** — install from the base
   image's trusted Ubuntu archive (already keyring-trusted in the
   actions-runner base), distro-floating, for low-CVE-sensitivity OS runtime
@@ -277,13 +279,16 @@ version is asserted ≥ the CVE-2025-54388 minimum (28.3.3).
   blanket-ignore it. If a narrow ignore is still required to suppress a specific
   false positive, document the exact reason; otherwise drop it.
 - **Floating vs pinned apt packages (explicit policy):** Docker CLI
-  (`docker-ce-cli`) and GitHub CLI (`gh`) are installed from their official apt
-  repos and are intentionally **distro-floating to the repo's current stable**,
-  because they are security-sensitive and we want upstream fixes; the smoke test
-  asserts the Docker CLI CVE-2025-54388 minimum so a regression fails the build.
-  `postgresql-client`, `redis-tools`, `bc`, `libmagic1`, `gettext-base`,
-  `libpq-dev` are Ubuntu-archive packages left distro-floating (low CVE
-  sensitivity, no consumer version dependency). This policy is stated in README.
+  (`docker-ce-cli`), Docker Compose (`docker-compose-plugin`), and GitHub CLI
+  (`gh`) are installed from their official apt repos (Docker repo / GitHub CLI
+  repo, both keyring-fingerprint-verified) and are intentionally
+  **distro-floating to the repo's current stable**, because they are
+  security-sensitive and we want upstream fixes; the smoke test asserts the Docker
+  CLI CVE-2025-54388 minimum and that `docker compose version` / `gh` run, so a
+  regression fails the build. `postgresql-client`, `redis-tools`, `bc`,
+  `libmagic1`, `gettext-base`, `libpq-dev` are Ubuntu-archive packages left
+  distro-floating (low CVE sensitivity, no consumer version dependency). This
+  policy is stated in README.
 
 ### 4.10 New tools added
 

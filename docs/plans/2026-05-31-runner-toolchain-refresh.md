@@ -49,9 +49,10 @@ apt exact pins (confirm exact strings with `apt-cache madison` at build time):
 - Node: `nodejs=22.22.3-1nodesource1` (NodeSource setup_22.x)
 - Terraform: `terraform=1.15.5-1` (HashiCorp apt)
 
-apt floating (policy, §4.9): `docker-ce-cli`, `gh` (third-party, with smoke
-floor); `postgresql-client`, `redis-tools`, `bc`, `libmagic1`, `gettext-base`,
-`libpq-dev` + base runtime deps (Ubuntu archive).
+apt floating (policy, §4.9): `docker-ce-cli`, `docker-compose-plugin`, `gh`
+(third-party, fingerprint-verified, with smoke floor); `postgresql-client`,
+`redis-tools`, `bc`, `libmagic1`, `gettext-base`, `libpq-dev` + base runtime deps
+(Ubuntu archive).
 
 AWS CLI v2:
 - Bundle: `https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.34.57.zip`
@@ -116,6 +117,8 @@ conventional prefixes.
 *.pem  binary
 *.crt  binary
 *.key  binary
+# The AWS CLI public signing key is ASCII-armored text; keep it LF, not binary.
+docker/aws-cli-public.key text eol=lf
 ```
 
 - [ ] **Step 2: Renormalize**
@@ -394,22 +397,24 @@ git commit -m "feat: pin Trivy/Helm/buildx to verified release artifacts (Helm v
 - Create: `docker/aws-cli-public.key`
 - Modify: `docker/Dockerfile.custom-runner`
 
-- [ ] **Step 1: Obtain and commit the AWS CLI signing public key**
+- [ ] **Step 1: Obtain and commit the AWS CLI signing public key (official source only)**
 
-Run (fetch the key, then assert its fingerprint matches the pinned value before
-saving):
+The key is the ASCII-armored AWS CLI v2 signing key published in the official
+install guide:
+`https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html`
+("To install the AWS CLI" → "Validating the integrity..."). Copy the
+`-----BEGIN PGP PUBLIC KEY BLOCK-----` … `-----END…-----` block verbatim from that
+page into `docker/aws-cli-public.key`. **Do not** fetch it from a public
+keyserver (the spec requires the committed, install-guide source).
+
+Then assert the fingerprint before trusting the file:
 ```bash
-cd docker
-gpg --no-default-keyring --keyring /tmp/awstest.gpg --fingerprint 2>/dev/null || true
-# Retrieve AWS's published key block from the install guide / AWS keyserver, save as aws-cli-public.key
-# Then verify:
-gpg --show-keys --with-colons aws-cli-public.key | awk -F: '/^fpr:/{print $10}' | grep -qx "FB5DB77FD5C118B80511ADA8A6310ACC4672475C" && echo "FINGERPRINT OK" || echo "FINGERPRINT MISMATCH"
-cd ..
+gpg --show-keys --with-colons docker/aws-cli-public.key \
+  | awk -F: '/^fpr:/{print $10; exit}' \
+  | grep -qx "FB5DB77FD5C118B80511ADA8A6310ACC4672475C" \
+  && echo "FINGERPRINT OK" || echo "FINGERPRINT MISMATCH"
 ```
 Expected: `FINGERPRINT OK`. If MISMATCH, stop — do not commit a wrong key.
-
-The key block is the ASCII-armored AWS CLI v2 signing key documented at
-`https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html`.
 
 - [ ] **Step 2: Add the AWS CLI install block to the Dockerfile**
 
@@ -502,20 +507,37 @@ git commit -m "feat: add uv, bc, libmagic1, and pytest-mock to runner image"
 
 ---
 
-## Task 7: Exact-pin Node and Terraform; verify keyring fingerprints
+## Task 7: apt installs with keyring fingerprint assertions (Node exact-pin, Terraform exact-pin, Docker CLI + compose + gh floating)
+
+Every apt third-party repo key MUST be installed as a keyring and its full
+fingerprint asserted before use (spec §4.2). Authoritative fingerprints
+(confirmed 2026-05-31):
+
+| Repo | Fingerprint |
+|------|-------------|
+| NodeSource | `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` |
+| HashiCorp | `798AEC654E5C15428C8E42EEAA16FCBCA621E701` |
+| Docker | `9DC858229FC7DD38854AE2D88D81803C0EBFCD88` |
+| GitHub CLI | `2C6106201985B60E6C7AC87323F3D4EA75716059` |
 
 **Files:**
 - Modify: `docker/Dockerfile.custom-runner`
 
-- [ ] **Step 1: Exact-pin the Node install**
+- [ ] **Step 1: Replace the NodeSource install (no curl|bash) with keyring + fingerprint + exact pin**
 
-Replace the Node install RUN block with an exact-pinned version:
+Replace the existing Node RUN block with:
 
 ```dockerfile
-# Install Node.js (exact pin) and pnpm via corepack. Verify the NodeSource
-# package version is the pinned one.
+# Install Node.js from NodeSource via an explicit keyring (no curl|bash),
+# asserting the key fingerprint, then exact-pin the package. pnpm via corepack.
 RUN set -eux && \
-    curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION} | bash - && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+        gpg --dearmor -o /usr/share/keyrings/nodesource.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/nodesource.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" && \
+    echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION} nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
     apt-get install -y "nodejs=${NODE_PKG_VERSION}" && \
     node --version && \
     corepack enable && \
@@ -524,26 +546,65 @@ RUN set -eux && \
     rm -rf /var/lib/apt/lists/*
 ```
 
-If `apt-get install -y nodejs=${NODE_PKG_VERSION}` fails because NodeSource has
-advanced the `-1nodesource1` revision, run `apt-cache madison nodejs` in the
-layer to discover the exact current `22.22.3-*` string and update
-`NODE_PKG_VERSION`. Do not switch to a floating `nodejs` install.
+If `nodejs=${NODE_PKG_VERSION}` fails because NodeSource advanced the
+`-1nodesource1` revision, run `apt-cache madison nodejs` in the layer to find the
+exact current `22.22.3-*` string and update `NODE_PKG_VERSION`. Do not switch to
+a floating `nodejs` install.
 
-- [ ] **Step 2: Exact-pin Terraform**
+- [ ] **Step 2: Add HashiCorp fingerprint assertion + exact-pin Terraform**
 
-In the Terraform RUN block, change the install line to the exact pin:
+Replace the Terraform RUN block with:
 
 ```dockerfile
+# Install Terraform (exact pin) from HashiCorp apt with key fingerprint assertion.
+RUN set -eux && \
+    wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/hashicorp-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "798AEC654E5C15428C8E42EEAA16FCBCA621E701" && \
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
+    apt-get update && \
     apt-get install -y terraform=${TERRAFORM_VERSION} && \
+    terraform version && \
+    rm -rf /var/lib/apt/lists/*
 ```
-(`TERRAFORM_VERSION=1.15.5-1`.) The HashiCorp keyring dearmor + signed-by repo
-line is unchanged.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Add Docker (CLI + compose) and gh fingerprint assertions; install docker-compose-plugin**
+
+Replace the combined database-tools / Docker CLI / GitHub CLI RUN block with one
+that asserts both fingerprints and installs `docker-ce-cli`,
+`docker-buildx-plugin` is NOT used (we pin buildx in Task 4), `docker-compose-plugin`,
+and `gh` (Docker CLI/gh/compose float per policy §4.9, but keys are
+fingerprint-verified):
+
+```dockerfile
+# Database tools (Ubuntu archive), Docker CLI + Compose (floating, key-verified),
+# GitHub CLI (floating, key-verified). docker-compose-plugin provides
+# `docker compose`. Docker CLI floor (>=28.3.3) is enforced by the smoke test.
+RUN set -eux && \
+    apt-get update && \
+    apt-get install -y postgresql-client redis-tools && \
+    # Docker apt repo + fingerprint
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/docker-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list && \
+    # GitHub CLI apt repo + fingerprint
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    gpg --show-keys --with-colons /usr/share/keyrings/githubcli-archive-keyring.gpg | \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "2C6106201985B60E6C7AC87323F3D4EA75716059" && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    apt-get install -y docker-ce-cli docker-compose-plugin gh && \
+    docker --version && docker compose version && gh --version && \
+    rm -rf /var/lib/apt/lists/*
+```
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add docker/Dockerfile.custom-runner
-git commit -m "feat: exact-pin Node 22.22.3 and Terraform 1.15.5; pin pnpm 11.5.0"
+git commit -m "feat: exact-pin Node 22.22.3/Terraform 1.15.5, add docker compose, assert apt key fingerprints"
 ```
 
 ---
@@ -598,28 +659,66 @@ docker build -f docker/Dockerfile.custom-runner -t rdl-runner:verify ./docker
 Expected: build completes successfully (all checksum/GPG/version assertions pass
 inside the build).
 
-- [ ] **Step 2: Inspect Go build metadata of release binaries (CVE gate)**
+- [ ] **Step 2: Machine-enforced CVE gate (exits non-zero on any failure)**
 
-Run:
+Run this script; it **fails closed** — missing toolchain metadata, a toolchain
+below the floor, or missing go-getter/x-crypto evidence each cause a non-zero
+exit. Do not proceed past a non-zero exit.
+
 ```bash
 docker run --rm rdl-runner:verify bash -lc '
-for b in /usr/local/bin/kubectl /usr/local/bin/doctl /usr/local/bin/kubeconform /usr/local/bin/kubesec /usr/local/bin/trivy /usr/local/bin/docker-buildx; do
-  echo "== $b ==";
-  go version -m "$b" 2>/dev/null | grep -E "^\s+(mod|dep|build\s+-?compiler|.*go1\.)" | head -20 || echo "(no module metadata)";
-  go version "$b" 2>/dev/null || true;
-done'
+set -euo pipefail
+FLOOR_MAJOR=1; FLOOR_MINOR=24; FLOOR_PATCH=6   # Go 1.24.6 floor (CVE-2025-47907)
+ge_floor() { # arg: go1.X.Y -> 0 if >= floor
+  v="${1#go}"; IFS=. read -r a b c <<<"$v"; c="${c:-0}"
+  [ "$a" -gt "$FLOOR_MAJOR" ] && return 0
+  [ "$a" -lt "$FLOOR_MAJOR" ] && return 1
+  [ "$b" -gt "$FLOOR_MINOR" ] && return 0
+  [ "$b" -lt "$FLOOR_MINOR" ] && return 1
+  [ "$c" -ge "$FLOOR_PATCH" ]
+}
+fail=0
+for b in /usr/local/bin/kubectl /usr/local/bin/doctl /usr/local/bin/kubeconform \
+         /usr/local/bin/kubesec /usr/local/bin/trivy /usr/local/bin/docker-buildx; do
+  echo "== $b =="
+  meta="$(go version -m "$b" 2>/dev/null || true)"
+  tv="$(printf "%s\n" "$meta" | awk "/^$/{next} NR==1{print \$2}")"   # e.g. go1.26.3
+  if ! printf "%s" "$tv" | grep -qE "^go1\.[0-9]+"; then
+    echo "FAIL: no Go toolchain metadata for $b"; fail=1; continue
+  fi
+  if ge_floor "$tv"; then echo "OK toolchain $tv"; else echo "FAIL: $tv below floor"; fail=1; fi
+done
+# Trivy must show go-getter >= v1.7.9
+gg="$(go version -m /usr/local/bin/trivy | awk "/hashicorp\/go-getter/{print \$3}" | head -1)"
+echo "trivy go-getter: ${gg:-MISSING}"
+case "$gg" in
+  v1.7.9|v1.7.1[0-9]|v1.8.*|v1.9.*|v2.*) echo "OK go-getter";;
+  *) echo "FAIL: trivy go-getter ${gg:-missing} < v1.7.9"; fail=1;;
+esac
+# kubesec golang.org/x/crypto must be >= v0.35.0 (CVE-2025-22869; also covers
+# CVE-2024-45337 < v0.31.0). Presence alone is insufficient.
+xc="$(go version -m /usr/local/bin/kubesec | awk "/golang.org\/x\/crypto/{print \$3}" | head -1)"
+echo "kubesec x/crypto: ${xc:-MISSING}"
+if [ -z "$xc" ]; then
+  echo "FAIL: kubesec x/crypto metadata missing"; fail=1
+else
+  # compare against floor v0.35.0 using sort -V (lowest must be the floor)
+  low="$(printf "%s\n%s\n" "${xc#v}" "0.35.0" | sort -V | head -1)"
+  if [ "$low" = "0.35.0" ]; then echo "OK x/crypto $xc"; else echo "FAIL: x/crypto $xc < v0.35.0 (CVE-2025-22869)"; fail=1; fi
+fi
+exit $fail'
 ```
-Expected: each binary reports a Go toolchain `go1.x`. Record the toolchain
-version for each. **Gate rule (§4.7):** every toolchain must be ≥ the version the
-current docs cite for CVE-2025-47907 (Go 1.24.6). For Trivy, confirm go-getter
-≥ v1.7.9 in the `dep` lines; for kubesec confirm `golang.org/x/crypto` is a fixed
-version. If any binary lacks metadata or fails the floor, do NOT adopt it —
-revert that tool to source build and document why before continuing.
+Expected: every binary `OK toolchain go1.x`, `OK go-getter`, x/crypto present,
+overall exit 0. **If exit is non-zero (§4.7):** the offending tool is not adopted
+as a release binary — either document a primary-source proof (upstream SBOM /
+signed provenance / release build log naming the toolchain & module versions) in
+the PR, or revert that specific tool to a source build. Soft absence is not
+acceptable.
 
 - [ ] **Step 3: Record gate results**
 
 Write the measured toolchain/module versions into the PR description draft (and
-they will feed the doc updates in Task 12). Keep the raw output for the PR note.
+they will feed the doc updates in Task 14). Keep the raw output for the PR note.
 
 - [ ] **Step 4: No commit (verification only)**
 
@@ -661,13 +760,18 @@ echo ALL_TOOLS_OK'
 Expected: ends with `ALL_TOOLS_OK`; kubectl shows `v1.36.1`, doctl `1.160.0`,
 kubesec a real version (not `0.0.0`).
 
-- [ ] **Step 2: Assert the Docker CLI CVE floor (28.3.3)**
+- [ ] **Step 2: Assert the Docker CLI CVE floor (28.3.3) — fail if below**
 
-Run:
+Run (fails non-zero if below 28.3.3 via `sort -V`):
 ```bash
-docker run --rm rdl-runner:verify bash -lc 'docker --version | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1'
+docker run --rm rdl-runner:verify bash -lc '
+  v="$(docker --version | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)"
+  echo "Docker CLI: $v"
+  low="$(printf "%s\n28.3.3\n" "$v" | sort -V | head -1)"
+  [ "$low" = "28.3.3" ] || { echo "FAIL: $v < 28.3.3 (CVE-2025-54388)"; exit 1; }
+  echo "OK Docker CLI floor"'
 ```
-Expected: ≥ 28.3.3.
+Expected: `OK Docker CLI floor`.
 
 - [ ] **Step 3: Local Trivy scan with the (about-to-be-updated) .trivyignore**
 
@@ -708,19 +812,30 @@ that finding; do not re-add a blanket path ignore.
 (If Tasks 9–10 image is stale because of later commits, rebuild first:
 `docker build -f docker/Dockerfile.custom-runner -t rdl-runner:verify ./docker`.)
 
-- [ ] **Step 3: Run the local Trivy scan**
+- [ ] **Step 3: Run the local Trivy scan against the image tarball (matches CI)**
 
-Run:
+A container has no access to the host Docker daemon's image store, so scan an
+exported tarball with `--input` (Trivy reads the tar directly; no socket needed).
+This command mounts the repo and passes `--ignorefile` so it matches CI's
+`trivyignores: '.trivyignore'` exactly, and it **preserves the failure exit code**
+(no piping through `tail`, which would mask a non-zero Trivy status):
+
 ```bash
-docker run --rm rdl-runner:verify trivy image \
-  --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
-  --timeout 30m rdl-runner:verify 2>&1 | tail -40
+docker save rdl-runner:verify -o /tmp/rdl-runner-verify.tar
+docker run --rm -v /tmp:/scan -v "$PWD":/repo rdl-runner:verify \
+  trivy image --input /scan/rdl-runner-verify.tar --ignorefile /repo/.trivyignore \
+  --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --timeout 30m
+rc=$?
+rm -f /tmp/rdl-runner-verify.tar
+echo "trivy exit: $rc"
+[ "$rc" -eq 0 ] || { echo "FAIL: fixed HIGH/CRITICAL findings (or scan error)"; exit 1; }
 ```
-Note: scanning the image from inside itself requires the image present in the
-daemon; alternatively run host `trivy` if available. Expected: exit 0 (no fixed
-HIGH/CRITICAL) OR only findings already accepted in `.trivyignore`. If a new
-fixed HIGH/CRITICAL appears that the old source build had suppressed, the §4.7
-gate fails — investigate before continuing.
+(`rdl-runner:verify` carries Trivy 0.70.0, so it can scan itself from the tar.
+Alternatively use a host `trivy` with the same flags.) Expected: `trivy exit: 0`.
+If non-zero, a fixed HIGH/CRITICAL is present that `.trivyignore` does not accept
+— the §4.7 gate fails; investigate before continuing. If you must view the report
+body, write it to a file and `tail` the file afterward — never pipe the scan
+itself through `tail` (that discards Trivy's exit status).
 
 - [ ] **Step 4: Commit**
 
@@ -736,14 +851,26 @@ git commit -m "chore: trim .trivyignore to remove obsolete Go builder ignores"
 **Files:**
 - Modify: `.github/workflows/build-runner-image.yml`
 
-- [ ] **Step 1: Split permissions and gate registry login away from PRs**
+- [ ] **Step 1: Set least-privilege permissions and gate registry login away from PRs**
 
-Restructure the `build-and-push` job so that:
-- The job-level `permissions` are reduced to `contents: read`,
-  `pull-requests: write` (for the PR comment), and `security-events: write` (for
-  the PR Trivy SARIF). `packages: write` moves to apply only on push/merge.
+GitHub `permissions` are job/workflow-scoped, not per-step, so we cannot "move
+`packages: write` to push only" with a step conditional. Instead:
+- Set the `build-and-push` job `permissions` to the union actually needed, and
+  rely on event gating for the privileged *actions*:
+  ```yaml
+      permissions:
+        contents: read
+        pull-requests: write     # PR comment (same-repo only; no-op on forks)
+        security-events: write   # PR/-push Trivy SARIF upload
+  ```
+  Note: `packages: write` is **removed** — the image is pushed to the DigitalOcean
+  registry via `docker login`, which needs no GitHub Packages permission. (If a
+  future change pushes to GHCR, add it then.)
 - The "Log in to DigitalOcean Container Registry" step gets
-  `if: github.event_name != 'pull_request'`.
+  `if: github.event_name != 'pull_request'` (PRs never touch `secrets.DO_TOKEN`;
+  fork PRs have no secrets anyway).
+- The PR-comment step (if retained) is gated same-repo only:
+  `if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository`.
 - The build step gets two modes:
   - PR: `push: false`, `load: true`, `tags: rdl-runner:pr`.
   - push/merge: existing `push: true` with the metadata tags.
@@ -793,13 +920,35 @@ Add after the build step:
           docker run --rm "$IMG" kubesec version | grep -vq '0.0.0'
           DV=$(docker run --rm "$IMG" docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "Docker CLI: $DV"
+          LOW=$(printf '%s\n28.3.3\n' "$DV" | sort -V | head -1)
+          [ "$LOW" = "28.3.3" ] || { echo "FAIL: Docker CLI $DV < 28.3.3 (CVE-2025-54388)"; exit 1; }
+          echo "OK Docker CLI floor"
 ```
 
-- [ ] **Step 3: Add a PR Trivy scan step (same job)**
+- [ ] **Step 3: Add a PR Trivy scan that FAILS the build on fixed HIGH/CRITICAL**
+
+The enforcing scan (`exit-code: '1'`) is the gate and runs independent of any
+SARIF/reporting permission, so fork PRs still fail on real findings. SARIF upload
+is a separate, best-effort reporting step gated to contexts where
+`security-events: write` is actually available (same-repo PRs).
 
 ```yaml
-      - name: Trivy scan PR image
+      - name: Trivy scan PR image (enforcing gate)
         if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: rdl-runner:pr
+          format: table
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          timeout: '30m'
+          trivyignores: '.trivyignore'
+
+      - name: Trivy SARIF (reporting, same-repo PRs only)
+        # Forks get a read-only token; skip SARIF there so reporting-permission
+        # failures never mask or replace the enforcing gate above.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: rdl-runner:pr
@@ -811,11 +960,15 @@ Add after the build step:
           trivyignores: '.trivyignore'
 
       - name: Upload PR Trivy SARIF
-        if: github.event_name == 'pull_request' && always()
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
 ```
+
+Also update the existing push-path `security-scan` job's Trivy step to add
+`exit-code: '1'` (currently it only emits SARIF and never fails the build), so
+the gate is enforced on merge too. Keep its SARIF upload.
 
 - [ ] **Step 4: Remove the "verify Go is absent" steps**
 
@@ -829,13 +982,21 @@ Replace the "all tools functional" checks with the §4.8 list (keep the existing
 In the `security-scan` (or `Verify image`) steps, ensure the doctl/kubectl/kubesec
 checks assert non-`0.0.0` versions, mirroring Step 2.
 
-- [ ] **Step 6: Validate workflow YAML**
+- [ ] **Step 6: Validate workflow YAML and Actions semantics**
 
-Run:
+YAML syntax:
 ```bash
 docker run --rm -v "$PWD":/w -w /w rdl-runner:verify bash -lc 'python3 -c "import yaml,sys; yaml.safe_load(open(\".github/workflows/build-runner-image.yml\"))" && echo YAML_OK'
 ```
 Expected: `YAML_OK`.
+
+Actions semantics (catches the ternary tag expression, bad permissions, action
+input typos that PyYAML cannot). Run actionlint via its pinned container:
+```bash
+docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7 -color
+```
+Expected: no errors. If Docker-in-Docker pull is unavailable locally, note that
+actionlint runs in CI and record that only YAML syntax was checked locally.
 
 - [ ] **Step 7: Commit**
 
@@ -913,8 +1074,9 @@ Trivy 0.70.0, kubeconform 0.7.0, kubesec 2.14.2, buildx 0.34.1, **uv 0.11.17**,
 - A "Software Versions" subsection with "Last version check: 2026-05-31".
 - A note that Go tools are official release binaries (not source builds), with
   the measured toolchain versions from Task 9.
-- The floating-package policy (§4.9): docker-ce-cli/gh float (with smoke floor);
-  listed Ubuntu-archive packages float; everything else pinned.
+- The floating-package policy (§4.9): docker-ce-cli/docker-compose-plugin/gh
+  float (fingerprint-verified, with smoke floor); listed Ubuntu-archive packages
+  float; everything else pinned.
 - AWS CLI key fingerprint `A6310ACC4672475C` and the rotation procedure
   (replace `docker/aws-cli-public.key` + the pinned fingerprint when AWS rotates
   the key, expiry 2026-07-07).
@@ -949,24 +1111,33 @@ git commit -m "docs: document release-binary strategy, new versions, and policie
 
 - [ ] **Step 1: Locate AuroLegal Dockerfiles**
 
-Run:
+Set `AUROLEGAL` to wherever the defender.ai repo is checked out, then locate the
+Dockerfiles. In this environment Codex/WSL sees it under `/mnt/d/...` and the
+host git-bash under `D:/...`; use whichever your shell resolves. WSL-first:
 ```bash
-ls "D:/repos/defender.ai"/backend/Dockerfile "D:/repos/defender.ai"/frontend/Dockerfile 2>/dev/null || \
-  find "D:/repos/defender.ai" -maxdepth 3 -name Dockerfile 2>/dev/null
+AUROLEGAL="${AUROLEGAL:-/mnt/d/repos/defender.ai}"   # or D:/repos/defender.ai in git-bash
+ls "$AUROLEGAL"/backend/Dockerfile "$AUROLEGAL"/frontend/Dockerfile 2>/dev/null || \
+  find "$AUROLEGAL" -maxdepth 3 -name Dockerfile 2>/dev/null
 ```
 Record the actual backend/frontend Dockerfile paths and any required build args.
 
 - [ ] **Step 2: Build AuroLegal images from inside the runner image**
 
-Run (adjust paths from Step 1):
+Run (Linux/WSL socket path). Adjust the `-f`/context paths to Step 1's findings:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock \
-  -v "D:/repos/defender.ai":/work -w /work \
+AUROLEGAL="${AUROLEGAL:-/mnt/d/repos/defender.ai}"
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$AUROLEGAL":/work -w /work \
   rdl-runner:verify \
   bash -lc 'docker build -f backend/Dockerfile -t aurolegal-backend:verify backend/ \
             && docker build -f frontend/Dockerfile -t aurolegal-frontend:verify frontend/'
 ```
 Expected: both builds exit 0. Capture the tail of the output.
+
+(Windows Docker Desktop note: if running from PowerShell rather than WSL, use
+`-v //var/run/docker.sock:/var/run/docker.sock` and a `D:/repos/defender.ai`
+host path. Prefer the WSL form above.)
 
 - [ ] **Step 3: Record the result for the PR**
 
