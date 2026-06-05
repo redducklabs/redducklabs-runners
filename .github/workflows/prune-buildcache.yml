@@ -12,6 +12,18 @@ name: Prune Build Cache
 # on the package: Org → Packages → github-runner-buildcache → Settings → Manage
 # Actions access → add this repository with role Admin. Otherwise scheduled
 # prunes fail and storage grows unbounded.
+#
+# NOTE — bounded, self-healing cache-invalidation risk: deleting untagged
+# container versions can (in the multi-arch image-index case) remove a child
+# manifest still referenced by the tagged `:runner` cache, leaving the tag
+# present but un-importable. Here the blast radius is only a COLD rebuild (the
+# next push to main repopulates the cache), never image loss — this package
+# holds ONLY buildx cache, and the runner image builds a single platform
+# (linux/amd64), so the cache is a single manifest rather than an index with
+# untagged children. `min-versions-to-keep: 5` further protects the most
+# recently pushed untagged manifests. If cold builds are observed right after a
+# prune, switch the delete step to age-based `gh api` deletion (only versions
+# older than the cache rewrite cadence).
 
 on:
   schedule:
