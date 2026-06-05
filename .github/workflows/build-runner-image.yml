@@ -124,6 +124,11 @@ jobs:
           docker run --rm "$IMG" doctl version | grep -q 1.160
           docker run --rm "$IMG" kubectl version --client -o json | grep -q '"gitVersion": "v1.36'
           docker run --rm "$IMG" kubesec version | grep -vq '0.0.0'
+          # WeasyPrint's hard (import-time) native libs must load via ctypes —
+          # consumer CI jobs that `import weasyprint` fail at collection
+          # otherwise. These mirror the consumer app's production image; the
+          # optional HarfBuzz subset lib (allow_fail in WeasyPrint) is omitted.
+          docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libpango-1.0.so.0","libpangoft2-1.0.so.0","libharfbuzz.so.0","libfontconfig.so.1","libcairo.so.2","libffi.so.8")]; print("WEASYPRINT_LIBS_OK")' | grep -q WEASYPRINT_LIBS_OK
           DV=$(docker run --rm "$IMG" docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "Docker CLI: $DV"
           LOW=$(printf '%s\n28.3.3\n' "$DV" | sort -V | head -1)
@@ -310,6 +315,9 @@ jobs:
           docker run --rm "$IMG" kubectl version --client -o json | grep -q '"gitVersion": "v1.36'
           docker run --rm "$IMG" doctl version | grep -q 1.160
           docker run --rm "$IMG" kubesec version | grep -vq '0.0.0'
+          # WeasyPrint's hard (import-time) native libs (consumer CI jobs
+          # import weasyprint); optional HarfBuzz subset lib omitted by design.
+          docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libpango-1.0.so.0","libpangoft2-1.0.so.0","libharfbuzz.so.0","libfontconfig.so.1","libcairo.so.2","libffi.so.8")]; print("WEASYPRINT_LIBS_OK")' | grep -q WEASYPRINT_LIBS_OK
           echo "✅ All tools present and reporting real versions"
       
       - name: Upload Trivy scan results to GitHub Security tab

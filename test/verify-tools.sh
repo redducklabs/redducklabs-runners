@@ -67,6 +67,17 @@ print('✓ All Python packages available')
 "
 echo ""
 
+# Test WeasyPrint native libraries (consumer CI jobs that import weasyprint load
+# these shared objects via ctypes; without them import fails at collection).
+echo -e "${BLUE}Testing WeasyPrint native libraries:${NC}"
+kubectl exec -n arc-runners "$RUNNER_POD" -c runner -- python3 -c "
+import ctypes
+for so in ('libpango-1.0.so.0', 'libpangoft2-1.0.so.0', 'libharfbuzz.so.0', 'libfontconfig.so.1', 'libcairo.so.2', 'libffi.so.8'):
+    ctypes.CDLL(so)
+print('✓ WeasyPrint native libraries loadable')
+"
+echo ""
+
 # Test security tools
 test_tool "kubeconform 0.7.0" "kubeconform -v"
 test_tool "kubesec 2.14.2" "kubesec version"

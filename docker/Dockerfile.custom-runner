@@ -9,8 +9,11 @@ ARG TRIVY_VERSION=v0.70.0
 ARG TRIVY_SHA256=8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
 ARG KUBECTL_VERSION=v1.36.1
 ARG KUBECTL_SHA256=629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
-ARG DOCTL_VERSION=v1.160.0
-ARG DOCTL_SHA256=b0a23eb02a213e6418e6d5b7dcd5207b6b70a5a5b15e8fcaadc0b8715ac0a735
+# doctl v1.160.0 was withdrawn upstream (the release/asset now 404s, breaking
+# the build); v1.160.1 is the current stable patch. SHA256 from DigitalOcean's
+# published doctl-1.160.1-checksums.sha256.
+ARG DOCTL_VERSION=v1.160.1
+ARG DOCTL_SHA256=615b03e678ffe391b3f3a3afe74a125f7fde1842135b7c3528862eba9ff16168
 # kubeconform and kubesec are built from source in the go-builder stage (their
 # upstream release binaries are below the CVE floor), so only the version pins
 # are needed here -- no download checksum.
@@ -144,7 +147,20 @@ ENV PATH=${GOROOT}/bin:${GOPATH}/bin:${PATH}
 ENV GO111MODULE=on
 ENV CGO_ENABLED=1
 
-# Update and install runtime dependencies only (no build tools)
+# Update and install runtime dependencies only (no build tools).
+#
+# WeasyPrint native libraries (libpango-* / libharfbuzz / libfontconfig /
+# libcairo2 / libffi8): consumer CI jobs that `import weasyprint` (e.g.
+# aurolegal.ai's backend pytest suite) load these shared objects via ctypes at
+# import time. Without them, `import weasyprint` fails at collection with
+# `OSError: cannot load library 'libpango-1.0-0'`. This set mirrors the consumer
+# app's own runtime image (aurolegal.ai backend/Dockerfile) so the runner image
+# can host that backend test job AND so PDF rendering in CI matches the
+# consumer's production rendering path. WeasyPrint >= 64 no longer hard-requires
+# gdk-pixbuf, so it is omitted. libharfbuzz-subset0 is also intentionally
+# omitted: WeasyPrint loads it with allow_fail=True (optional PDF font
+# subsetting; FontTools fallback otherwise) and the consumer's production image
+# does not ship it, so matching that keeps CI rendering identical to prod.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl wget git \
@@ -154,7 +170,9 @@ RUN apt-get update && \
     software-properties-common \
     apt-transport-https \
     jq zip unzip tar gzip \
-    sudo && \
+    sudo \
+    libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
+    libfontconfig1 libcairo2 libffi8 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python via python-build-standalone (no Launchpad/PPA dependency)
