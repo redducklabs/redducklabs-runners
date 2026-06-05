@@ -38,6 +38,13 @@ on:
         type: string
 
 env:
+  # CLUSTER_NAME is the DigitalOcean cluster NAME (what `doctl kubernetes cluster
+  # kubeconfig save` expects). CLUSTER_CONTEXT is the kubeconfig CONTEXT name that
+  # doctl generates from it (do-<region>-<cluster-name>) and what
+  # `kubectl config use-context` expects. These are DIFFERENT strings and must not
+  # be conflated: passing the context name to `kubeconfig save` fails with
+  # "no cluster goes by the name ...".
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
   CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
   RELEASE_NAME: ${{ vars.RELEASE_NAME || 'redducklabs-runners' }}
   RUNNER_SCALE_SET_NAME: ${{ vars.RUNNER_SCALE_SET_NAME || 'redducklabs-runners' }}
@@ -183,11 +190,13 @@ jobs:
             fi
           done
           
-          # Configure kubectl with retry logic
-          echo "Configuring kubectl for cluster ${CLUSTER_CONTEXT}..."
+          # Configure kubectl with retry logic.
+          # `kubeconfig save` takes the cluster NAME; `use-context` takes the
+          # generated CONTEXT name (do-<region>-<cluster-name>) — these differ.
+          echo "Configuring kubectl for cluster ${CLUSTER_NAME} (context ${CLUSTER_CONTEXT})..."
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring kubectl..."
-            if doctl kubernetes cluster kubeconfig save "${CLUSTER_CONTEXT}"; then
+            if doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"; then
               kubectl config use-context "${CLUSTER_CONTEXT}"
               echo "✅ Kubernetes access configured"
               break
