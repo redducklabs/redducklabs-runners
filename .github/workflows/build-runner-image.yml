@@ -13,7 +13,7 @@ on:
         type: boolean
         required: false
         default: false
-  
+
   # Automatic trigger on changes to Docker files
   push:
     branches:
@@ -40,21 +40,45 @@ on:
       - 'test/verify-aws-key-expiry.sh'
       - '.trivyignore'
 
+# Default (job-level blocks below tighten further per job).
+permissions:
+  contents: read
+
 env:
   REGISTRY: registry.digitalocean.com
   REPOSITORY: redducklabs/github-runner
+  # Buildx layer cache lives in GHCR (type=registry), off the 10 GB Actions
+  # cache limit. PRIVATE package — fork PRs are expected cache misses (a public
+  # package would expose the full runner build layers for marginal speedup).
+  BUILDCACHE_RUNNER: ghcr.io/redducklabs/github-runner-buildcache:runner
+
+# ===========================================================================
+# Least privilege by JOB CONSTRUCTION (not editable-YAML conditionals): the
+# PR/main privilege split is structural — separate jobs with separate
+# `permissions:` blocks. The PR-validate job is `packages: read` (cache read
+# only), loads the image locally for the smoke/CVE/Trivy gates, and never
+# pushes to the DO registry or writes the cache. The main-publish job holds
+# `packages: write`, logs in to DO, pushes, and writes the GHCR cache.
+#
+#   VALIDATE event = pull_request  -> build-runner-pr
+#   PUBLISH event  = push to main, or workflow_dispatch  -> build-runner-main
+# ===========================================================================
 
 jobs:
-  build-and-push:
+  # ---------------------------------------------------------------------------
+  # PR validate — load locally, run gates, no DO push, read-only cache.
+  # Fork PRs get a read-only token: GHCR login + cache read are gated to
+  # same-repo, so forks build cold (cache miss) without failing.
+  # ---------------------------------------------------------------------------
+  build-runner-pr:
+    name: Build Runner (validate)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read           # read the private GHCR buildx cache (same-repo)
       pull-requests: write     # PR comment (same-repo only; no-op on forks)
-      security-events: write   # Trivy SARIF upload (push and same-repo PRs)
-    outputs:
-      # Primary tag actually produced for this event; consumed by security-scan
-      # so it verifies/scans the image just built, not a stale ':latest'.
-      image_ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:${{ steps.meta.outputs.version }}
+      security-events: write   # Trivy SARIF upload (same-repo PRs)
 
     steps:
       - name: Checkout repository
@@ -66,46 +90,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-
-      - name: Log in to DigitalOcean Container Registry
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "🔐 Authenticating with DigitalOcean Container Registry..."
-          echo "🔧 Working around corrupted doctl binary by using docker login directly..."
-          
-          # Use docker login directly with DO token
-          # DigitalOcean registry accepts the token as both username and password
-          echo "${{ secrets.DO_TOKEN }}" | docker login ${{ env.REGISTRY }} --username ${{ secrets.DO_TOKEN }} --password-stdin
-          
-          echo "✅ Successfully authenticated with DigitalOcean Container Registry"
-      
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Log in to GHCR (buildx cache)
+        # Same-repo only: fork PRs get a read-only token with no access to the
+        # private cache package — they skip login and build cold.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v3
         with:
-          images: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-      
-      - name: Build and push Docker image
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build runner image (validate, load locally)
         uses: docker/build-push-action@v5
         with:
           context: ./docker
           file: ./docker/Dockerfile.custom-runner
-          push: ${{ github.event_name != 'pull_request' }}
-          load: ${{ github.event_name == 'pull_request' }}
-          tags: ${{ github.event_name == 'pull_request' && 'rdl-runner:pr' || steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          push: false
+          load: true
+          tags: rdl-runner:pr
+          # Read-only cache; only same-repo PRs can reach the private package.
+          cache-from: ${{ github.event.pull_request.head.repo.full_name == github.repository && format('type=registry,ref={0}', env.BUILDCACHE_RUNNER) || '' }}
           no-cache: ${{ github.event.inputs.force_rebuild == 'true' }}
           platforms: linux/amd64
 
       - name: Smoke test PR image
-        if: github.event_name == 'pull_request'
         run: |
           set -e
           IMG=rdl-runner:pr
@@ -136,7 +144,6 @@ jobs:
           echo "OK Docker CLI floor"
 
       - name: CVE floor gate (PR image, enforcing)
-        if: github.event_name == 'pull_request'
         run: bash test/verify-cve-floor.sh rdl-runner:pr
 
       - name: Trivy scan PR image (report-only)
@@ -144,7 +151,6 @@ jobs:
         # (upstream Go release binaries and the dind base image carry fixed CVEs
         # we cannot remediate). The enforcing security gate is the CVE floor
         # check above; Trivy provides visibility via logs and the SARIF upload.
-        if: github.event_name == 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: rdl-runner:pr
@@ -158,7 +164,7 @@ jobs:
       - name: Trivy SARIF (reporting, same-repo PRs only)
         # Forks get a read-only token; skip SARIF there so reporting-permission
         # failures never mask or replace the enforcing gate above.
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event.pull_request.head.repo.full_name == github.repository
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: rdl-runner:pr
@@ -170,13 +176,97 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Upload PR Trivy SARIF
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
-      
+
+      - name: Comment on PR
+        # Same-repo PRs only: fork PRs get a read-only token and cannot comment.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo, number } = context.issue;
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: number,
+              body: `🐳 Runner image built, smoke-tested, and Trivy-scanned on this PR.\n\nThe image is built and loaded locally as \`rdl-runner:pr\` for verification; it is not pushed to the registry until this PR is merged to \`main\`.`
+            });
+
+  # ---------------------------------------------------------------------------
+  # Main publish — push to the DO registry, write the GHCR cache.
+  # Runs on push-to-main and workflow_dispatch. cache-to writes ONLY on a real
+  # push to main, so manual/force_rebuild dispatches never poison the cache.
+  # ---------------------------------------------------------------------------
+  build-runner-main:
+    name: Build Runner (publish)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # write the GHCR buildx cache
+    outputs:
+      # Primary tag actually produced for this event; consumed by security-scan
+      # so it verifies/scans the image just built, not a stale ':latest'.
+      image_ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify AWS signing key not expired (cache-independent)
+        run: bash test/verify-aws-key-expiry.sh docker/aws-cli-public.key
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DigitalOcean Container Registry
+        run: |
+          echo "🔐 Authenticating with DigitalOcean Container Registry..."
+          echo "🔧 Working around corrupted doctl binary by using docker login directly..."
+
+          # Use docker login directly with DO token
+          # DigitalOcean registry accepts the token as both username and password
+          echo "${{ secrets.DO_TOKEN }}" | docker login ${{ env.REGISTRY }} --username ${{ secrets.DO_TOKEN }} --password-stdin
+
+          echo "✅ Successfully authenticated with DigitalOcean Container Registry"
+
+      - name: Log in to GHCR (buildx cache)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.custom-runner
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.BUILDCACHE_RUNNER }}
+          # Write the shared cache ONLY on a real push to main — manual and
+          # force_rebuild dispatches must not poison it.
+          cache-to: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && format('type=registry,ref={0},mode=max', env.BUILDCACHE_RUNNER) || '' }}
+          no-cache: ${{ github.event.inputs.force_rebuild == 'true' }}
+          platforms: linux/amd64
+
       - name: Verify image
-        if: github.event_name != 'pull_request'
         env:
           IMG: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:${{ steps.meta.outputs.version }}
         run: |
@@ -190,19 +280,18 @@ jobs:
           echo "Image verification complete!"
 
       - name: Verify Docker security fix (CVE-2025-54388)
-        if: github.event_name != 'pull_request'
         env:
           IMG: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:${{ steps.meta.outputs.version }}
         run: |
           echo "🔒 Verifying Docker CLI v28.3.3+ for CVE-2025-54388 fix..."
           DOCKER_VERSION=$(docker run --rm "$IMG" docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "Docker CLI version in image: $DOCKER_VERSION"
-          
+
           # Verify version is 28.3.3 or higher
           DOCKER_MAJOR=$(echo "$DOCKER_VERSION" | cut -d. -f1)
           DOCKER_MINOR=$(echo "$DOCKER_VERSION" | cut -d. -f2)
           DOCKER_PATCH=$(echo "$DOCKER_VERSION" | cut -d. -f3)
-          
+
           if [[ $DOCKER_MAJOR -gt 28 ]] || \
              [[ $DOCKER_MAJOR -eq 28 && $DOCKER_MINOR -gt 3 ]] || \
              [[ $DOCKER_MAJOR -eq 28 && $DOCKER_MINOR -eq 3 && $DOCKER_PATCH -ge 3 ]]; then
@@ -212,7 +301,7 @@ jobs:
             echo "Required: v28.3.3 or higher"
             exit 1
           fi
-      
+
       - name: Update deployment values (main branch only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
@@ -221,53 +310,39 @@ jobs:
           echo "  cd deploy && ./deploy.sh"
           echo ""
           echo "Built image: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}:latest"
-      
-      - name: Comment on PR
-        # Same-repo PRs only: fork PRs get a read-only token and cannot comment.
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo, number } = context.issue;
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: number,
-              body: `🐳 Runner image built, smoke-tested, and Trivy-scanned on this PR.\n\nThe image is built and loaded locally as \`rdl-runner:pr\` for verification; it is not pushed to the registry until this PR is merged to \`main\`.`
-            });
 
   security-scan:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
-    needs: build-and-push
+    needs: build-runner-main
     permissions:
       contents: read
       security-events: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Authenticate with DigitalOcean Registry (for Trivy)
         run: |
           echo "🔐 Authenticating with registry for Trivy scan..."
           echo "🔧 Working around corrupted doctl binary by using docker login directly..."
-          
+
           # Use docker login directly with DO token
           # DigitalOcean registry accepts the token as both username and password
           echo "${{ secrets.DO_TOKEN }}" | docker login ${{ env.REGISTRY }} --username ${{ secrets.DO_TOKEN }} --password-stdin
-          
+
           echo "✅ Successfully authenticated with DigitalOcean Container Registry for Trivy"
-      
+
       - name: CVE floor gate (pushed image, enforcing)
-        run: bash test/verify-cve-floor.sh "${{ needs.build-and-push.outputs.image_ref }}"
+        run: bash test/verify-cve-floor.sh "${{ needs.build-runner-main.outputs.image_ref }}"
 
       - name: Run Trivy vulnerability scanner (report-only)
         # Report-only (see PR job): the enforcing gate is the CVE floor check
         # above. Trivy provides visibility via logs and the SARIF upload.
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ needs.build-and-push.outputs.image_ref }}
+          image-ref: ${{ needs.build-runner-main.outputs.image_ref }}
           format: table
           exit-code: '0'
           severity: 'CRITICAL,HIGH'
@@ -278,7 +353,7 @@ jobs:
       - name: Run Trivy vulnerability scanner (SARIF report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ needs.build-and-push.outputs.image_ref }}
+          image-ref: ${{ needs.build-runner-main.outputs.image_ref }}
           format: sarif
           output: trivy-results.sarif
           severity: 'CRITICAL,HIGH'
@@ -287,10 +362,9 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Verify image tools and meaningful versions
-        if: github.event_name != 'pull_request'
         run: |
           echo "🔍 Verifying pushed image tools..."
-          IMG=${{ needs.build-and-push.outputs.image_ref }}
+          IMG=${{ needs.build-runner-main.outputs.image_ref }}
 
           # Check final image size
           IMAGE_SIZE=$(docker images "$IMG" --format "{{.Size}}" | tail -n1)
@@ -319,13 +393,13 @@ jobs:
           # import weasyprint); optional HarfBuzz subset lib omitted by design.
           docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libpango-1.0.so.0","libpangoft2-1.0.so.0","libharfbuzz.so.0","libfontconfig.so.1","libcairo.so.2","libffi.so.8")]; print("WEASYPRINT_LIBS_OK")' | grep -q WEASYPRINT_LIBS_OK
           echo "✅ All tools present and reporting real versions"
-      
+
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: trivy-results.sarif
-          
+
       - name: Security scan summary
         if: always()
         run: |

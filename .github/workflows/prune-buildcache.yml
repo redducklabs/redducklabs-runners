@@ -1,0 +1,76 @@
+name: Prune Build Cache
+
+# GHCR has no ECR-style lifecycle policy. Overwriting the buildx cache tag
+# leaves the previous manifest as an UNTAGGED GHCR version; with mode=max +
+# frequent main builds these accumulate in GitHub Packages storage. This
+# workflow prunes the untagged versions (keeping the last few for safety).
+#
+# IMPORTANT — package access requirement: deleting org package versions with the
+# default GITHUB_TOKEN requires the repository to have *Admin* access to the
+# package (token `packages: write` is necessary but NOT sufficient). After the
+# first `main` build publishes `github-runner-buildcache`, grant this repo Admin
+# on the package: Org → Packages → github-runner-buildcache → Settings → Manage
+# Actions access → add this repository with role Admin. Otherwise scheduled
+# prunes fail and storage grows unbounded.
+#
+# NOTE — bounded, self-healing cache-invalidation risk: deleting untagged
+# container versions can (in the multi-arch image-index case) remove a child
+# manifest still referenced by the tagged `:runner` cache, leaving the tag
+# present but un-importable. Here the blast radius is only a COLD rebuild (the
+# next push to main repopulates the cache), never image loss — this package
+# holds ONLY buildx cache, and the runner image builds a single platform
+# (linux/amd64), so the cache is a single manifest rather than an index with
+# untagged children. `min-versions-to-keep: 5` further protects the most
+# recently pushed untagged manifests. If cold builds are observed right after a
+# prune, switch the delete step to age-based `gh api` deletion (only versions
+# older than the cache rewrite cadence).
+
+on:
+  schedule:
+    # Weekly real prune (Sundays 04:00 UTC).
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List untagged candidates only; do NOT delete."
+        type: boolean
+        default: true
+
+permissions:
+  packages: write
+
+concurrency:
+  group: prune-buildcache
+  cancel-in-progress: false
+
+jobs:
+  # The delete-package-versions action has no dry-run mode, so dry-run is a
+  # SEPARATE list-only step that never calls the action.
+  list:
+    name: List untagged cache versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: List untagged versions (candidates for deletion)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Untagged versions of ghcr.io/redducklabs/github-runner-buildcache:"
+          gh api "/orgs/redducklabs/packages/container/github-runner-buildcache/versions" \
+            --paginate \
+            --jq '.[] | select(.metadata.container.tags == []) | {id, created_at, name}'
+
+  prune:
+    name: Delete untagged cache versions
+    needs: list
+    # Deletes ONLY on the weekly schedule or an explicit dry_run=false dispatch.
+    if: github.event_name == 'schedule' || github.event.inputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete untagged versions (keep last 5)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: github-runner-buildcache
+          package-type: container
+          delete-only-untagged-versions: "true"
+          min-versions-to-keep: "5"
