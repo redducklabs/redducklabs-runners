@@ -90,8 +90,10 @@ If you prefer to deploy from your local machine:
    # List available clusters
    doctl kubernetes cluster list
    
-   # Get credentials for Red Duck Labs cluster
-   doctl kubernetes cluster kubeconfig save do-sfo3-redducklabs-cluster
+   # Get credentials for Red Duck Labs cluster.
+   # NOTE: pass the cluster NAME (redducklabs-cluster), not the context name.
+   # doctl creates/selects the context do-sfo3-redducklabs-cluster from it.
+   doctl kubernetes cluster kubeconfig save redducklabs-cluster
    ```
 
 3. **Verify access**:
@@ -421,7 +423,9 @@ kubectl create secret generic runner-config \
    ```bash
    # Re-authenticate with DigitalOcean
    doctl auth init
-   doctl kubernetes cluster kubeconfig save do-sfo3-redducklabs-cluster
+   # Pass the cluster NAME (not the context); doctl derives the
+   # do-sfo3-redducklabs-cluster context from it.
+   doctl kubernetes cluster kubeconfig save redducklabs-cluster
    ```
 
 2. **Image Pull Errors**
