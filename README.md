@@ -92,6 +92,9 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - uv 0.11.17 (Python package/installer manager)
 - Go 1.26.3 runtime (for CI workflows that build Go)
 - Git, curl, wget, jq, zip, unzip, bc, libmagic1
+- WeasyPrint native libs (libpango, libpangoft2, libharfbuzz, libfontconfig,
+  libcairo2, libffi8) so consumer CI jobs that `import weasyprint` (PDF
+  rendering) can load them via ctypes
 
 ### Infrastructure Tools
 - Terraform 1.15.5
@@ -166,8 +169,10 @@ fingerprint is asserted before use. Node and Terraform are exact-version sources
 (Node via nodejs.org tarball + SHA256; Terraform via apt exact pin). Docker
 CLI/Compose-plugin and GitHub CLI **float** (key-verified; Docker CLI has a smoke
 floor of 28.3.3). Ubuntu-archive packages (`postgresql-client`, `redis-tools`,
-`bc`, `libmagic1`, `gettext-base`, `libpq-dev`, base runtime deps) float as
-distro-managed. Everything else is pinned + checksum/GPG-verified.
+`bc`, `libmagic1`, `gettext-base`, `libpq-dev`, the WeasyPrint native libs
+`libpango-1.0-0`/`libpangoft2-1.0-0`/`libharfbuzz0b`/`libfontconfig1`/`libcairo2`/`libffi8`,
+base runtime deps) float as distro-managed. Everything else is pinned +
+checksum/GPG-verified.
 
 **AWS CLI signing key rotation**: the AWS CLI v2 signing key (fingerprint
 `A6310ACC4672475C`, full `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`) is

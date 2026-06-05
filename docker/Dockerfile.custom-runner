@@ -144,7 +144,16 @@ ENV PATH=${GOROOT}/bin:${GOPATH}/bin:${PATH}
 ENV GO111MODULE=on
 ENV CGO_ENABLED=1
 
-# Update and install runtime dependencies only (no build tools)
+# Update and install runtime dependencies only (no build tools).
+#
+# WeasyPrint native libraries (libpango-* / libharfbuzz / libfontconfig /
+# libcairo2 / libffi8): consumer CI jobs that `import weasyprint` (e.g.
+# aurolegal.ai's backend pytest suite) load these shared objects via ctypes at
+# import time. Without them, `import weasyprint` fails at collection with
+# `OSError: cannot load library 'libpango-1.0-0'`. This set mirrors the consumer
+# app's own runtime image (aurolegal.ai backend/Dockerfile) so the runner image
+# can host that backend test job. WeasyPrint >= 64 no longer hard-requires
+# gdk-pixbuf, so it is intentionally omitted.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl wget git \
@@ -154,7 +163,9 @@ RUN apt-get update && \
     software-properties-common \
     apt-transport-https \
     jq zip unzip tar gzip \
-    sudo && \
+    sudo \
+    libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
+    libfontconfig1 libcairo2 libffi8 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python via python-build-standalone (no Launchpad/PPA dependency)
