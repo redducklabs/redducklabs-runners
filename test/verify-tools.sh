@@ -78,6 +78,18 @@ print('✓ WeasyPrint native libraries loadable')
 "
 echo ""
 
+# Test Chromium runtime libraries (the consumer Playwright E2E job downloads the
+# browser binary per-run but relies on these shared objects being baked into the
+# image — the no-new-privileges fleet pod cannot apt-install them at job time).
+echo -e "${BLUE}Testing Chromium runtime libraries:${NC}"
+kubectl exec -n arc-runners "$RUNNER_POD" -c runner -- python3 -c "
+import ctypes
+for so in ('libnss3.so', 'libnspr4.so', 'libatk-1.0.so.0', 'libatk-bridge-2.0.so.0', 'libatspi.so.0', 'libcups.so.2', 'libdrm.so.2', 'libdbus-1.so.3', 'libxkbcommon.so.0', 'libxcb.so.1', 'libXcomposite.so.1', 'libXdamage.so.1', 'libXfixes.so.3', 'libXrandr.so.2', 'libgbm.so.1', 'libasound.so.2'):
+    ctypes.CDLL(so)
+print('✓ Chromium runtime libraries loadable')
+"
+echo ""
+
 # Test security tools
 test_tool "kubeconform 0.7.0" "kubeconform -v"
 test_tool "kubesec 2.14.2" "kubesec version"

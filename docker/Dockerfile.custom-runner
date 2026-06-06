@@ -40,6 +40,11 @@ ARG PYTHON_TARBALL_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a
 ARG NODE_VERSION=22.22.3
 ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
+# Playwright minor used only to resolve Chromium's apt system-dep list at build
+# (install-deps). The consumer downloads its own browser binary at job time, so
+# this need only track the consumer's @playwright/test MINOR; the dep set is
+# stable across patches. Version-pinned (not SHA), like pnpm/pip in this image.
+ARG PLAYWRIGHT_VERSION=1.60.0
 
 # Stage 1: Go builder - build ONLY kubeconform and kubesec from source with a
 # current Go toolchain. Their upstream release binaries ship below this image's
@@ -117,6 +122,7 @@ ARG BUILDX_SHA256
 ARG UV_VERSION
 ARG UV_SHA256
 ARG AWSCLI_VERSION
+ARG PLAYWRIGHT_VERSION
 
 # Switch to root for installation
 USER root
@@ -353,6 +359,28 @@ RUN set -eux && \
     cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx && \
     rm -f /tmp/docker-buildx && \
     docker buildx version
+
+# Playwright Chromium runtime system libraries. The consumer's E2E job
+# (aurolegal.ai .github/workflows/ci.yml `test-e2e`) runs Playwright headless
+# Chromium on this fleet. The browser BINARY is downloaded per-run by the
+# consumer (`playwright install chromium`) so it always matches that repo's
+# @playwright/test version — but Chromium's ~20 shared libraries (libnss3,
+# libnspr4, libatk*, libcups, libgbm, libasound, libxkbcommon, the libX* set,
+# …) must be present in THIS image. The consumer job runs as the non-root
+# `runner` user under a `no-new-privileges` pod, so Playwright's
+# `install --with-deps` (which `sudo apt-get` installs them) cannot escalate to
+# root and fails. We install the deps here as root via Playwright's own
+# `install-deps`, which resolves the correct Ubuntu-noble package names
+# (including the t64-renamed libatk/libcups/libasound), letting the consumer
+# drop `--with-deps`. `npx --yes` runs the pinned Playwright CLI without a
+# global install; the npm/npx caches are scrubbed afterwards so nothing but the
+# apt libraries ships.
+RUN set -eux && \
+    apt-get update && \
+    npx --yes playwright@${PLAYWRIGHT_VERSION} install-deps chromium && \
+    npm cache clean --force && \
+    rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache /tmp/* && \
+    echo "Playwright Chromium system dependencies installed (browser downloaded per-run by consumer)"
 
 # Final cleanup - remove installation files and caches (keep clean Go runtime)
 RUN apt-get clean && \

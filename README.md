@@ -95,6 +95,13 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - WeasyPrint native libs (libpango, libpangoft2, libharfbuzz, libfontconfig,
   libcairo2, libffi8) so consumer CI jobs that `import weasyprint` (PDF
   rendering) can load them via ctypes
+- Playwright Chromium system libraries (libnss3, libnspr4, libatk*, libcups,
+  libgbm, libasound, libxkbcommon, the libX* set, …) installed via Playwright
+  `install-deps` so consumer E2E jobs can `playwright install chromium`
+  (without `--with-deps`) and launch headless Chromium — the non-root,
+  no-new-privileges runner pod cannot `sudo apt-get` them at job time. The
+  browser binary itself is downloaded per-run by the consumer, matching its own
+  `@playwright/test` version.
 
 ### Infrastructure Tools
 - Terraform 1.15.5
@@ -171,8 +178,11 @@ CLI/Compose-plugin and GitHub CLI **float** (key-verified; Docker CLI has a smok
 floor of 28.3.3). Ubuntu-archive packages (`postgresql-client`, `redis-tools`,
 `bc`, `libmagic1`, `gettext-base`, `libpq-dev`, the WeasyPrint native libs
 `libpango-1.0-0`/`libpangoft2-1.0-0`/`libharfbuzz0b`/`libfontconfig1`/`libcairo2`/`libffi8`,
-base runtime deps) float as distro-managed. Everything else is pinned +
-checksum/GPG-verified.
+the Playwright Chromium libs resolved by `playwright@${PLAYWRIGHT_VERSION}
+install-deps chromium`, base runtime deps) float as distro-managed. The
+Playwright CLI used to resolve that apt list is version-pinned (`PLAYWRIGHT_VERSION`,
+tracking the consumer's `@playwright/test` minor) but not SHA-pinned, like the
+`pnpm`/`pip` package installs. Everything else is pinned + checksum/GPG-verified.
 
 **AWS CLI signing key rotation**: the AWS CLI v2 signing key (fingerprint
 `A6310ACC4672475C`, full `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`) is

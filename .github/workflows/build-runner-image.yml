@@ -137,6 +137,14 @@ jobs:
           # otherwise. These mirror the consumer app's production image; the
           # optional HarfBuzz subset lib (allow_fail in WeasyPrint) is omitted.
           docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libpango-1.0.so.0","libpangoft2-1.0.so.0","libharfbuzz.so.0","libfontconfig.so.1","libcairo.so.2","libffi.so.8")]; print("WEASYPRINT_LIBS_OK")' | grep -q WEASYPRINT_LIBS_OK
+          # Chromium runtime libs Playwright dlopen()s at browser launch. The
+          # consumer E2E job runs `playwright install chromium` (NO --with-deps)
+          # on a non-root, no-new-privileges fleet pod that cannot apt-install
+          # them, so they must already be in this image (added via Playwright
+          # install-deps). SONAMEs are distro-independent (unaffected by noble's
+          # t64 package renames); the real headless launch is exercised
+          # end-to-end by the consumer's test-e2e job on the fleet.
+          docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libnss3.so","libnspr4.so","libatk-1.0.so.0","libatk-bridge-2.0.so.0","libatspi.so.0","libcups.so.2","libdrm.so.2","libdbus-1.so.3","libxkbcommon.so.0","libxcb.so.1","libXcomposite.so.1","libXdamage.so.1","libXfixes.so.3","libXrandr.so.2","libgbm.so.1","libasound.so.2")]; print("CHROMIUM_LIBS_OK")' | grep -q CHROMIUM_LIBS_OK
           DV=$(docker run --rm "$IMG" docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "Docker CLI: $DV"
           LOW=$(printf '%s\n28.3.3\n' "$DV" | sort -V | head -1)
@@ -392,6 +400,10 @@ jobs:
           # WeasyPrint's hard (import-time) native libs (consumer CI jobs
           # import weasyprint); optional HarfBuzz subset lib omitted by design.
           docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libpango-1.0.so.0","libpangoft2-1.0.so.0","libharfbuzz.so.0","libfontconfig.so.1","libcairo.so.2","libffi.so.8")]; print("WEASYPRINT_LIBS_OK")' | grep -q WEASYPRINT_LIBS_OK
+          # Chromium runtime libs for the consumer Playwright E2E job (installed
+          # via Playwright install-deps; consumer runs `playwright install
+          # chromium` without --with-deps on a no-new-privileges fleet pod).
+          docker run --rm "$IMG" python3 -c 'import ctypes; [ctypes.CDLL(n) for n in ("libnss3.so","libnspr4.so","libatk-1.0.so.0","libatk-bridge-2.0.so.0","libatspi.so.0","libcups.so.2","libdrm.so.2","libdbus-1.so.3","libxkbcommon.so.0","libxcb.so.1","libXcomposite.so.1","libXdamage.so.1","libXfixes.so.3","libXrandr.so.2","libgbm.so.1","libasound.so.2")]; print("CHROMIUM_LIBS_OK")' | grep -q CHROMIUM_LIBS_OK
           echo "✅ All tools present and reporting real versions"
 
       - name: Upload Trivy scan results to GitHub Security tab
