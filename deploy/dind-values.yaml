@@ -70,17 +70,19 @@ template:
           cpu: "1"
           memory: "5Gi"
 
-      # Hardening for the runner container (the DinD sidecar, injected by ARC,
-      # runs privileged separately). Previously this lived inline in the
-      # deploy-runners workflow; it is kept here so this file is the single
-      # source of truth consumed by both deploy.sh and the workflow.
+      # Runner container securityContext.
+      # allowPrivilegeEscalation MUST be true and the default capability set
+      # retained: this is a general-purpose CI runner and real workflows run
+      # `sudo` (e.g. `sudo apt-get install libmagic1`, `sudo mv kubeval ...`).
+      # Setting allowPrivilegeEscalation: false (NoNewPrivs) or dropping all
+      # capabilities breaks sudo/apt/dpkg. The isolation boundary for these
+      # runners is the pod itself (the DinD sidecar already runs privileged),
+      # not in-container privilege restriction. Accepted risk is documented in
+      # docs/security/vulnerability-dismissals.md.
       securityContext:
         runAsUser: 1001
         runAsGroup: 121
-        allowPrivilegeEscalation: false
+        allowPrivilegeEscalation: true
         readOnlyRootFilesystem: false
-        capabilities:
-          drop:
-          - ALL
     
     # Docker-in-Docker sidecar container (automatically added by ARC when containerMode.type: "dind")
