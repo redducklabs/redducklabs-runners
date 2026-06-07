@@ -102,8 +102,8 @@ Actions workflows pass unless they have actually run successfully.
   kubectl, Helm, doctl, Docker CLI/buildx, GitHub CLI, Trivy, kubeconform, and
   kubesec as documented in `README.md`.
 - When changing `docker/Dockerfile.custom-runner`, preserve the security intent
-  documented in `SECURITY-DISMISSALS.md`, `docs/GO-RUNTIME-FIX.md`, and
-  `docs/DOCKERFILE-SECURITY-REFACTOR.md`.
+  documented in `docs/security/vulnerability-dismissals.md`, `docs/toolchain/go-runtime.md`, and
+  `docs/toolchain/dockerfile-security-refactor.md`.
 - Do not downgrade tool versions or switch away from source builds used to
   address documented CVEs unless the user explicitly accepts the risk and the
   docs are updated.

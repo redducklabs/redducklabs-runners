@@ -111,7 +111,7 @@ AWS CLI v2:
 - **Modify** `test/verify-security-fixes.sh` — align CVE narrative to measured.
 - **Modify** `README.md` — tool list/versions, strategy, floating policy, AWS key
   rotation, pwsh exclusion, last-checked date.
-- **Modify** `docs/DOCKERFILE-SECURITY-REFACTOR.md`, `docs/GO-RUNTIME-FIX.md` —
+- **Modify** `docs/toolchain/dockerfile-security-refactor.md`, `docs/toolchain/go-runtime.md` —
   release-binary strategy + measured CVE claims.
 
 Each task below is committed independently. Commit messages use the repo's
@@ -827,7 +827,7 @@ image (no builder stage exists anymore):
 # /go/pkg/mod test-fixture ignores no longer apply and have been deleted.
 
 # Base-image vulnerabilities we cannot control without breaking ARC
-# compatibility. Tracked and risk-accepted in SECURITY-DISMISSALS.md.
+# compatibility. Tracked and risk-accepted in docs/security/vulnerability-dismissals.md.
 CVE-2025-47907  # Container runtime tools in the actions-runner base image
 ```
 
@@ -1091,8 +1091,8 @@ git commit -m "test: align verification scripts with refreshed tool versions"
 ## Task 14: Update README and security docs
 
 **Files:**
-- Modify: `README.md`, `docs/DOCKERFILE-SECURITY-REFACTOR.md`,
-  `docs/GO-RUNTIME-FIX.md`
+- Modify: `README.md`, `docs/toolchain/dockerfile-security-refactor.md`,
+  `docs/toolchain/go-runtime.md`
 
 - [ ] **Step 1: README — tool list, versions, strategy, policies**
 
@@ -1112,7 +1112,7 @@ Trivy 0.70.0, kubeconform 0.7.0, kubesec 2.14.2, buildx 0.34.1, **uv 0.11.17**,
 - PowerShell intentionally excluded; consumers needing `run.ps1` parity should
   use a Linux-equivalent script.
 
-- [ ] **Step 2: `docs/DOCKERFILE-SECURITY-REFACTOR.md` — release-binary strategy**
+- [ ] **Step 2: `docs/toolchain/dockerfile-security-refactor.md` — release-binary strategy**
 
 Rewrite the sections that describe the 5-tool Go source build and the
 `golang:1.24.6-alpine` builder to describe the current approach: a python-builder
@@ -1120,7 +1120,7 @@ stage plus a final stage installing official release binaries with SHA256/GPG
 verification. Update CVE claims to cite the measured toolchain versions from
 Task 9 rather than "built from source with Go 1.24.6".
 
-- [ ] **Step 3: `docs/GO-RUNTIME-FIX.md` — Go 1.26.3 runtime**
+- [ ] **Step 3: `docs/toolchain/go-runtime.md` — Go 1.26.3 runtime**
 
 Update references from Go 1.24.6 to Go 1.26.3 and note the source-build stage no
 longer exists; the doc now only concerns the clean Go runtime install.
@@ -1128,7 +1128,7 @@ longer exists; the doc now only concerns the clean Go runtime install.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add README.md docs/DOCKERFILE-SECURITY-REFACTOR.md docs/GO-RUNTIME-FIX.md
+git add README.md docs/toolchain/dockerfile-security-refactor.md docs/toolchain/go-runtime.md
 git commit -m "docs: document release-binary strategy, new versions, and policies"
 ```
 

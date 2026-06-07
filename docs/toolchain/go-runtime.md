@@ -131,4 +131,4 @@ Before deploying:
 1. `docker/Dockerfile.custom-runner` - Added clean Go runtime installation
 2. `.trivyignore` - Added exclusions for clean Go installation
 3. `test/verify-go-runtime.sh` - Added verification script (new)
-4. `docs/GO-RUNTIME-FIX.md` - This documentation (new)
+4. `docs/toolchain/go-runtime.md` - This documentation (new)

@@ -21,13 +21,13 @@ Codex-specific adapter rules:
   credentials are unavailable.
 - For GitHub Actions workflow work, inspect `.github/workflows/` and keep
   workflow permissions narrowly scoped.
-- For Docker image changes, read `README.md`, `SECURITY-DISMISSALS.md`,
-  `docs/GO-RUNTIME-FIX.md`, and `docs/DOCKERFILE-SECURITY-REFACTOR.md` as
+- For Docker image changes, read `README.md`, `docs/security/vulnerability-dismissals.md`,
+  `docs/toolchain/go-runtime.md`, and `docs/toolchain/dockerfile-security-refactor.md` as
   relevant.
 - For deployment or Kubernetes changes, read `docs/SETUP.md` and the relevant
   scripts/configuration under `deploy/` before editing.
 - For security-related changes, read `docs/SECURITY.md`,
-  `docs/SECURITY-VALIDATION-PLAN.md`, and `SECURITY-DISMISSALS.md` as
+  `docs/security/validation-plan.md`, and `docs/security/vulnerability-dismissals.md` as
   relevant.
 - Do not claim tests, builds, workflows, or deployments pass unless the relevant
   command or workflow actually ran successfully.

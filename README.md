@@ -2,19 +2,18 @@
 
 Deploy secure, scalable GitHub Actions self-hosted runners on Kubernetes with comprehensive development tools for Red Duck Labs.
 
-## 🚀 Features
+## Features
 
-- **GitHub-First Deployment**: Deploy and manage runners directly from GitHub Actions - no local setup required!
+- **GitHub-first deployment**: Deploy, scale, monitor, and emergency-stop runners from GitHub Actions.
 - **Complete Development Environment**: Python 3.13, Node.js 22, uv, AWS CLI v2, Terraform, kubectl, Helm, and more
 - **Security Tools**: kubeconform 0.7.0, kubesec 2.14.2, Trivy 0.70.0
 - **Docker-in-Docker Support**: Build containers within runners
 - **Auto-scaling**: Configurable min/max runner instances (2-4 default, 4-8 maximum)
 - **Production Ready**: Resource limits, health checks, and monitoring
-- **GitHub Workflows**: Deploy, scale, monitor, and emergency stop - all from GitHub UI
 - **Dual Configuration**: Template versions for reuse and production configs for Red Duck Labs
-- **🛡️ Security Optimized**: Multi-stage build with SHA256/GPG-verified tools and a machine-enforced CVE-floor gate
+- **Security optimized**: Multi-stage build with SHA256/GPG-verified tools and a machine-enforced CVE-floor gate
 
-## 📋 Prerequisites
+## Prerequisites
 
 ### Required GitHub Secrets
 Configure these secrets in your repository settings (`Settings → Secrets and variables → Actions`):
@@ -32,7 +31,7 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
 - Kubernetes cluster (1.24+) - Red Duck Labs uses DigitalOcean
 - DigitalOcean Container Registry (for custom images)
 
-## 🎯 Quick Start - GitHub Actions Deployment (Recommended)
+## Quick Start - GitHub Actions Deployment
 
 ### 1. Setup Repository Secrets
 1. Go to your repository's **Settings** → **Secrets and variables** → **Actions**
@@ -51,12 +50,9 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
 5. Click **"Run workflow"** to deploy
 
 ### 3. Monitor Deployment
-The workflow will:
-- ✅ Validate tokens and permissions
-- ✅ Configure Kubernetes access
-- ✅ Install ARC controller if needed
-- ✅ Deploy runners with your configuration
-- ✅ Verify runner registration with GitHub
+The workflow validates tokens and permissions, configures Kubernetes access,
+installs the ARC controller when needed, deploys the runner scale set, and
+verifies runner registration with GitHub.
 
 ### 4. Use in Your Workflows
 
@@ -69,7 +65,7 @@ jobs:
       - run: echo "Running on Red Duck Labs self-hosted runner!"
 ```
 
-## 🐳 Custom Runner Image
+## Custom Runner Image
 
 The included Dockerfile provides a comprehensive development environment optimized for Red Duck Labs workflows:
 
@@ -84,7 +80,7 @@ docker build -t registry.digitalocean.com/redducklabs/github-runner:latest -f Do
 docker push registry.digitalocean.com/redducklabs/github-runner:latest
 ```
 
-## 🔧 Included Tools
+## Included Tools
 
 ### Development Tools
 - Python 3.13.13 with pip, black, flake8, mypy, ruff, pytest, pytest-mock
@@ -107,7 +103,7 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - Terraform 1.15.5
 - kubectl 1.36.1
 - Helm 3.21.0
-- doctl 1.160.0 (DigitalOcean CLI)
+- doctl 1.160.1 (DigitalOcean CLI)
 - AWS CLI v2 2.34.57 (GPG-verified, pinned signing key)
 - Docker CLI v28.3.3+ with buildx 0.34.1 and Compose plugin (CVE-2025-54388)
 - GitHub CLI
@@ -147,9 +143,9 @@ parity should use a Linux-equivalent shell script.
 - PostgreSQL client
 - Redis tools
 
-## 📦 Software Versions
+## Software Versions
 
-**Last version check: 2026-05-31.**
+These are the current pins in `docker/Dockerfile.custom-runner`.
 
 | Tool | Version | Source / pin |
 |------|---------|--------------|
@@ -161,7 +157,7 @@ parity should use a Linux-equivalent shell script.
 | Terraform | 1.15.5 | HashiCorp apt, keyring fingerprint + exact pin |
 | kubectl | 1.36.1 | release binary + SHA256 |
 | Helm | 3.21.0 | get.helm.sh tarball + SHA256 |
-| doctl | 1.160.0 | release binary + SHA256 |
+| doctl | 1.160.1 | release binary + SHA256 |
 | AWS CLI | v2 2.34.57 | bundle + GPG (pinned key) |
 | kubeconform | 0.7.0 | source-built (Go 1.26.3) |
 | kubesec | 2.14.2 | source-built (Go 1.26.3, x/crypto v0.52.0) |
@@ -196,9 +192,10 @@ guide and update the pinned fingerprint in the Dockerfile and in
 `test/verify-aws-key-expiry.sh`. Locally, `--no-cache` (or bumping
 `AWSCLI_VERSION`) forces the in-image check to re-run.
 
-## 🎮 GitHub Actions Management
+## GitHub Actions Management
 
-All runner management can be done directly from GitHub Actions - no local access required!
+Use GitHub Actions for normal runner fleet operations. Local scripts are
+available for investigation and explicitly requested operations.
 
 ### Available Workflows
 
@@ -210,7 +207,7 @@ All runner management can be done directly from GitHub Actions - no local access
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
 | **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
 
-### 📈 Scaling via GitHub Actions
+### Scaling via GitHub Actions
 
 1. Go to **Actions** → **Scale GitHub Runners**
 2. Choose scaling action:
@@ -220,7 +217,7 @@ All runner management can be done directly from GitHub Actions - no local access
    - `scale-max`: Maximum capacity (4-8 runners)
    - `scale-custom`: Custom min/max values
 
-### 📊 Monitoring via GitHub Actions
+### Monitoring via GitHub Actions
 
 1. Go to **Actions** → **Runner Status**
 2. Run workflow to get:
@@ -229,7 +226,7 @@ All runner management can be done directly from GitHub Actions - no local access
    - GitHub registration status
    - Resource usage metrics
 
-### 🛑 Emergency Stop via GitHub Actions
+### Emergency Stop via GitHub Actions
 
 1. Go to **Actions** → **Emergency Stop Runners**
 2. Type `STOP-RUNNERS` to confirm
@@ -238,62 +235,48 @@ All runner management can be done directly from GitHub Actions - no local access
    - Scale runners to zero
    - Provide recovery instructions
 
-## 📊 Local Management (Alternative)
+## Local Management
 
-If you prefer command-line management:
+Run local management commands from the repository root. These scripts can mutate
+the live runner fleet, so use them only when local operations are intended.
 
 ### Quick Scaling
 
 ```bash
-cd scripts/
-
-# Check current status
-./scale-runners.sh status
-
-# Scale to default (2-4 runners)
-./scale-runners.sh up
-
-# Scale to maximum (4-8 runners)
-./scale-runners.sh max
-
-# Scale to zero for maintenance
-./scale-runners.sh down
-
-# Custom scaling
-./scale-runners.sh scale 3 6
+./scripts/scale-runners.sh status
+./scripts/scale-runners.sh up
+./scripts/scale-runners.sh max
+./scripts/scale-runners.sh down
+./scripts/scale-runners.sh scale 3 6
 ```
 
 ### Interactive Administration
 
 ```bash
-# Run interactive admin menu
 ./scripts/runner-admin.sh
 ```
 
 ### Emergency Stop
 
 ```bash
-# Emergency shutdown (requires typing 'STOP')
 ./scripts/emergency-stop.sh
 ```
 
-## 🧪 Testing
+## Testing
 
-### Verify Tools Installation
+### Focused Checks
 
 ```bash
-# Test all tools in a running pod
 ./test/verify-tools.sh
-```
-
-### Test Deployment
-
-```bash
-# Comprehensive deployment test
 ./test/test-deployment.sh
+./test/verify-cve-floor.sh <image>
+./test/verify-aws-key-expiry.sh docker/aws-cli-public.key
+./test/verify-docker-version.sh
+./test/verify-go-runtime.sh
+./test/verify-security-fixes.sh
 ```
 
-## 🔒 Security Best Practices
+## Security Best Practices
 
 1. **Never commit secrets** - Use environment variables or Kubernetes secrets
 2. **Token Management** - Rotate GitHub tokens regularly
@@ -302,13 +285,17 @@ cd scripts/
 5. **Network Policies** - Implement Kubernetes network policies (recommended)
 6. **RBAC** - Use minimal permissions for service accounts
 
-### 📄 Security Documentation
+### Security Documentation
 
-- **[Security Guide](docs/SECURITY.md)** - Comprehensive security practices, monitoring, and incident response
-- **[Security Dismissals](SECURITY-DISMISSALS.md)** - Risk assessment for accepted base image vulnerabilities
-- **[Security Validation Plan](SECURITY-VALIDATION-PLAN.md)** - Testing procedures for security controls
+| Document | Purpose |
+|----------|---------|
+| [Security Guide](docs/SECURITY.md) | Security practices, monitoring, and incident response |
+| [Vulnerability Dismissals](docs/security/vulnerability-dismissals.md) | Risk acceptance for reviewed base-image vulnerabilities |
+| [Security Validation Plan](docs/security/validation-plan.md) | Security validation commands and rollout checks |
+| [Dockerfile Security Refactor](docs/toolchain/dockerfile-security-refactor.md) | Runner image supply-chain and multi-stage build design |
+| [Go Runtime Notes](docs/toolchain/go-runtime.md) | Why the final image keeps a clean Go runtime |
 
-### 🛡️ Security Fixes
+### Security Fixes
 
 **CVE-2025-54388 (MEDIUM)** - Fixed Docker firewalld vulnerability:
 - **Issue**: Moby's firewalld reload makes container ports accessible by removing iptables rules
@@ -338,7 +325,7 @@ The CVE-floor gate (`test/verify-cve-floor.sh`) enforces these specific CVE
 fixes deterministically at build time and in CI. Trivy's broad HIGH/CRITICAL scan
 is report-only (see "Included Tools").
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Check Runner Status
 ```bash
@@ -360,7 +347,7 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
 - **Build failures**: Ensure Docker-in-Docker is properly configured
 - **Scaling issues**: Check AutoScalingRunnerSet status
 
-## 🛡️ Security & Optimization
+## Security & Optimization
 
 ### Multi-Stage Docker Build
 
@@ -381,9 +368,10 @@ The runner image uses a comprehensive multi-stage build process to eliminate sec
 3. **Final Runtime Stage**: installs release binaries (kubectl, doctl, Trivy,
    buildx, Node, Helm, uv, AWS CLI) and copies the two source-built Go tools.
 
-For detailed technical information, see [docs/DOCKERFILE-SECURITY-REFACTOR.md](docs/DOCKERFILE-SECURITY-REFACTOR.md).
+For detailed technical information, see
+[docs/toolchain/dockerfile-security-refactor.md](docs/toolchain/dockerfile-security-refactor.md).
 
-## 📚 Architecture
+## Architecture
 
 This solution uses GitHub's Actions Runner Controller (ARC) to dynamically provision runners:
 
@@ -393,7 +381,7 @@ This solution uses GitHub's Actions Runner Controller (ARC) to dynamically provi
 4. **Custom Image**: Pre-installed development tools
 5. **DigitalOcean Integration**: Registry and cluster integration
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 redducklabs-runners/
@@ -406,20 +394,27 @@ redducklabs-runners/
 │   ├── deploy.template.sh
 │   ├── dind-values.yaml       # Production values
 │   └── dind-values.template.yaml
-├── scripts/                   # Management scripts
+├── scripts/                   # Local management scripts
 │   ├── scale-runners.sh       # Main scaling script
 │   ├── runner-admin.sh        # Interactive admin
 │   ├── emergency-stop.sh      # Emergency shutdown
 │   └── README.md
 ├── test/                      # Testing scripts
 │   ├── verify-tools.sh        # Tool verification
+│   ├── verify-cve-floor.sh    # Enforcing CVE-floor gate
+│   ├── verify-aws-key-expiry.sh
 │   └── test-deployment.sh     # Deployment testing
-├── docs/                      # Additional documentation
+├── docs/
+│   ├── SETUP.md               # Deployment setup guide
+│   ├── SECURITY.md            # Security guide
+│   ├── CONTRIBUTING.md
+│   ├── security/              # Security runbooks and risk records
+│   └── toolchain/             # Runner image implementation notes
 ├── .github/workflows/         # CI/CD workflows
 └── README.md                  # This file
 ```
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
 
@@ -427,18 +422,18 @@ Contributions are welcome! Please see [CONTRIBUTING.md](docs/CONTRIBUTING.md) fo
 2. Create a feature branch
 3. Submit a pull request
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🔗 Resources
+## Resources
 
 - [Actions Runner Controller Documentation](https://github.com/actions/actions-runner-controller)
 - [GitHub Actions Self-Hosted Runners](https://docs.github.com/en/actions/hosting-your-own-runners)
 - [Kubernetes Documentation](https://kubernetes.io/docs/)
 - [DigitalOcean Kubernetes](https://docs.digitalocean.com/products/kubernetes/)
 
-## ⚠️ Red Duck Labs Configuration
+## Red Duck Labs Configuration
 
 This repository is configured for Red Duck Labs production environment:
 

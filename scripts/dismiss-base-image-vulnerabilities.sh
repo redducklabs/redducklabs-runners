@@ -8,14 +8,14 @@
 # - CVE-2025-47907: Container runtime components (alerts 11,10,8,6,5,4,3)  
 # - CVE-2024-21538: Node.js cross-spawn vulnerability (alert 2)
 #
-# See SECURITY-DISMISSALS.md for full risk assessment and justification.
+# See docs/security/vulnerability-dismissals.md for full risk assessment and justification.
 
 set -e
 
 # Configuration
 REPO="redducklabs/redducklabs-runners"
-BASE_COMMENT_CVE_47907="Risk accepted - Base image dependency from GitHub Actions runner (ghcr.io/actions/actions-runner:latest) that cannot be modified without breaking runner compatibility. See SECURITY-DISMISSALS.md for full risk assessment and compensating controls."
-BASE_COMMENT_CVE_21538="Risk accepted - Node.js runtime dependency from GitHub Actions runner base image (ghcr.io/actions/actions-runner:latest) that cannot be modified without breaking workflow compatibility. Workflow-level risk mitigated by runner isolation and ephemeral execution model. See SECURITY-DISMISSALS.md for full risk assessment and compensating controls."
+BASE_COMMENT_CVE_47907="Risk accepted - Base image dependency from GitHub Actions runner (ghcr.io/actions/actions-runner:latest) that cannot be modified without breaking runner compatibility. See docs/security/vulnerability-dismissals.md for full risk assessment and compensating controls."
+BASE_COMMENT_CVE_21538="Risk accepted - Node.js runtime dependency from GitHub Actions runner base image (ghcr.io/actions/actions-runner:latest) that cannot be modified without breaking workflow compatibility. Workflow-level risk mitigated by runner isolation and ephemeral execution model. See docs/security/vulnerability-dismissals.md for full risk assessment and compensating controls."
 
 # Colors for output
 RED='\033[0;31m'
@@ -44,7 +44,7 @@ if ! gh auth status &> /dev/null; then
 fi
 
 echo -e "${YELLOW}Repository:${NC} ${REPO}"
-echo -e "${YELLOW}Documentation:${NC} SECURITY-DISMISSALS.md"
+echo -e "${YELLOW}Documentation:${NC} docs/security/vulnerability-dismissals.md"
 echo ""
 
 # Confirmation prompt
@@ -125,7 +125,7 @@ if [ ${#failed_alerts[@]} -eq 0 ]; then
     echo -e "${GREEN}✓ All 8 security alerts dismissed successfully!${NC}"
     echo ""
     echo -e "${YELLOW}Next Steps:${NC}"
-    echo "1. Review SECURITY-DISMISSALS.md for risk assessment details"
+    echo "1. Review docs/security/vulnerability-dismissals.md for risk assessment details"
     echo "2. Ensure compensating controls are properly configured"
     echo "3. Schedule quarterly risk review"
     echo "4. Monitor for GitHub base image security updates"
@@ -142,7 +142,7 @@ else
     echo "1. Check GitHub CLI authentication: gh auth status"
     echo "2. Verify repository access permissions"
     echo "3. Check if alert IDs are still valid: gh api repos/${REPO}/code-scanning/alerts"
-    echo "4. Retry individual alerts using manual commands in SECURITY-DISMISSALS.md"
+    echo "4. Retry individual alerts using manual commands in docs/security/vulnerability-dismissals.md"
     exit 1
 fi
 
@@ -168,5 +168,5 @@ echo "• Compensating security controls are documented and must remain active"
 echo "• Regular monitoring for GitHub base image updates is required"
 echo "• Emergency procedures are available in scripts/emergency-stop.sh"
 echo ""
-echo -e "${BLUE}Documentation: ${NC}SECURITY-DISMISSALS.md"
+echo -e "${BLUE}Documentation: ${NC}docs/security/vulnerability-dismissals.md"
 echo -e "${BLUE}Security Guide: ${NC}docs/SECURITY.md"

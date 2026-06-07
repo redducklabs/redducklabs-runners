@@ -97,7 +97,7 @@ outright. Its module cache lives only in the throwaway builder and never ships.
 Consequences:
 - `kubectl`/`doctl` report correct release versions.
 - The `.trivyignore` Go-builder machinery is reduced (§4.9).
-- `DOCKERFILE-SECURITY-REFACTOR.md` and `GO-RUNTIME-FIX.md` are updated to
+- `docs/toolchain/dockerfile-security-refactor.md` and `docs/toolchain/go-runtime.md` are updated to
   describe the release-binary strategy. This is an explicit ask in issue #12.
 
 ### 4.2 Supply-chain verification standard
@@ -382,7 +382,7 @@ accidentally normalized. Run `bash -n` on all shell scripts post-normalization.
 - `README.md`: tool list + versions, "last version check 2026-05-31", the
   release-binary strategy, uv/AWS CLI (incl. key-rotation note), pwsh exclusion,
   the floating-package policy (§4.9).
-- `docs/DOCKERFILE-SECURITY-REFACTOR.md`, `docs/GO-RUNTIME-FIX.md`: rewrite to the
+- `docs/toolchain/dockerfile-security-refactor.md`, `docs/toolchain/go-runtime.md`: rewrite to the
   release-binary approach + Go 1.26.3 runtime; CVE claims reflect §4.7 measured
   results, not the removed source-build stage.
 

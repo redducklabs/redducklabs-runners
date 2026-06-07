@@ -81,12 +81,14 @@ Security alert dismissal script for base image vulnerabilities.
 - Batch dismissal of multiple alerts
 - Detailed dismissal comments with risk justification
 - Verification of dismissal success
-- Links to comprehensive risk assessment in `SECURITY-DISMISSALS.md`
+- Links to comprehensive risk assessment in
+  [`../docs/security/vulnerability-dismissals.md`](../docs/security/vulnerability-dismissals.md)
 
 **Requirements:**
 - GitHub CLI (`gh`) installed and authenticated
 - Repository admin permissions for security alert management
-- Review and approval of risk acceptance in `SECURITY-DISMISSALS.md`
+- Review and approval of risk acceptance in
+  [`../docs/security/vulnerability-dismissals.md`](../docs/security/vulnerability-dismissals.md)
 
 ## Common Operations
 
@@ -160,7 +162,7 @@ All scripts are configured for redducklabs production environment:
 
 ## Notes
 
-- Scaling changes take 30-60 seconds to fully apply
+- Scaling changes apply asynchronously through ARC and Kubernetes
 - Runners are ephemeral - they restart after each job
 - Docker-in-Docker pods show as 2/2 (runner + dind sidecar)
 - Maximum recommended runners: 10 (cluster capacity)
