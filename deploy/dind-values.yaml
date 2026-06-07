@@ -12,7 +12,7 @@ githubConfigSecret:
 
 # Runner scaling configuration
 minRunners: 2
-maxRunners: 4
+maxRunners: 6
 
 # Runner scale set name (used in workflows as: runs-on: redducklabs-runners)
 runnerScaleSetName: "redducklabs-runners"
@@ -24,6 +24,27 @@ containerMode:
 # Runner template configuration for DinD
 template:
   spec:
+    # Pin runners to the dedicated github-runners-pool so they do not
+    # co-locate with production workloads (postgres, backend) on worker-pool.
+    # That pool is labeled node-type=github-runner and tainted
+    # github-runner=true:NoSchedule, so BOTH a nodeSelector and a matching
+    # toleration are required for runners to land there.
+    #
+    # Pool sizing (see ops notes): github-runners-pool is s-8vcpu-16gb,
+    # autoscaling 1->4 nodes. The 5Gi runner memory request below intentionally
+    # reserves a pod's share of a node (~half of ~14Gi allocatable) so the
+    # scheduler packs exactly 2 runners per node and the cluster-autoscaler adds
+    # a node per additional pair instead of bin-packing builds until they OOM.
+    # The reservation also covers the DinD sidecar, which ARC injects with no
+    # resource requests of its own.
+    nodeSelector:
+      node-type: github-runner
+    tolerations:
+    - key: github-runner
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
     # Pull secret for private registry
     imagePullSecrets:
     - name: do-registry-secret
@@ -38,13 +59,28 @@ template:
       # CRITICAL: Must specify the command for ARC to work properly
       command: ["/home/runner/run.sh"]
       
-      # Resource limits
+      # Resource limits.
+      # memory request 5Gi -> forces 2 runners per s-8vcpu-16gb node (see note
+      # above). cpu kept modest so memory is the binding constraint for packing.
       resources:
         limits:
-          cpu: "2"
-          memory: "4Gi"
+          cpu: "3"
+          memory: "6Gi"
         requests:
-          cpu: "500m"
-          memory: "1Gi"
+          cpu: "1"
+          memory: "5Gi"
+
+      # Hardening for the runner container (the DinD sidecar, injected by ARC,
+      # runs privileged separately). Previously this lived inline in the
+      # deploy-runners workflow; it is kept here so this file is the single
+      # source of truth consumed by both deploy.sh and the workflow.
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 121
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: false
+        capabilities:
+          drop:
+          - ALL
     
     # Docker-in-Docker sidecar container (automatically added by ARC when containerMode.type: "dind")

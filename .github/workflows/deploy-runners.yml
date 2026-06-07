@@ -17,7 +17,7 @@ on:
       max_runners:
         description: 'Maximum number of runners'
         required: false
-        default: '4'
+        default: '6'
         type: choice
         options:
           - '1'
@@ -296,75 +296,35 @@ jobs:
             -n arc-systems \
             --timeout=300s
       
-      - name: Prepare values file
-        run: |
-          echo "📝 Preparing Helm values..."
-          
-          # Use validated inputs
-          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
-          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
-          RUNNER_IMAGE="${{ needs.validate-inputs.outputs.runner_image }}"
-          
-          cat > /tmp/runner-values.yaml <<EOF
-          githubConfigUrl: "https://github.com/${{ github.repository_owner }}"
-          githubConfigSecret:
-            github_token: "${{ secrets.RUNNER_TOKEN }}"
-          
-          minRunners: ${MIN_RUNNERS}
-          maxRunners: ${MAX_RUNNERS}
-          
-          runnerScaleSetName: "${RUNNER_SCALE_SET_NAME}"
-          
-          containerMode:
-            type: "dind"
-          
-          template:
-            spec:
-              imagePullSecrets:
-              - name: do-registry-secret
-              
-              containers:
-              - name: runner
-                image: ${RUNNER_IMAGE}
-                imagePullPolicy: Always
-                command: ["/home/runner/run.sh"]
-                
-                resources:
-                  limits:
-                    cpu: "2"
-                    memory: "4Gi"
-                  requests:
-                    cpu: "500m"
-                    memory: "1Gi"
-                
-                securityContext:
-                  runAsUser: 1001
-                  runAsGroup: 121
-                  allowPrivilegeEscalation: false
-                  readOnlyRootFilesystem: false
-                  capabilities:
-                    drop:
-                    - ALL
-          EOF
-          
-          echo "Values file prepared with security constraints"
-      
       - name: Deploy runners
         run: |
           echo "🚀 Deploying GitHub runners..."
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
-          
+
+          # Source of truth is the committed deploy/dind-values.yaml (node pool
+          # pinning, tolerations, resources, securityContext). Only secrets and
+          # the workflow_dispatch inputs are overlaid via --set so the file stays
+          # the single place those values are defined.
+          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
+          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
+          RUNNER_IMAGE="${{ needs.validate-inputs.outputs.runner_image }}"
+
           # Deploy with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Deploying runners..."
             if helm upgrade --install "${RELEASE_NAME}" \
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
-              --values /tmp/runner-values.yaml \
+              --values deploy/dind-values.yaml \
+              --set githubConfigSecret.github_token="${{ secrets.RUNNER_TOKEN }}" \
+              --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
+              --set minRunners="${MIN_RUNNERS}" \
+              --set maxRunners="${MAX_RUNNERS}" \
+              --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
               --version 0.12.1 \
               --wait \
               --timeout 300s; then
-              
+
               echo "✅ Runners deployed successfully"
               break
             elif [ "${attempt}" = "3" ]; then
