@@ -67,7 +67,7 @@ runs:
         echo "Cache key: ${CACHE_KEY}"
 
     - name: Cache tools
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: cache-tools
       with:
         path: |
