@@ -149,6 +149,7 @@ These are the current pins in `docker/Dockerfile.custom-runner`.
 
 | Tool | Version | Source / pin |
 |------|---------|--------------|
+| GitHub Actions Runner | 2.336.0 | official GitHub runner base image |
 | Python | 3.13.13 (python-build-standalone rel 20260510) | tarball + SHA256 |
 | Node.js | 22.22.3 | nodejs.org tarball + SHA256 |
 | pnpm | 11.5.0 | corepack |
@@ -183,7 +184,7 @@ tracking the consumer's `@playwright/test` minor) but not SHA-pinned, like the
 **AWS CLI signing key rotation**: the AWS CLI v2 signing key (fingerprint
 `A6310ACC4672475C`, full `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`) is
 committed at `docker/aws-cli-public.key` and its documented expiry is
-**2026-07-07**. Expiry is enforced two ways: the Dockerfile checks it during the
+**2027-07-01**. Expiry is enforced two ways: the Dockerfile checks it during the
 AWS install layer, **and** `test/verify-aws-key-expiry.sh` runs on the host in CI
 (cache-independent), so an expired key fails the build even if the Docker layer
 cache would otherwise reuse the AWS layer. To rotate: replace

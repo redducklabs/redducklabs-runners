@@ -39,7 +39,7 @@ ARG PYTHON_TARBALL_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a
 # cannot deliver 22.22.3 (the current Node 22 LTS).
 ARG NODE_VERSION=22.22.3
 ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
-ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
+ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.336.0
 # Playwright minor used only to resolve Chromium's apt system-dep list at build
 # (install-deps). The consumer downloads its own browser binary at job time, so
 # this need only track the consumer's @playwright/test MINOR; the dep set is

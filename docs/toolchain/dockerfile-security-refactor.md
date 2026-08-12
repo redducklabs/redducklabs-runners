@@ -241,7 +241,7 @@ docker run --rm image trivy --version
 # Build arguments for version management (current values, 2026 refresh)
 ARG GO_VERSION=1.26.3
 ARG KUBECTL_VERSION=v1.36.1
-ARG DOCTL_VERSION=v1.160.0
+ARG DOCTL_VERSION=v1.160.1
 ARG KUBECONFORM_VERSION=v0.7.0   # source-built
 ARG KUBESEC_VERSION=v2.14.2      # source-built, x/crypto bumped
 ARG HELM_VERSION=v3.21.0
@@ -251,7 +251,7 @@ ARG UV_VERSION=0.11.17
 ARG AWSCLI_VERSION=2.34.57
 ARG PYTHON_FULL_VERSION=3.13.13
 ARG NODE_VERSION=22.22.3          # nodejs.org tarball (NodeSource apt is stale)
-ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.334.0
+ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.336.0
 ```
 
 **Benefits**:
