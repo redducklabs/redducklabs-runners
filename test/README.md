@@ -55,7 +55,7 @@ Before running tests, ensure:
 
 2. **Runners are deployed:**
    ```bash
-   kubectl get pods -n arc-runners -l runner-scale-set-name=redducklabs-runners
+   kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners
    ```
 
 3. **Required tools on local machine:**
@@ -93,7 +93,7 @@ All tests use color-coded output:
 kubectl get pods -n arc-runners
 
 # Check runner scale set
-kubectl get pods -n arc-runners -l runner-scale-set-name=redducklabs-runners
+kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners
 
 # If no pods exist, deploy runners first
 cd deploy && ./deploy.sh

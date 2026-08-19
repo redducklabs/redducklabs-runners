@@ -50,17 +50,17 @@ helm upgrade redducklabs-runners \
 
 # Force delete all runner pods
 echo "2. Force deleting all redducklabs runner pods..."
-kubectl delete pods -n arc-runners -l runner-scale-set-name=redducklabs-runners --force --grace-period=0 2>/dev/null || true
+kubectl delete pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners --force --grace-period=0 2>/dev/null || true
 
 # Check if any pods remain
 echo "3. Checking for remaining pods..."
-remaining=$(kubectl get pods -n arc-runners -l runner-scale-set-name=redducklabs-runners --no-headers 2>/dev/null | wc -l)
+remaining=$(kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners --no-headers 2>/dev/null | wc -l)
 
 if [ "$remaining" -gt 0 ]; then
     echo -e "${YELLOW}Warning: $remaining pods still terminating${NC}"
     echo "Waiting for termination to complete..."
     sleep 10
-    remaining=$(kubectl get pods -n arc-runners -l runner-scale-set-name=redducklabs-runners --no-headers 2>/dev/null | wc -l)
+    remaining=$(kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners --no-headers 2>/dev/null | wc -l)
     if [ "$remaining" -gt 0 ]; then
         echo -e "${YELLOW}$remaining pods still terminating - they will finish shortly${NC}"
     fi

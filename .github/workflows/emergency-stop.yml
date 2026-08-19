@@ -188,7 +188,7 @@ jobs:
           echo "current_max=${CURRENT_MAX}" >> $GITHUB_OUTPUT
           
           # Count running pods
-          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
+          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
           echo "pod_count=${POD_COUNT}" >> $GITHUB_OUTPUT
           
           echo "Current state saved:"
@@ -238,7 +238,7 @@ jobs:
           echo "Waiting for pods to terminate..."
           timeout=60
           while [ $timeout -gt 0 ]; do
-            REMAINING=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
+            REMAINING=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
             
             if [ "${REMAINING}" -eq 0 ]; then
               echo "✅ All runner pods have been terminated"
@@ -251,14 +251,14 @@ jobs:
           done
           
           # Final check
-          FINAL_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
+          FINAL_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
           
           if [ "${FINAL_COUNT}" -eq 0 ]; then
             echo "✅ Emergency stop completed successfully"
           else
             echo "⚠️ Warning: ${FINAL_COUNT} pod(s) may still be terminating"
             echo "Pod status:"
-            kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" 2>/dev/null || true
+            kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" 2>/dev/null || true
           fi
       
       - name: Handle non-existent deployment

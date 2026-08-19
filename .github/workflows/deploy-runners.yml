@@ -398,7 +398,7 @@ jobs:
           
           echo ""
           echo "📊 Runner pods:"
-          kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}"
+          kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}"
           
           echo ""
           echo "📈 Runner scale set:"

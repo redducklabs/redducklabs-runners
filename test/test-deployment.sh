@@ -110,7 +110,7 @@ echo ""
 print_header "4. Pod Status Check"
 
 # Get runner pods
-pods=$(kubectl get pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME" --no-headers 2>/dev/null || true)
+pods=$(kubectl get pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME" --no-headers 2>/dev/null || true)
 
 if [ -z "$pods" ]; then
     print_warning "No runner pods found - this might be normal if minRunners=0"
@@ -204,7 +204,7 @@ print_header "7. Resource Usage Check"
 
 if [ "$pod_count" -gt 0 ]; then
     echo "Current resource usage:"
-    kubectl top pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME" 2>/dev/null || print_warning "Metrics not available (metrics-server may not be installed)"
+    kubectl top pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME" 2>/dev/null || print_warning "Metrics not available (metrics-server may not be installed)"
 fi
 
 echo ""

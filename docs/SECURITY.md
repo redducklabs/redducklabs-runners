@@ -116,7 +116,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      runner-scale-set-name: redducklabs-runners
+      actions.github.com/scale-set-name: redducklabs-runners
   policyTypes:
   - Egress
   egress:
