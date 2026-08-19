@@ -6,7 +6,7 @@ Deploy secure, scalable GitHub Actions self-hosted runners on Kubernetes with co
 
 - **GitHub-first deployment**: Deploy, scale, monitor, and emergency-stop runners from GitHub Actions.
 - **Complete Development Environment**: Python 3.13, Node.js 22, uv, AWS CLI v2, Terraform, kubectl, Helm, and more
-- **Security Tools**: kubeconform 0.7.0, kubesec 2.14.2, Trivy 0.70.0
+- **Security Tools**: kubeconform 0.8.0, kubesec 2.14.2, Trivy 0.74.0
 - **Docker-in-Docker Support**: Build containers within runners, with a dedicated memory reservation for the Docker daemon
 - **Auto-scaling**: Configurable min/max runner instances (2 warm / 8 maximum by default)
 - **Production Ready**: Resource limits, health checks, and monitoring
@@ -92,7 +92,7 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - Python 3.13.13 with pip, black, flake8, mypy, ruff, pytest, pytest-mock
 - Node.js 22.22.3 with npm, pnpm 11.5.0 (via corepack)
 - uv 0.11.17 (Python package/installer manager)
-- Go 1.26.3 runtime (for CI workflows that build Go)
+- Go 1.27.0 runtime (for CI workflows that build Go)
 - Git, curl, wget, jq, zip, unzip, bc, libmagic1
 - WeasyPrint native libs (libpango, libpangoft2, libharfbuzz, libfontconfig,
   libcairo2, libffi8) so consumer CI jobs that `import weasyprint` (PDF
@@ -111,22 +111,22 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - Helm 3.21.0
 - doctl 1.160.1 (DigitalOcean CLI)
 - AWS CLI v2 2.34.57 (GPG-verified, pinned signing key)
-- Docker CLI v28.3.3+ with buildx 0.34.1 and Compose plugin (CVE-2025-54388)
+- Docker CLI v28.3.3+ with buildx 0.36.1 and Compose plugin (CVE-2025-54388)
 - GitHub CLI
 
 ### Security & Validation
-- kubeconform 0.7.0 - Kubernetes manifest validation
+- kubeconform 0.8.0 - Kubernetes manifest validation
 - kubesec 2.14.2 - Security risk analysis
-- Trivy 0.70.0 - Vulnerability scanner
-- Docker buildx 0.34.1
+- Trivy 0.74.0 - Vulnerability scanner
+- Docker buildx 0.36.1
 
 **Tool installation strategy**: kubectl, doctl, Trivy, and buildx are official
 upstream **release binaries** verified against a pinned SHA256 before install
 (this fixes the bogus `v0.0.0` / `0.0.0-dev` version strings the old source
-builds produced). kubeconform and kubesec are **source-built** with Go 1.26.3 in
+builds produced). kubeconform and kubesec are **source-built** with Go 1.27.0 in
 a throwaway builder stage because their upstream release binaries are built below
 this image's CVE floor (and both are already at their latest release); kubesec's
-`golang.org/x/crypto` is bumped (measured v0.52.0). Helm and Node install from
+`golang.org/x/crypto` is bumped (measured v0.55.0). Helm and Node install from
 official release tarballs with pinned checksums (no `curl | bash`). AWS CLI v2 is
 GPG-verified against a committed, fingerprint-pinned signing key. A clean Go
 runtime stays for CI use.
@@ -135,9 +135,9 @@ runtime stays for CI use.
 `test/verify-cve-floor.sh`**)**: every Go tool's toolchain ≥ Go 1.24.6
 (CVE-2025-47907), Trivy's `hashicorp/go-getter` ≥ v1.7.9 (CVE-2025-8959), and
 kubesec's `golang.org/x/crypto` ≥ v0.35.0 (CVE-2025-22869 / CVE-2024-45337).
-Measured at adoption: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.26.3,
-kubesec go1.26.3 (x/crypto v0.52.0), trivy go1.25.9 (go-getter v1.8.6), buildx
-go1.26.3. Trivy's full HIGH/CRITICAL scan runs **report-only** (SARIF to the
+Measured at adoption: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.27.0,
+kubesec go1.27.0 (x/crypto v0.55.0), trivy go1.26.6 (go-getter v1.8.6), buildx
+go1.26.5. Trivy's full HIGH/CRITICAL scan runs **report-only** (SARIF to the
 Security tab) because upstream release binaries and the dind base image carry
 fixed CVEs we cannot remediate; the deterministic CVE-floor gate is the enforcing
 check.
@@ -160,16 +160,16 @@ These are the current pins in `docker/Dockerfile.custom-runner`.
 | Node.js | 22.22.3 | nodejs.org tarball + SHA256 |
 | pnpm | 11.5.0 | corepack |
 | uv | 0.11.17 | release tarball + SHA256 |
-| Go (runtime) | 1.26.3 | go.dev tarball + SHA256 |
+| Go (runtime) | 1.27.0 | go.dev tarball + SHA256 |
 | Terraform | 1.15.5 | HashiCorp apt, keyring fingerprint + exact pin |
 | kubectl | 1.36.1 | release binary + SHA256 |
 | Helm | 3.21.0 | get.helm.sh tarball + SHA256 |
 | doctl | 1.160.1 | release binary + SHA256 |
 | AWS CLI | v2 2.34.57 | bundle + GPG (pinned key) |
-| kubeconform | 0.7.0 | source-built (Go 1.26.3) |
-| kubesec | 2.14.2 | source-built (Go 1.26.3, x/crypto v0.52.0) |
-| Trivy | 0.70.0 | release tarball + SHA256 |
-| buildx | 0.34.1 | release binary + SHA256 |
+| kubeconform | 0.8.0 | source-built (Go 1.27.0) |
+| kubesec | 2.14.2 | source-built (Go 1.27.0, x/crypto v0.55.0) |
+| Trivy | 0.74.0 | release tarball + SHA256 |
+| buildx | 0.36.1 | release binary + SHA256 |
 | Docker CLI / Compose | floating (>= 28.3.3 enforced) | Docker apt, keyring fingerprint |
 | GitHub CLI | floating | GitHub apt, keyring fingerprint |
 
@@ -346,8 +346,8 @@ the live runner fleet, so use them only when local operations are intended.
 
 **CVE-2025-47907 (HIGH)** - Go stdlib vulnerability (database/sql, Postgres):
 - Enforced via the CVE-floor gate: every Go tool's toolchain must be ≥ Go 1.24.6.
-- Measured: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.26.3, kubesec
-  go1.26.3, trivy go1.25.9, buildx go1.26.3 — all above the floor.
+- Measured: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.27.0, kubesec
+  go1.27.0, trivy go1.26.6, buildx go1.26.5 — all above the floor.
 
 **CVE-2025-55199 & CVE-2025-55198 (MEDIUM)** - Fixed Helm vulnerabilities:
 - **CVE-2025-55199**: Helm Chart JSON Schema Denial of Service vulnerability
@@ -355,11 +355,11 @@ the live runner fleet, so use them only when local operations are intended.
 - **Helm**: Updated to v3.21.0 (tarball + pinned SHA256).
 
 **CVE-2025-8959** - go-getter vulnerability in Trivy:
-- **Fix**: Trivy 0.70.0's release binary embeds `hashicorp/go-getter` v1.8.6
+- **Fix**: Trivy 0.74.0's release binary embeds `hashicorp/go-getter` v1.8.6
   (≥ v1.7.9). Verified by the CVE-floor gate; no source build needed.
 
 **CVE-2025-22869 / CVE-2024-45337** - golang.org/x/crypto (SSH) in kubesec:
-- **Fix**: kubesec is source-built with `x/crypto` bumped to v0.52.0
+- **Fix**: kubesec is source-built with `x/crypto` bumped to v0.55.0
   (≥ v0.35.0). Verified by the CVE-floor gate.
 
 The CVE-floor gate (`test/verify-cve-floor.sh`) enforces these specific CVE
@@ -432,7 +432,7 @@ The runner image uses a comprehensive multi-stage build process to eliminate sec
   time and in CI (`test/verify-cve-floor.sh`).
 
 **Build Stages:**
-1. **Go Builder Stage**: source-builds kubeconform and kubesec with Go 1.26.3
+1. **Go Builder Stage**: source-builds kubeconform and kubesec with Go 1.27.0
    (their upstream release binaries are below the CVE floor).
 2. **Python Builder Stage**: Installs Python development tools in isolation.
 3. **Final Runtime Stage**: installs release binaries (kubectl, doctl, Trivy,

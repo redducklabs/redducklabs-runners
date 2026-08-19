@@ -1,6 +1,6 @@
 # Go Runtime Fix - Critical Functionality Restoration
 
-> **Update (2026 toolchain refresh):** the clean Go runtime is now **Go 1.26.3**
+> **Update (2026 toolchain refresh):** the clean Go runtime is now **Go 1.27.0**
 > (was 1.24.6). The broad five-tool Go source-build stage was replaced by release
 > binaries for kubectl/doctl/trivy/buildx; a **minimal** `go-builder` stage
 > remains only to source-build kubeconform and kubesec (their release binaries

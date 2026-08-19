@@ -10,11 +10,11 @@
   plus Node.js, Helm, and uv install from official upstream release artifacts
   verified against a pinned SHA256 before install. This fixed the bogus
   `v0.0.0` / `0.0.0-dev` version strings the old source builds produced.
-- **Source-built (Go 1.26.3) in a minimal `go-builder` stage:** `kubeconform`
+- **Source-built (Go 1.27.0) in a minimal `go-builder` stage:** `kubeconform`
   and `kubesec` only. Their upstream release binaries are built below this
   image's CVE floor (kubeconform Go 1.24.2; kubesec Go 1.23.1 + x/crypto
   v0.29.0), and both are at their latest release, so they are compiled with Go
-  1.26.3 and kubesec's `golang.org/x/crypto` is bumped to v0.52.0. The builder's
+  1.27.0 and kubesec's `golang.org/x/crypto` is bumped to v0.55.0. The builder's
   module cache lives only in the throwaway stage and never reaches the final
   image.
 - **AWS CLI v2:** GPG-verified against a committed, fingerprint-pinned signing
@@ -25,9 +25,13 @@
   and in CI — every Go tool toolchain ≥ Go 1.24.6, Trivy go-getter ≥ v1.7.9,
   kubesec x/crypto ≥ v0.35.0. Trivy's full HIGH/CRITICAL scan is **report-only**
   (upstream-binary and dind base-image fixed CVEs cannot be remediated here).
-- **Go runtime:** a clean Go 1.26.3 stays in the final image for CI workflows.
+- **Go runtime:** a clean Go 1.27.0 stays in the final image for CI workflows.
 
-Measured toolchains at adoption (2026-06-01): kubectl go1.26.2, doctl go1.25.0,
+Measured toolchains (2026-08-19 version refresh): kubectl go1.26.2, doctl
+go1.25.0, kubeconform go1.27.0, kubesec go1.27.0 (x/crypto v0.55.0), trivy
+go1.26.6 (go-getter v1.8.6), buildx go1.26.5.
+
+Previously measured at adoption (2026-06-01): kubectl go1.26.2, doctl go1.25.0,
 kubeconform go1.26.3, kubesec go1.26.3 (x/crypto v0.52.0), trivy go1.25.9
 (go-getter v1.8.6), buildx go1.26.3.
 
