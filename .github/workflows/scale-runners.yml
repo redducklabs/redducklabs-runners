@@ -259,11 +259,11 @@ jobs:
               --namespace "${NAMESPACE}" \
               --reuse-values \
               --set minRunners=2 \
-              --set maxRunners=4 \
+              --set maxRunners=8 \
               --wait \
               --timeout 180s; then
               
-              echo "✅ Scaled to: Min=2, Max=4"
+              echo "✅ Scaled to: Min=2, Max=8"
               break
             elif [ "${attempt}" = "3" ]; then
               echo "❌ Error: Failed to scale up runners"
@@ -275,7 +275,7 @@ jobs:
           done
           
           echo "## ✅ Scaled Up" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=2, Max=4**" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=2, Max=8**" >> $GITHUB_STEP_SUMMARY
       
       - name: Scale down (minimal)
         if: needs.validate-inputs.outputs.action == 'scale-down'
@@ -401,7 +401,7 @@ jobs:
             # Verify scaling worked as expected
             case "${{ needs.validate-inputs.outputs.action }}" in
               scale-up)
-                if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "4" ]; then
+                if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "8" ]; then
                   echo "✅ Scale up verified"
                 else
                   echo "⚠️ Scale up may not have applied correctly"

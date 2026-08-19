@@ -10,25 +10,97 @@ githubConfigUrl: "https://github.com/YOUR_ORG_OR_REPO"
 githubConfigSecret:
   github_token: ""  # SET VIA ENVIRONMENT VARIABLE
 
-# Runner scaling configuration
+# Runner scaling configuration.
+# Size these against your node pool: the resource requests below decide how many
+# runner pods fit on a node, and therefore how many nodes maxRunners needs.
 minRunners: 2
 maxRunners: 4
 
 # Runner scale set name (used in workflows as: runs-on: your-runner-name)
 runnerScaleSetName: "YOUR-RUNNER-NAME"
 
-# Enable Docker-in-Docker mode
-containerMode:
-  type: "dind"
-  
-# Runner template configuration for DinD
+# NOTE: containerMode.type is deliberately NOT set to "dind".
+#
+# ARC's built-in dind mode renders the Docker daemon sidecar from a hardcoded
+# chart template with no `resources` field, and a user-supplied container named
+# "dind" is filtered out of values. The result is a dockerd with no memory
+# request and no memory limit, so every `docker build` competes for whatever
+# node memory happens to be unreserved - which causes intermittent, hard to
+# attribute out-of-memory failures.
+#
+# Declaring the sidecar ourselves (the chart's "default" container mode) is the
+# only way to give dockerd a memory reservation. The spec below reproduces what
+# containerMode: "dind" generates, plus resources and a pinned image.
+#
+# To confirm it still matches your chart version, diff these two renders:
+#   helm template test <chart> --version <ver> --kube-version <kver> -f dind-values.yaml
+#
+# Things you now own that the chart used to own - keep them in sync on upgrade:
+#   - init-dind-externals init container
+#   - dind sidecar (restartPolicy: Always -> requires Kubernetes >= 1.29)
+#   - DOCKER_GROUP_GID and the matching dockerd --group flag
+#   - work / dind-sock / dind-externals volumes
+#   - DOCKER_HOST and RUNNER_WAIT_FOR_DOCKER_IN_SECONDS on the runner
+
+# Runner template configuration
 template:
   spec:
     # Pull secret for private registry (if using custom image)
     # Uncomment and configure if using private registry
     # imagePullSecrets:
     # - name: your-registry-secret
-    
+
+    initContainers:
+    # Copies the runner's externals into a shared volume so dockerd can reach them.
+    - name: init-dind-externals
+      # REPLACE: must be the SAME image as the runner container below
+      image: YOUR_REGISTRY/YOUR_IMAGE:TAG
+      command: ["cp"]
+      args: ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+      volumeMounts:
+      - name: dind-externals
+        mountPath: /home/runner/tmpDir
+
+    # Docker daemon, run as a native sidecar (restartPolicy: Always on an init
+    # container). Requires Kubernetes >= 1.29.
+    - name: dind
+      # Pin this. The chart uses the floating `docker:dind` tag, which silently
+      # changes the Docker version underneath your builds.
+      image: docker:29.7.2-dind
+      args:
+        - dockerd
+        - --host=unix:///var/run/docker.sock
+        - --group=$(DOCKER_GROUP_GID)
+      env:
+        - name: DOCKER_GROUP_GID
+          value: "123"
+      securityContext:
+        privileged: true
+      restartPolicy: Always
+      startupProbe:
+        exec:
+          command:
+            - docker
+            - info
+        initialDelaySeconds: 0
+        failureThreshold: 24
+        periodSeconds: 5
+      # Memory for everything run INSIDE Docker (docker build, compose,
+      # testcontainers). Without this the daemon is unreserved and unbounded.
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "2Gi"
+        limits:
+          memory: "4Gi"
+      volumeMounts:
+      - name: work
+        mountPath: /home/runner/_work
+      - name: dind-sock
+        mountPath: /var/run
+      - name: dind-externals
+        mountPath: /home/runner/externals
+
     # Container configuration
     containers:
     - name: runner
@@ -37,17 +109,42 @@ template:
       # For default: ghcr.io/actions/actions-runner:latest
       image: YOUR_REGISTRY/YOUR_IMAGE:TAG
       imagePullPolicy: Always
-      
+
       # CRITICAL: Must specify the command for ARC to work properly
       command: ["/home/runner/run.sh"]
-      
-      # Resource limits - adjust as needed
+
+      # In the chart's dind mode these were injected automatically; in default
+      # mode you own them.
+      env:
+      - name: DOCKER_HOST
+        value: unix:///var/run/docker.sock
+      - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+        value: "120"
+
+      # Memory for work run DIRECTLY on the runner (npm, jest, pytest, go build)
+      # - as opposed to work run inside Docker, which is charged to dind above.
+      #
+      # Sizing rule: (runner requests + dind requests) x pods-per-node must fit
+      # inside node allocatable, minus what system DaemonSets take. Requests
+      # decide packing density; limits decide what a job can actually use.
       resources:
         limits:
-          cpu: "2"
           memory: "4Gi"
         requests:
           cpu: "500m"
           memory: "1Gi"
-    
-    # Docker-in-Docker sidecar container (automatically added by ARC when containerMode.type: "dind")
+
+      volumeMounts:
+      - name: work
+        mountPath: /home/runner/_work
+      - name: dind-sock
+        mountPath: /var/run
+
+    # Owned by you in default container mode (the chart creates these in dind mode).
+    volumes:
+    - name: work
+      emptyDir: {}
+    - name: dind-sock
+      emptyDir: {}
+    - name: dind-externals
+      emptyDir: {}

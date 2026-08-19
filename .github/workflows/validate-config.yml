@@ -1,0 +1,149 @@
+name: Validate Config
+
+# PR-time validation for everything that is not the Docker image.
+#
+# Before this workflow, the only pull_request-triggered job was
+# build-runner-image.yml, and it is path-filtered to Dockerfile-related files.
+# That meant deploy/dind-values.yaml - the file that controls production runner
+# CPU and memory - could be changed and merged with no automated check at all.
+#
+# Runs on ubuntu-latest rather than the self-hosted runners on purpose: this
+# workflow validates the runner configuration itself, so it must still work when
+# the runners are misconfigured, saturated, or scaled to zero. The repository is
+# public, so GitHub-hosted minutes are free.
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'scripts/**'
+      - 'test/**'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/**'
+      - 'scripts/**'
+      - 'test/**'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate workflows, scripts and runner config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate YAML syntax
+        run: |
+          echo "🔍 Parsing all workflow and deployment YAML..."
+          python3 - <<'PY'
+          import glob, sys, yaml
+
+          failures = []
+          files = sorted(glob.glob('.github/workflows/*.yml')) \
+                + sorted(glob.glob('.github/actions/*/action.yml')) \
+                + sorted(glob.glob('deploy/*.yaml'))
+
+          for f in files:
+              try:
+                  yaml.safe_load(open(f, encoding='utf-8'))
+                  print(f'  OK   {f}')
+              except Exception as e:
+                  failures.append((f, e))
+                  print(f'  FAIL {f}: {e}')
+
+          if failures:
+              print(f'\n{len(failures)} file(s) failed to parse')
+              sys.exit(1)
+          print(f'\nAll {len(files)} file(s) parsed successfully')
+          PY
+
+      - name: Lint GitHub Actions workflows
+        run: |
+          echo "🔍 Running actionlint..."
+          # Pinned release rather than `| bash` of a floating installer.
+          ACTIONLINT_VERSION=1.7.7
+          curl -sSLo actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          # -shellcheck= / -pyflakes= disable actionlint's embedded passes over
+          # `run:` blocks. Shell scripts are linted directly in the dedicated
+          # shellcheck step below at severity=error; the embedded pass reports
+          # every severity and would flood this check with style findings from
+          # workflows that predate it. This lints workflow STRUCTURE only:
+          # syntax, expressions, contexts, action refs, matrix and `needs` wiring.
+          ./actionlint -color -shellcheck= -pyflakes= .github/workflows/*.yml
+
+      - name: Check shell script syntax
+        run: |
+          echo "🔍 Running bash -n on all scripts..."
+          FAILED=0
+          for s in scripts/*.sh test/*.sh deploy/*.sh docs/codex/*.sh; do
+            [ -e "$s" ] || continue
+            if bash -n "$s" 2>/dev/null; then
+              echo "  OK   $s"
+            else
+              echo "  FAIL $s"
+              bash -n "$s" || true
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" = "0" ] || exit 1
+
+      - name: Shellcheck (errors only)
+        run: |
+          echo "🔍 Running shellcheck at severity=error..."
+          # Errors only: these scripts predate this check and style-level
+          # findings would be noise. Genuine errors still fail the build.
+          shellcheck -S error scripts/*.sh test/*.sh deploy/*.sh || exit 1
+          echo "✅ No shellcheck errors"
+
+      - name: Verify runner resource reservations
+        run: |
+          echo "🔍 Verifying runner memory reservations and pod-per-node invariant..."
+          # Guards against silently reintroducing containerMode.type: dind,
+          # which would drop the Docker daemon's memory reservation with no
+          # error and no visible diff in the values file.
+          chmod +x test/verify-runner-resources.sh
+          ./test/verify-runner-resources.sh
+
+      - name: Check for secrets in tracked files
+        run: |
+          echo "🔍 Checking that no token-like values were committed..."
+          # deploy/dind-values.yaml must keep github_token empty - it is set at
+          # deploy time via --set.
+          TOKEN_LINE=$(grep -E '^\s*github_token:' deploy/dind-values.yaml || true)
+          if echo "${TOKEN_LINE}" | grep -qE 'github_token:\s*"?(gh[pousr]_|[A-Za-z0-9]{20,})'; then
+            echo "❌ deploy/dind-values.yaml appears to contain a real token!"
+            exit 1
+          fi
+          echo "✅ github_token is not populated in committed values"
+
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "❌ .env is tracked by git"
+            exit 1
+          fi
+          echo "✅ .env is not tracked"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Config Validation"
+            echo ""
+            echo "- YAML syntax (workflows, composite actions, deploy values)"
+            echo "- actionlint"
+            echo "- \`bash -n\` + shellcheck (errors) on all scripts"
+            echo "- Runner memory reservations and the one-pod-per-node invariant"
+            echo "- No committed tokens"
+          } >> $GITHUB_STEP_SUMMARY

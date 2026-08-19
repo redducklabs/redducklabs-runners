@@ -79,10 +79,9 @@ jobs:
   status:
     name: Check Runner Status
     # Runs on ubuntu-latest (like the other ops workflows) rather than the
-    # self-hosted runners: this job uses setup-tools, which installs binaries
-    # via sudo, and the runner pods set allowPrivilegeEscalation: false
-    # (NoNewPrivs) which blocks sudo. Running here also lets status report even
-    # when the runners themselves are unhealthy.
+    # self-hosted runners, so that status can still be reported when the runners
+    # themselves are unhealthy, saturated, or scaled to zero - which is exactly
+    # when you want this workflow to work.
     runs-on: ubuntu-latest
     needs: validate-inputs
     timeout-minutes: 5
@@ -197,8 +196,17 @@ jobs:
             MAX_RUNNERS=$(echo "${VALUES_JSON}" | jq -r '.maxRunners // 0')
             GITHUB_URL=$(echo "${VALUES_JSON}" | jq -r '.githubConfigUrl // "Not configured"')
             RUNNER_NAME=$(echo "${VALUES_JSON}" | jq -r '.runnerScaleSetName // "Not configured"')
-            CONTAINER_MODE=$(echo "${VALUES_JSON}" | jq -r '.containerMode.type // "Not configured"')
-            
+            # containerMode.type is no longer set: the Docker-in-Docker sidecar
+            # is declared explicitly in deploy/dind-values.yaml so it can carry
+            # memory requests/limits, which ARC's built-in dind mode does not
+            # allow. Detect the self-managed sidecar rather than reporting
+            # "Not configured", which would look like Docker was missing.
+            if [ "$(echo "${VALUES_JSON}" | jq -r '[.template.spec.initContainers[]? | select(.name=="dind")] | length')" -gt 0 ]; then
+              CONTAINER_MODE="dind (self-managed sidecar)"
+            else
+              CONTAINER_MODE=$(echo "${VALUES_JSON}" | jq -r '.containerMode.type // "Not configured"')
+            fi
+
             # Validate numeric values
             if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
               MIN_RUNNERS=0
@@ -274,7 +282,106 @@ jobs:
             echo "Pod Details:"
             kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" 2>/dev/null || echo "Could not retrieve pod details"
           fi
-      
+
+      - name: Check memory headroom and OOM kills
+        if: steps.deployment.outputs.deployed == 'true'
+        id: memory
+        continue-on-error: true
+        run: |
+          echo "🧠 Checking runner memory headroom and OOM history..."
+          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+
+          # --- Node headroom -------------------------------------------------
+          # Requires metrics-server (.github/workflows/deploy-cluster-addons.yml).
+          echo ""
+          echo "Runner node usage:"
+          if kubectl top nodes --no-headers >/dev/null 2>&1; then
+            kubectl top nodes --no-headers 2>/dev/null | grep '^github-runners-pool' \
+              || echo "  (no runner nodes reporting)"
+          else
+            echo "  ⚠️ metrics API unavailable - is metrics-server deployed?"
+            echo "     Run the 'Deploy Cluster Addons' workflow."
+          fi
+
+          echo ""
+          echo "Runner container usage (runner = job process, dind = Docker builds):"
+          kubectl top pods -n "${NAMESPACE}" --containers --no-headers 2>/dev/null \
+            || echo "  (no metrics available)"
+
+          # --- OOM kills -----------------------------------------------------
+          # Runner pods are ephemeral and are deleted when a job finishes, so a
+          # pod that was OOMKilled mid-job is usually already gone. Check both
+          # live pod state and the (roughly 1 hour) event window.
+          echo ""
+          PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -o json 2>/dev/null || echo '{"items":[]}')
+
+          OOM_DETAIL=$(echo "${PODS_JSON}" | jq -r '
+            .items[]
+            | .metadata.name as $pod
+            | (.status.containerStatuses // []) + (.status.initContainerStatuses // [])
+            | .[]
+            | select((.state.terminated.reason // .lastState.terminated.reason) == "OOMKilled")
+            | "  " + $pod + " / " + .name
+          ')
+          OOM_COUNT=$(echo "${OOM_DETAIL}" | grep -c '/' || true)
+
+          EVICTED=$(echo "${PODS_JSON}" | jq -r '
+            [.items[] | select(.status.reason == "Evicted")] | length
+          ')
+
+          OOM_EVENTS=$(kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp 2>/dev/null \
+            | grep -Ei 'oomkill|evict' | tail -10 || true)
+
+          echo "OOM kills in live pods: ${OOM_COUNT}"
+          if [ "${OOM_COUNT}" -gt 0 ]; then
+            echo "${OOM_DETAIL}"
+            echo ""
+            echo "  → container 'runner' = the job process itself (raise the runner limit)"
+            echo "  → container 'dind'   = a Docker build (raise the dind limit)"
+            echo "  See docs/runbooks/node-pool-sizing.md"
+          fi
+          echo "Evicted pods: ${EVICTED}"
+          if [ -n "${OOM_EVENTS}" ]; then
+            echo ""
+            echo "Recent OOM/eviction events:"
+            echo "${OOM_EVENTS}"
+          fi
+
+          echo "oom_count=${OOM_COUNT}" >> $GITHUB_OUTPUT
+          echo "evicted_count=${EVICTED}" >> $GITHUB_OUTPUT
+
+          # --- Capacity drift ------------------------------------------------
+          # One runner pod per node, so max_nodes must be >= maxRunners or the
+          # extra runners can never be scheduled. This catches the case where
+          # maxRunners was raised without resizing the pool.
+          echo ""
+          MAX_RUNNERS="${{ steps.config.outputs.max_runners }}"
+          CLUSTER_ID=$(doctl kubernetes cluster list -o json 2>/dev/null \
+            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
+
+          if [ -n "${CLUSTER_ID}" ] && [ "${CLUSTER_ID}" != "null" ]; then
+            POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json 2>/dev/null \
+              | jq -r '.[] | select(.name=="github-runners-pool-16g")')
+            POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes // "?"')
+            POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes // "?"')
+            POOL_COUNT=$(echo "${POOL_JSON}" | jq -r '.count // "?"')
+
+            echo "Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX} current=${POOL_COUNT}"
+            echo "Scale set: maxRunners=${MAX_RUNNERS}"
+
+            if [[ "${POOL_MAX}" =~ ^[0-9]+$ ]] && [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]] \
+               && [ "${POOL_MAX}" -lt "${MAX_RUNNERS}" ]; then
+              echo "⚠️ CAPACITY DRIFT: max_nodes (${POOL_MAX}) < maxRunners (${MAX_RUNNERS})."
+              echo "   One runner pod is scheduled per node, so runners above"
+              echo "   ${POOL_MAX} will sit Pending forever."
+              echo "   Fix with the 'Node Pool Sizing' workflow."
+            else
+              echo "✅ Node pool capacity is consistent with maxRunners"
+            fi
+          else
+            echo "⚠️ Could not resolve cluster '${CLUSTER_NAME}' to check pool capacity"
+          fi
+
       - name: Check GitHub registration
         if: steps.deployment.outputs.deployed == 'true'
         id: github

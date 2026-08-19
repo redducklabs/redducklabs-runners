@@ -1,0 +1,40 @@
+# metrics-server configuration for redducklabs-cluster
+#
+# metrics-server backs `kubectl top nodes` and `kubectl top pods`. Without it
+# there is no way to see how much memory a runner or its Docker daemon is
+# actually using, which is what made the runner out-of-memory failures hard to
+# attribute. DOKS does not ship it by default on this cluster.
+#
+# Deployed by .github/workflows/deploy-cluster-addons.yml.
+
+# NOTE: --kubelet-insecure-tls is deliberately NOT set.
+#
+# Many metrics-server guides tell you to add it. On this DOKS cluster it is not
+# needed: the kubelet serving certificates validate against the cluster CA, and
+# metrics-server was verified serving `kubectl top nodes` with TLS verification
+# fully enabled. Do not add it to "fix" a scrape failure without first checking
+# what the real error is - it disables verification of every kubelet connection.
+#
+# `args` is intentionally left unset. The chart's `defaultArgs` already supplies
+# --cert-dir, --kubelet-preferred-address-types, --kubelet-use-node-status-port
+# and --metric-resolution, and the chart APPENDS `args` to `defaultArgs` rather
+# than replacing them - so repeating a default flag here passes it twice.
+
+# Small, bounded footprint. metrics-server holds only a short in-memory window
+# of samples, so this scales with node/pod count rather than with load.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# No toleration for the github-runner taint on purpose: the runner pool is sized
+# for exactly one runner pod per node, and an addon scheduled there would eat
+# into that budget. metrics-server runs on worker-pool and scrapes the runner
+# kubelets over the network.
+
+replicas: 1
+
+podDisruptionBudget:
+  enabled: false

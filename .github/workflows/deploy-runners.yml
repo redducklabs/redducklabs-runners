@@ -17,7 +17,7 @@ on:
       max_runners:
         description: 'Maximum number of runners'
         required: false
-        default: '6'
+        default: '8'
         type: choice
         options:
           - '1'
@@ -209,6 +209,58 @@ jobs:
             fi
           done
       
+      - name: Check node pool capacity
+        continue-on-error: true
+        run: |
+          echo "📐 Checking node pool capacity against requested runner count..."
+          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
+          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
+          POOL_NAME="github-runners-pool-16g"
+
+          # One runner pod is scheduled per node: the pod requests 10Gi of
+          # memory (runner 5Gi + dind 5Gi) against ~13.32Gi of node allocatable,
+          # so two pods cannot share a node. Concurrency is therefore capped by
+          # max_nodes as well as by maxRunners.
+          CLUSTER_ID=$(doctl kubernetes cluster list -o json 2>/dev/null \
+            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
+
+          if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
+            echo "⚠️ Could not resolve cluster '${CLUSTER_NAME}' - skipping capacity check"
+            exit 0
+          fi
+
+          POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json 2>/dev/null \
+            | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
+
+          if [ -z "${POOL_JSON}" ]; then
+            echo "⚠️ Node pool '${POOL_NAME}' not found - skipping capacity check"
+            exit 0
+          fi
+
+          POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
+          POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
+
+          echo "  Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX}"
+          echo "  Requested: minRunners=${MIN_RUNNERS} maxRunners=${MAX_RUNNERS}"
+
+          if [ "${MAX_RUNNERS}" -gt "${POOL_MAX}" ]; then
+            echo "⚠️ WARNING: maxRunners (${MAX_RUNNERS}) exceeds pool max_nodes (${POOL_MAX})."
+            echo "   Runners above ${POOL_MAX} will stay Pending indefinitely."
+            echo "   Resize the pool with the 'Node Pool Sizing' workflow."
+            {
+              echo "### ⚠️ Capacity warning"
+              echo ""
+              echo "\`maxRunners=${MAX_RUNNERS}\` exceeds node pool \`max_nodes=${POOL_MAX}\`."
+              echo "One runner pod runs per node, so runners above ${POOL_MAX} will stay Pending."
+              echo "Fix with the **Node Pool Sizing** workflow."
+            } >> $GITHUB_STEP_SUMMARY
+          elif [ "${MIN_RUNNERS}" -gt "${POOL_MIN}" ]; then
+            echo "⚠️ WARNING: minRunners (${MIN_RUNNERS}) exceeds pool min_nodes (${POOL_MIN})."
+            echo "   Warm runners will wait on node provisioning until the pool scales up."
+          else
+            echo "✅ Node pool capacity is sufficient"
+          fi
+
       - name: Create namespace if not exists
         run: |
           echo "📁 Ensuring namespace exists..."

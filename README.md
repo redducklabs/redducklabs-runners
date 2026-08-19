@@ -7,8 +7,8 @@ Deploy secure, scalable GitHub Actions self-hosted runners on Kubernetes with co
 - **GitHub-first deployment**: Deploy, scale, monitor, and emergency-stop runners from GitHub Actions.
 - **Complete Development Environment**: Python 3.13, Node.js 22, uv, AWS CLI v2, Terraform, kubectl, Helm, and more
 - **Security Tools**: kubeconform 0.7.0, kubesec 2.14.2, Trivy 0.70.0
-- **Docker-in-Docker Support**: Build containers within runners
-- **Auto-scaling**: Configurable min/max runner instances (2-4 default, 4-8 maximum)
+- **Docker-in-Docker Support**: Build containers within runners, with a dedicated memory reservation for the Docker daemon
+- **Auto-scaling**: Configurable min/max runner instances (2 warm / 8 maximum by default)
 - **Production Ready**: Resource limits, health checks, and monitoring
 - **Dual Configuration**: Template versions for reuse and production configs for Red Duck Labs
 - **Security optimized**: Multi-stage build with SHA256/GPG-verified tools and a machine-enforced CVE-floor gate
@@ -28,8 +28,14 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
    - [Create in DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens)
 
 ### Infrastructure Requirements
-- Kubernetes cluster (1.24+) - Red Duck Labs uses DigitalOcean
+- **Kubernetes cluster 1.29+** - Red Duck Labs uses DigitalOcean (currently 1.33).
+  1.29 is a hard floor: the Docker-in-Docker daemon runs as a *native sidecar*
+  (an init container with `restartPolicy: Always`), which earlier versions ignore.
 - DigitalOcean Container Registry (for custom images)
+- A dedicated, labeled and tainted node pool for runners
+  (`node-type=github-runner`, taint `github-runner=true:NoSchedule`), sized so
+  that one runner pod fits per node - see
+  [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
 
 ## Quick Start - GitHub Actions Deployment
 
@@ -45,7 +51,7 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
 3. Click **"Run workflow"**
 4. Configure options (or use defaults):
    - Min runners: 2
-   - Max runners: 4
+   - Max runners: 8
    - Runner image: `registry.digitalocean.com/redducklabs/github-runner:latest`
 5. Click **"Run workflow"** to deploy
 
@@ -193,6 +199,37 @@ guide and update the pinned fingerprint in the Dockerfile and in
 `test/verify-aws-key-expiry.sh`. Locally, `--no-cache` (or bumping
 `AWSCLI_VERSION`) forces the in-image check to re-run.
 
+## Runner Capacity and Memory
+
+| | Value |
+|---|---|
+| Concurrent runners | **8** (`maxRunners`), 2 always warm (`minRunners`) |
+| Memory per job | **~12.5Gi usable** - runner limit 10Gi, Docker daemon limit 10Gi |
+| CPU per job | All 8 vCPU (no CPU limit) |
+| Node pool | `github-runners-pool-16g`, `s-8vcpu-16gb`, autoscaling 2-8 nodes |
+| Cost | **$192/mo floor** (2 warm nodes), **$768/mo ceiling** (8 nodes, only while 8 jobs run) |
+
+**One runner pod runs per node.** The pod requests 10Gi of memory (runner 5Gi +
+dind 5Gi) against ~13.32Gi of node allocatable, so two pods cannot share a node
+and the cluster-autoscaler adds a node per concurrent job. This is deliberate:
+it stops one job's `docker build` from starving another's, which was the cause
+of intermittent out-of-memory failures.
+
+Two consequences worth knowing:
+
+- **`maxRunners` and the pool's `max_nodes` must be raised together.** Runners
+  above `max_nodes` sit `Pending` forever. The **Node Pool Sizing** workflow
+  enforces this, and **Deploy GitHub Runners** and **Runner Status** both warn
+  on drift.
+- **Jobs beyond the warm pool wait for a node** to be provisioned and the
+  ~1.34GB runner image to be pulled. `minRunners`/`min_nodes` is the dial that
+  trades money for that latency.
+
+Memory is split into two independent budgets - the `runner` container for work
+run directly on the runner, and the `dind` sidecar for anything run inside
+Docker. See [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
+for how to change any of this.
+
 ## GitHub Actions Management
 
 Use GitHub Actions for normal runner fleet operations. Local scripts are
@@ -204,7 +241,9 @@ available for investigation and explicitly requested operations.
 |----------|-------------|---------|
 | **Deploy GitHub Runners** | Initial deployment or updates | Manual (`workflow_dispatch`) |
 | **Scale GitHub Runners** | Scale up/down/custom | Manual (`workflow_dispatch`) |
-| **Runner Status** | Check runner health and registration | Manual + Daily at 9 AM UTC |
+| **Node Pool Sizing** | Set node pool min/max nodes (runner capacity ceiling) | Manual (`workflow_dispatch`) |
+| **Deploy Cluster Addons** | Deploy metrics-server (`kubectl top`) | Manual (`workflow_dispatch`) |
+| **Runner Status** | Runner health, registration, memory headroom, OOM kills | Manual + Daily at 9 AM UTC |
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
 | **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
 
@@ -270,6 +309,7 @@ the live runner fleet, so use them only when local operations are intended.
 ```bash
 ./test/verify-tools.sh
 ./test/test-deployment.sh
+./test/verify-runner-resources.sh   # memory reservations + one-pod-per-node (no cluster needed)
 ./test/verify-cve-floor.sh <image>
 ./test/verify-aws-key-expiry.sh docker/aws-cli-public.key
 ./test/verify-docker-version.sh
@@ -341,12 +381,41 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
   https://api.github.com/orgs/redducklabs/actions/runners
 ```
 
+### Diagnosing Out-Of-Memory Failures
+
+The runner container and the Docker daemon have **separate memory budgets**, so
+an OOM kill names the one that overran:
+
+```bash
+# Live memory use per container
+kubectl top pods -n arc-runners --containers
+
+# Node headroom
+kubectl top nodes
+
+# Recent OOM kills and evictions (runner pods are ephemeral - check promptly)
+kubectl get events -n arc-runners --sort-by=.lastTimestamp | grep -Ei 'oom|evict'
+```
+
+| Container killed | Cause | Fix |
+|---|---|---|
+| `runner` | The job process itself (npm, jest, webpack, pytest, go build) | Raise the `runner` memory limit, or lower the job's own worker count |
+| `dind` | A Docker build, compose, or testcontainers | Raise the `dind` memory limit |
+
+Both limits are in `deploy/dind-values.yaml`. The scheduled **Runner Status**
+workflow reports the same information on every run.
+
 ### Common Issues
 
 - **Pods stuck in Init**: Check image pull secrets and registry access
 - **Runners not appearing**: Verify GitHub token has correct scopes
 - **Build failures**: Ensure Docker-in-Docker is properly configured
 - **Scaling issues**: Check AutoScalingRunnerSet status
+- **Runners stuck `Pending`**: `maxRunners` likely exceeds the node pool's
+  `max_nodes`. One runner pod runs per node - see
+  [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
+- **`kubectl top` says "Metrics API not available"**: run the
+  **Deploy Cluster Addons** workflow to install metrics-server
 
 ## Security & Optimization
 

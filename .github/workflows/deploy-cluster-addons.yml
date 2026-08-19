@@ -1,0 +1,172 @@
+name: Deploy Cluster Addons
+
+# Deploys cluster addons that the runner platform depends on.
+#
+# Currently: metrics-server, which backs `kubectl top` and therefore all runner
+# memory observability. DOKS does not ship it on this cluster, so without this
+# workflow there is no way to see how much memory a runner or its Docker daemon
+# is using.
+#
+# Configuration lives in deploy/metrics-server-values.yaml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      addon:
+        description: 'Addon to deploy'
+        required: true
+        default: 'metrics-server'
+        type: choice
+        options:
+          - 'metrics-server'
+      metrics_server_chart_version:
+        description: 'metrics-server Helm chart version'
+        required: false
+        default: '3.14.0'
+        type: string
+
+env:
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
+  CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-addon:
+    name: Deploy ${{ github.event.inputs.addon }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
+
+      - name: Validate inputs
+        id: validate
+        run: |
+          echo "🔍 Validating addon inputs..."
+          CHART_VERSION="${{ github.event.inputs.metrics_server_chart_version }}"
+
+          if ! [[ "${CHART_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Error: chart version must be X.Y.Z"
+            exit 1
+          fi
+
+          echo "chart_version=${CHART_VERSION}" >> $GITHUB_OUTPUT
+          echo "✅ Inputs validated"
+
+      - name: Configure Kubernetes access
+        run: |
+          echo "🔧 Configuring Kubernetes access..."
+
+          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring doctl..."
+            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+              echo "✅ DigitalOcean authentication configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to authenticate with DigitalOcean"
+              exit 1
+            else
+              echo "⚠️ Authentication failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+
+          # `kubeconfig save` takes the cluster NAME; `use-context` takes the
+          # generated CONTEXT name (do-<region>-<cluster-name>) - these differ.
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring kubectl..."
+            if doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"; then
+              kubectl config use-context "${CLUSTER_CONTEXT}"
+              echo "✅ Kubernetes access configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to configure kubectl"
+              exit 1
+            else
+              echo "⚠️ kubectl configuration failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+
+      - name: Deploy metrics-server
+        if: github.event.inputs.addon == 'metrics-server'
+        run: |
+          echo "📦 Deploying metrics-server..."
+
+          helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+          helm repo update metrics-server
+
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Deploying metrics-server..."
+            if helm upgrade --install metrics-server metrics-server/metrics-server \
+              --namespace kube-system \
+              --version "${{ steps.validate.outputs.chart_version }}" \
+              --values deploy/metrics-server-values.yaml \
+              --wait --timeout 300s; then
+              echo "✅ metrics-server deployed"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to deploy metrics-server"
+              kubectl -n kube-system get pods -l app.kubernetes.io/name=metrics-server || true
+              kubectl -n kube-system logs -l app.kubernetes.io/name=metrics-server --tail=50 || true
+              exit 1
+            else
+              echo "⚠️ Deployment failed, retrying in 10s..."
+              sleep 10
+            fi
+          done
+
+      - name: Verify metrics API
+        if: github.event.inputs.addon == 'metrics-server'
+        run: |
+          echo "🔍 Verifying the metrics API actually serves data..."
+
+          # A Running pod is not proof the APIService is answering. Poll until
+          # `kubectl top` returns real numbers.
+          for attempt in $(seq 1 12); do
+            if kubectl top nodes >/dev/null 2>&1; then
+              echo "✅ Metrics API is serving"
+              echo ""
+              echo "Node usage:"
+              kubectl top nodes
+              echo ""
+              echo "Runner container usage:"
+              kubectl top pods -n arc-runners --containers 2>/dev/null || echo "(no runner pods right now)"
+              exit 0
+            fi
+            echo "Attempt ${attempt}/12: metrics API not ready yet, waiting 10s..."
+            sleep 10
+          done
+
+          echo "❌ Error: metrics API did not become available"
+          kubectl get apiservice v1beta1.metrics.k8s.io -o yaml || true
+          kubectl -n kube-system logs -l app.kubernetes.io/name=metrics-server --tail=50 || true
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Cluster Addon Deployment"
+            echo ""
+            echo "- **Addon:** \`${{ github.event.inputs.addon }}\`"
+            echo "- **Chart version:** \`${{ steps.validate.outputs.chart_version }}\`"
+            echo "- **Cluster:** \`${{ env.CLUSTER_NAME }}\`"
+            echo ""
+            echo "\`kubectl top nodes\` and \`kubectl top pods -n arc-runners --containers\`"
+            echo "are how you check runner memory headroom. See"
+            echo "\`docs/runbooks/node-pool-sizing.md\`."
+          } >> $GITHUB_STEP_SUMMARY

@@ -26,7 +26,7 @@ The easiest way to deploy runners is directly from GitHub Actions - no local set
 3. Click **"Run workflow"** button
 4. Configure deployment options:
    - **Min runners**: Minimum number of runners (default: 2)
-   - **Max runners**: Maximum number of runners (default: 4)
+   - **Max runners**: Maximum number of runners (default: 8)
    - **Runner image**: Docker image to use (default: `registry.digitalocean.com/redducklabs/github-runner:latest`)
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
@@ -136,7 +136,7 @@ REGISTRY_NAMESPACE=redducklabs
 RELEASE_NAME=redducklabs-runners
 RUNNER_SCALE_SET_NAME=redducklabs-runners
 MIN_RUNNERS=2
-MAX_RUNNERS=4
+MAX_RUNNERS=8
 ```
 
 ### 3. Container Registry Setup
@@ -223,6 +223,9 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
 
 The `deploy/dind-values.yaml` file contains the main configuration:
 
+Abridged - see `deploy/dind-values.yaml` for the full file and the reasoning
+comments.
+
 ```yaml
 # GitHub configuration
 githubConfigUrl: "https://github.com/redducklabs"
@@ -230,30 +233,83 @@ runnerScaleSetName: "redducklabs-runners"
 
 # Scaling settings
 minRunners: 2
-maxRunners: 4
+maxRunners: 8
 
-# Container configuration
+# NOTE: containerMode.type is deliberately NOT "dind" - see below.
 template:
   spec:
+    initContainers:
+    - name: init-dind-externals
+      # ... copies runner externals into a shared volume
+    - name: dind                      # Docker daemon, as a native sidecar
+      image: docker:29.7.2-dind
+      restartPolicy: Always
+      securityContext:
+        privileged: true
+      resources:                      # memory for everything run IN Docker
+        requests:
+          cpu: "1"
+          memory: "5Gi"
+        limits:
+          memory: "10Gi"
+
     containers:
     - name: runner
       image: registry.digitalocean.com/redducklabs/github-runner:latest
-      resources:
-        limits:
-          cpu: "2"
-          memory: "4Gi"
+      resources:                      # memory for work run ON the runner
         requests:
-          cpu: "500m"
-          memory: "1Gi"
+          cpu: "2"
+          memory: "5Gi"
+        limits:
+          memory: "10Gi"              # no CPU limit: one pod per node
 ```
 
 ### Key Configuration Options
 
-- **minRunners**: Always-on runners (recommendation: 2)
-- **maxRunners**: Maximum concurrent runners (recommendation: 4-8)
-- **CPU/Memory**: Resource limits per runner
-- **Image**: Custom runner image with pre-installed tools
-- **Pull Secrets**: For accessing private registries
+- **minRunners**: Always-on runners. One node per warm runner, billed
+  continuously (recommendation: 2).
+- **maxRunners**: Maximum concurrent runners. Must not exceed the node pool's
+  `max_nodes`, or the surplus runners sit `Pending` forever.
+- **runner resources**: Memory for work run *directly* on the runner (npm, jest,
+  pytest, go build).
+- **dind resources**: Memory for work run *inside Docker* (`docker build`,
+  compose, testcontainers). These are separate budgets - an OOM names which
+  container overran.
+- **Image**: Custom runner image with pre-installed tools.
+- **Pull Secrets**: For accessing private registries.
+
+### Why the Docker sidecar is declared manually
+
+ARC's built-in `containerMode.type: "dind"` renders the Docker daemon sidecar
+from a hardcoded chart template with no `resources` field, and a user-supplied
+container named `dind` is filtered out of values. That leaves dockerd with no
+memory request and no memory limit, so every `docker build` competes for
+whatever node memory happens to be unreserved - the cause of intermittent,
+hard-to-attribute out-of-memory failures.
+
+Declaring the sidecar explicitly (the chart's "default" container mode) is the
+only way to give dockerd a memory reservation. The spec in
+`deploy/dind-values.yaml` reproduces exactly what `containerMode: "dind"`
+generated, plus resources and a pinned image.
+
+**On chart upgrades, re-render and diff the pod spec**, because we now own
+pieces the chart used to manage:
+
+```bash
+helm template redducklabs-runners \
+  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+  --version <version> --kube-version <cluster-version> \
+  -f deploy/dind-values.yaml
+```
+
+### Capacity model
+
+One runner pod is scheduled per node: the pod requests 10Gi of memory
+(runner 5Gi + dind 5Gi) against ~13.32Gi of node allocatable, so two pods cannot
+share a node. Concurrency is therefore bounded by the node pool's `max_nodes` as
+well as by `maxRunners`, and the two must be changed together.
+
+See `docs/runbooks/node-pool-sizing.md`.
 
 ## 🧪 Testing Setup
 

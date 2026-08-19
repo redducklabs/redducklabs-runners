@@ -50,6 +50,10 @@ otherwise.
 # Deployment verification
 ./test/test-deployment.sh
 
+# Runner memory reservations and the one-pod-per-node invariant.
+# Renders deploy/dind-values.yaml with Helm; needs no cluster access.
+./test/verify-runner-resources.sh
+
 # Security and runtime verification
 ./test/verify-docker-version.sh
 ./test/verify-go-runtime.sh
