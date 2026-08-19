@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Verify AWS signing key not expired (cache-independent)
         run: bash test/verify-aws-key-expiry.sh docker/aws-cli-public.key
@@ -222,7 +222,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Verify AWS signing key not expired (cache-independent)
         run: bash test/verify-aws-key-expiry.sh docker/aws-cli-public.key
@@ -329,7 +329,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Authenticate with DigitalOcean Registry (for Trivy)
         run: |
