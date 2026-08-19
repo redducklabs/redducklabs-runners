@@ -23,13 +23,13 @@ Main scaling script with full control over runner count.
 # Check current status
 ./scale-runners.sh status
 
-# Scale to default (2 min, 4 max)
+# Scale to default (2 min, 8 max)
 ./scale-runners.sh up
 
 # Scale to zero for maintenance
 ./scale-runners.sh down
 
-# Scale to maximum capacity (4 min, 8 max)
+# Scale to maximum warm capacity (4 min, 8 max) - MIN is billed continuously
 ./scale-runners.sh max
 
 # Custom scaling

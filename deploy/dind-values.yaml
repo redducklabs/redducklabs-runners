@@ -10,33 +10,52 @@ githubConfigUrl: "https://github.com/redducklabs"
 githubConfigSecret:
   github_token: ""  # SET VIA ENVIRONMENT VARIABLE
 
-# Runner scaling configuration
+# Runner scaling configuration.
+# One runner pod per node (see the resource note below), so maxRunners must not
+# exceed the node pool's max_nodes and minRunners must not exceed min_nodes.
+# Pool bounds are applied by .github/workflows/node-pool-sizing.yml; see
+# docs/runbooks/node-pool-sizing.md before changing either number.
 minRunners: 2
-maxRunners: 6
+maxRunners: 8
 
 # Runner scale set name (used in workflows as: runs-on: redducklabs-runners)
 runnerScaleSetName: "redducklabs-runners"
 
-# Enable Docker-in-Docker mode
-containerMode:
-  type: "dind"
-  
-# Runner template configuration for DinD
+# NOTE: containerMode.type is deliberately NOT set to "dind".
+#
+# ARC's built-in dind mode (containerMode.type: "dind") renders the Docker
+# daemon sidecar from a hardcoded chart template that has no `resources` field,
+# and a user-supplied container named "dind" is explicitly filtered out of
+# values (see gha-runner-scale-set.non-runner-non-dind-containers). That is true
+# in chart 0.12.1 and in 0.14.2. The result is a dockerd with NO memory request
+# and NO memory limit: every `docker build` competed for whatever node memory
+# happened to be unreserved, which is what caused the intermittent OOMs.
+#
+# Declaring the dind sidecar ourselves (the chart's "default" container mode) is
+# the only way to give dockerd a memory reservation. The spec below is a
+# byte-for-byte reproduction of what containerMode: "dind" generated, plus
+# resources and a pinned image. Regenerate the comparison with:
+#
+#   helm template redducklabs-runners \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     --version 0.12.1 --kube-version 1.33.12 -f deploy/dind-values.yaml
+#
+# Anything we now own that the chart used to own:
+#   - init-dind-externals init container
+#   - dind sidecar (restartPolicy: Always -> requires Kubernetes >= 1.29)
+#   - DOCKER_GROUP_GID=123 and dockerd --group=123 (must stay in sync)
+#   - work / dind-sock / dind-externals volumes
+#   - DOCKER_HOST and RUNNER_WAIT_FOR_DOCKER_IN_SECONDS on the runner
+# When bumping the chart version, re-render and re-diff this spec.
+
+# Runner template configuration
 template:
   spec:
-    # Pin runners to the dedicated github-runners-pool so they do not
+    # Pin runners to the dedicated github-runners-pool-16g so they do not
     # co-locate with production workloads (postgres, backend) on worker-pool.
     # That pool is labeled node-type=github-runner and tainted
     # github-runner=true:NoSchedule, so BOTH a nodeSelector and a matching
     # toleration are required for runners to land there.
-    #
-    # Pool sizing (see ops notes): github-runners-pool is s-8vcpu-16gb,
-    # autoscaling 1->4 nodes. The 5Gi runner memory request below intentionally
-    # reserves a pod's share of a node (~half of ~14Gi allocatable) so the
-    # scheduler packs exactly 2 runners per node and the cluster-autoscaler adds
-    # a node per additional pair instead of bin-packing builds until they OOM.
-    # The reservation also covers the DinD sidecar, which ARC injects with no
-    # resource requests of its own.
     nodeSelector:
       node-type: github-runner
     tolerations:
@@ -48,27 +67,110 @@ template:
     # Pull secret for private registry
     imagePullSecrets:
     - name: do-registry-secret
-    
+
+    initContainers:
+    # Copies the runner's externals into a shared volume so dockerd can reach
+    # them. Reproduced from the chart's dind-init-container helper.
+    - name: init-dind-externals
+      image: registry.digitalocean.com/redducklabs/github-runner:latest
+      command: ["cp"]
+      args: ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+      volumeMounts:
+      - name: dind-externals
+        mountPath: /home/runner/tmpDir
+
+    # Docker daemon, run as a native sidecar (restartPolicy: Always on an init
+    # container). Requires Kubernetes >= 1.29; the cluster is 1.33.
+    #
+    # Image is pinned. The chart used the floating `docker:dind` tag, which
+    # resolved to 29.7.2 at the time of this change - this pin is that same
+    # version, so it is a reproducibility fix and not a behavioural change.
+    - name: dind
+      image: docker:29.7.2-dind
+      args:
+        - dockerd
+        - --host=unix:///var/run/docker.sock
+        - --group=$(DOCKER_GROUP_GID)
+      env:
+        - name: DOCKER_GROUP_GID
+          value: "123"
+      securityContext:
+        privileged: true
+      restartPolicy: Always
+      startupProbe:
+        exec:
+          command:
+            - docker
+            - info
+        initialDelaySeconds: 0
+        failureThreshold: 24
+        periodSeconds: 5
+      # Memory reservation for the Docker daemon. THIS IS THE FIX: everything a
+      # workflow runs inside Docker (docker build, compose, testcontainers) is
+      # charged here, not to the runner container. Previously this was 0/0.
+      resources:
+        requests:
+          cpu: "1"
+          memory: "5Gi"
+        limits:
+          memory: "10Gi"
+      volumeMounts:
+      - name: work
+        mountPath: /home/runner/_work
+      - name: dind-sock
+        mountPath: /var/run
+      - name: dind-externals
+        mountPath: /home/runner/externals
+
     # Container configuration
     containers:
     - name: runner
       # Custom image with all tools installed
       image: registry.digitalocean.com/redducklabs/github-runner:latest
       imagePullPolicy: Always
-      
+
       # CRITICAL: Must specify the command for ARC to work properly
       command: ["/home/runner/run.sh"]
-      
+
+      # In the chart's dind mode these two were injected automatically. In
+      # default mode we own them: DOCKER_HOST points the runner at the sidecar's
+      # socket, and RUNNER_WAIT_FOR_DOCKER_IN_SECONDS keeps the runner from
+      # starting a job before dockerd is listening.
+      env:
+      - name: DOCKER_HOST
+        value: unix:///var/run/docker.sock
+      - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+        value: "120"
+
       # Resource limits.
-      # memory request 5Gi -> forces 2 runners per s-8vcpu-16gb node (see note
-      # above). cpu kept modest so memory is the binding constraint for packing.
+      #
+      # Sizing rationale (github-runners-pool-16g, s-8vcpu-16gb):
+      #   node allocatable       13.32Gi / 7880m cpu
+      #   less system pods       ~0.68Gi (cilium, kube-proxy, csi, node-agent)
+      #   available to the pod   ~12.64Gi
+      #
+      # runner 5Gi + dind 5Gi = 10Gi of memory REQUESTS per pod. Two pods would
+      # need 20Gi against 13.32Gi allocatable, so the scheduler places exactly
+      # ONE runner pod per node and the cluster-autoscaler adds a node per
+      # additional concurrent job. Requests are deliberately below the ~12.64Gi
+      # budget so system DaemonSets keep room; the LIMITS are what a job can
+      # actually consume.
+      #
+      # No CPU limit: with one pod per node there is nothing to protect the node
+      # from, and the previous 3-CPU limit throttled builds to 3 of 8 cores.
+      #
+      # Memory limits are intentionally overcommitted (10Gi + 10Gi against a
+      # ~12.64Gi node) so a runner-heavy job can use ~10Gi on the runner while
+      # dockerd idles, and a Docker-heavy job can do the reverse. With one pod
+      # per node the only workload at risk from that overcommit is the job
+      # itself. An OOM now names the container that overran, which is how we
+      # attribute failures: `runner` = the job process, `dind` = a Docker build.
       resources:
-        limits:
-          cpu: "3"
-          memory: "6Gi"
         requests:
-          cpu: "1"
+          cpu: "2"
           memory: "5Gi"
+        limits:
+          memory: "10Gi"
 
       # Runner container securityContext.
       # allowPrivilegeEscalation MUST be true and the default capability set
@@ -76,7 +178,7 @@ template:
       # `sudo` (e.g. `sudo apt-get install libmagic1`, `sudo mv kubeval ...`).
       # Setting allowPrivilegeEscalation: false (NoNewPrivs) or dropping all
       # capabilities breaks sudo/apt/dpkg. The isolation boundary for these
-      # runners is the pod itself (the DinD sidecar already runs privileged),
+      # runners is the pod itself (the dind sidecar already runs privileged),
       # not in-container privilege restriction. Accepted risk is documented in
       # docs/security/vulnerability-dismissals.md.
       securityContext:
@@ -84,5 +186,21 @@ template:
         runAsGroup: 121
         allowPrivilegeEscalation: true
         readOnlyRootFilesystem: false
-    
-    # Docker-in-Docker sidecar container (automatically added by ARC when containerMode.type: "dind")
+
+      volumeMounts:
+      - name: work
+        mountPath: /home/runner/_work
+      - name: dind-sock
+        mountPath: /var/run
+
+    # Owned by us in default container mode (the chart created these in dind
+    # mode). `work` is the runner's job workspace; dind-sock carries the Docker
+    # socket between the sidecar and the runner; dind-externals carries the
+    # runner externals copied by the init container.
+    volumes:
+    - name: work
+      emptyDir: {}
+    - name: dind-sock
+      emptyDir: {}
+    - name: dind-externals
+      emptyDir: {}

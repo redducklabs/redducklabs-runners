@@ -7,7 +7,13 @@ set -e
 # Configuration for redducklabs
 NAMESPACE="arc-runners"
 RELEASE_NAME="redducklabs-runners"
-VALUES_FILE="../deploy/dind-values.yaml"
+CLUSTER_NAME="${CLUSTER_NAME:-redducklabs-cluster}"
+RUNNER_POOL_NAME="${RUNNER_POOL_NAME:-github-runners-pool-16g}"
+
+# One runner pod is scheduled per node (runner 5Gi + dind 5Gi of memory requests
+# exceed half of node allocatable), so concurrency is capped by the node pool's
+# max_nodes as well as by maxRunners. Scaling maxRunners above max_nodes just
+# leaves runners Pending. See docs/runbooks/node-pool-sizing.md.
 
 # Colors for output
 RED='\033[0;31m'
@@ -28,10 +34,10 @@ show_usage() {
     echo ""
     echo "Commands:"
     echo "  status          - Show current runner status"
-    echo "  scale MIN MAX   - Scale runners (e.g., scale 2 4)"
-    echo "  up              - Scale to default (2 min, 4 max)"
+    echo "  scale MIN MAX   - Scale runners (e.g., scale 2 8)"
+    echo "  up              - Scale to default (2 min, 8 max)"
     echo "  down            - Scale to zero (maintenance mode)"
-    echo "  max             - Scale to maximum capacity (4 min, 8 max)"
+    echo "  max             - Scale to maximum warm capacity (4 min, 8 max)"
     echo "  get             - Get current scaling configuration"
     echo ""
     echo "Examples:"
@@ -39,7 +45,12 @@ show_usage() {
     echo "  $0 scale 3 6    # Scale to 3 min, 6 max"
     echo "  $0 down         # Scale to zero for maintenance"
     echo "  $0 up           # Restore default scaling"
-    echo "  $0 max          # Maximum capacity"
+    echo "  $0 max          # Maximum warm capacity"
+    echo ""
+    echo "NOTE: one runner pod runs per node, so MAX above the pool's max_nodes"
+    echo "      leaves runners Pending, and MIN is billed continuously."
+    echo "      Pool bounds: .github/workflows/node-pool-sizing.yml"
+    echo "      Runbook:     docs/runbooks/node-pool-sizing.md"
     exit 1
 }
 
@@ -114,7 +125,34 @@ scale_runners() {
         print_error "MIN ($min_runners) cannot be greater than MAX ($max_runners)"
         exit 1
     fi
-    
+
+    # One runner pod per node: warn if the pool cannot physically hold MAX
+    # runners, or if MIN exceeds the warm node floor. Advisory only - doctl may
+    # not be configured, and this script should still work without it.
+    if command -v doctl &> /dev/null && command -v jq &> /dev/null; then
+        local pool_json
+        pool_json=$(doctl kubernetes cluster list -o json 2>/dev/null \
+            | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name==$n) | .id' 2>/dev/null \
+            | xargs -r -I{} doctl kubernetes cluster node-pool list {} -o json 2>/dev/null \
+            | jq -r --arg p "$RUNNER_POOL_NAME" '.[] | select(.name==$p)' 2>/dev/null)
+
+        if [ -n "$pool_json" ]; then
+            local pool_min pool_max
+            pool_min=$(echo "$pool_json" | jq -r '.min_nodes')
+            pool_max=$(echo "$pool_json" | jq -r '.max_nodes')
+
+            if [[ "$pool_max" =~ ^[0-9]+$ ]] && [ "$max_runners" -gt "$pool_max" ]; then
+                print_warning "MAX ($max_runners) exceeds pool max_nodes ($pool_max)."
+                print_warning "Runners above $pool_max will stay Pending - resize the pool first"
+                print_warning "with the 'Node Pool Sizing' workflow."
+            fi
+            if [[ "$pool_min" =~ ^[0-9]+$ ]] && [ "$min_runners" -gt "$pool_min" ]; then
+                print_warning "MIN ($min_runners) exceeds pool min_nodes ($pool_min)."
+                print_warning "Warm runners will wait on node provisioning until the pool scales up."
+            fi
+        fi
+    fi
+
     print_info "Scaling redducklabs runners to MIN=$min_runners, MAX=$max_runners..."
     
     helm upgrade "$RELEASE_NAME" \
@@ -152,14 +190,18 @@ scale_down() {
 }
 
 # Function to scale to default
+# Matches minRunners/maxRunners in deploy/dind-values.yaml.
 scale_up() {
-    print_info "Scaling redducklabs runners to default configuration (2 min, 4 max)..."
-    scale_runners 2 4
+    print_info "Scaling redducklabs runners to default configuration (2 min, 8 max)..."
+    scale_runners 2 8
 }
 
-# Function to scale to maximum
+# Function to scale to maximum warm capacity.
+# NOTE: MIN is billed continuously - one node per warm runner. 4 warm runners
+# means 4 nodes running around the clock. Use 'up' to return to the default.
 scale_max() {
-    print_info "Scaling redducklabs runners to maximum capacity (4 min, 8 max)..."
+    print_info "Scaling redducklabs runners to maximum warm capacity (4 min, 8 max)..."
+    print_warning "MIN=4 keeps 4 nodes running continuously. Run '$0 up' to revert."
     scale_runners 4 8
 }
 

@@ -1,0 +1,275 @@
+name: Node Pool Sizing
+
+# Applies the autoscaling bounds of the dedicated GitHub runner node pool.
+#
+# Why this workflow exists: the runner pool's min/max node bounds used to live
+# only in a comment in deploy/dind-values.yaml while the real values were set by
+# hand in the DigitalOcean console. That made half the runner capacity design
+# unreproducible. This workflow makes the bounds a reviewed, repeatable change.
+#
+# The runner scale set places exactly ONE runner pod per node (see the resource
+# sizing note in deploy/dind-values.yaml), so the pool bounds and the scale set
+# bounds must agree:
+#
+#     min_nodes >= minRunners      and      max_nodes >= maxRunners
+#
+# Those assertions are enforced below against deploy/dind-values.yaml, so the
+# committed values file stays the source of truth.
+#
+# See docs/runbooks/node-pool-sizing.md for the operational procedure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_nodes:
+        description: 'Minimum nodes in the runner pool (warm capacity, always billed)'
+        required: true
+        default: '2'
+        type: string
+      max_nodes:
+        description: 'Maximum nodes in the runner pool (cost ceiling)'
+        required: true
+        default: '8'
+        type: string
+      pool_name:
+        description: 'Node pool name'
+        required: false
+        default: 'github-runners-pool-16g'
+        type: string
+      apply:
+        description: 'Actually apply the change (unchecked = dry run)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
+
+permissions:
+  contents: read
+
+jobs:
+  size-pool:
+    name: Apply Node Pool Sizing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
+
+      - name: Validate inputs against deploy/dind-values.yaml
+        id: validate
+        run: |
+          echo "🔍 Validating node pool sizing inputs..."
+
+          MIN_NODES="${{ github.event.inputs.min_nodes }}"
+          MAX_NODES="${{ github.event.inputs.max_nodes }}"
+          POOL_NAME="${{ github.event.inputs.pool_name }}"
+
+          if ! [[ "${MIN_NODES}" =~ ^[0-9]+$ ]]; then
+            echo "❌ Error: min_nodes must be a number"
+            exit 1
+          fi
+          if ! [[ "${MAX_NODES}" =~ ^[0-9]+$ ]]; then
+            echo "❌ Error: max_nodes must be a number"
+            exit 1
+          fi
+          if [ "${MIN_NODES}" -lt 1 ]; then
+            echo "❌ Error: min_nodes must be at least 1"
+            echo "   DigitalOcean autoscaling pools cannot scale to zero."
+            exit 1
+          fi
+          if [ "${MIN_NODES}" -gt "${MAX_NODES}" ]; then
+            echo "❌ Error: min_nodes (${MIN_NODES}) cannot exceed max_nodes (${MAX_NODES})"
+            exit 1
+          fi
+          if ! [[ "${POOL_NAME}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+            echo "❌ Error: pool_name must be a valid DNS-1123 label"
+            exit 1
+          fi
+
+          # deploy/dind-values.yaml is the source of truth for runner counts.
+          MIN_RUNNERS=$(grep -E '^minRunners:' deploy/dind-values.yaml | awk '{print $2}')
+          MAX_RUNNERS=$(grep -E '^maxRunners:' deploy/dind-values.yaml | awk '{print $2}')
+
+          if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]] || ! [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]]; then
+            echo "❌ Error: could not parse minRunners/maxRunners from deploy/dind-values.yaml"
+            exit 1
+          fi
+
+          echo "  deploy/dind-values.yaml: minRunners=${MIN_RUNNERS} maxRunners=${MAX_RUNNERS}"
+          echo "  requested pool bounds:   min_nodes=${MIN_NODES} max_nodes=${MAX_NODES}"
+
+          # One runner pod per node: memory requests (runner 5Gi + dind 5Gi)
+          # exceed half of node allocatable, so two pods cannot share a node.
+          if [ "${MAX_NODES}" -lt "${MAX_RUNNERS}" ]; then
+            echo "❌ Error: max_nodes (${MAX_NODES}) < maxRunners (${MAX_RUNNERS})"
+            echo "   One runner pod is scheduled per node, so ${MAX_RUNNERS} concurrent"
+            echo "   runners require at least ${MAX_RUNNERS} nodes. Raise max_nodes or"
+            echo "   lower maxRunners in deploy/dind-values.yaml first."
+            exit 1
+          fi
+          if [ "${MIN_NODES}" -lt "${MIN_RUNNERS}" ]; then
+            echo "❌ Error: min_nodes (${MIN_NODES}) < minRunners (${MIN_RUNNERS})"
+            echo "   ${MIN_RUNNERS} warm runners require at least ${MIN_RUNNERS} warm nodes,"
+            echo "   otherwise idle runners sit Pending and jobs queue behind node"
+            echo "   provisioning. Raise min_nodes or lower minRunners."
+            exit 1
+          fi
+
+          echo "min_nodes=${MIN_NODES}" >> $GITHUB_OUTPUT
+          echo "max_nodes=${MAX_NODES}" >> $GITHUB_OUTPUT
+          echo "pool_name=${POOL_NAME}" >> $GITHUB_OUTPUT
+          echo "✅ Inputs are consistent with the deployed runner configuration"
+
+      - name: Configure DigitalOcean access
+        run: |
+          echo "🔧 Configuring DigitalOcean access..."
+
+          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring doctl..."
+            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+              echo "✅ DigitalOcean authentication configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to authenticate with DigitalOcean"
+              exit 1
+            else
+              echo "⚠️ Authentication failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+
+      - name: Resolve cluster and pool
+        id: resolve
+        run: |
+          echo "🔎 Resolving cluster and node pool IDs..."
+          POOL_NAME="${{ steps.validate.outputs.pool_name }}"
+
+          CLUSTER_ID=$(doctl kubernetes cluster list -o json \
+            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
+          if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
+            echo "❌ Error: cluster '${CLUSTER_NAME}' not found"
+            exit 1
+          fi
+
+          POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
+            | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
+          if [ -z "${POOL_JSON}" ]; then
+            echo "❌ Error: node pool '${POOL_NAME}' not found in cluster '${CLUSTER_NAME}'"
+            exit 1
+          fi
+
+          POOL_ID=$(echo "${POOL_JSON}" | jq -r '.id')
+          CUR_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
+          CUR_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
+          CUR_COUNT=$(echo "${POOL_JSON}" | jq -r '.count')
+          CUR_SIZE=$(echo "${POOL_JSON}" | jq -r '.size')
+
+          echo "pool_id=${POOL_ID}" >> $GITHUB_OUTPUT
+          echo "cluster_id=${CLUSTER_ID}" >> $GITHUB_OUTPUT
+          echo "cur_min=${CUR_MIN}" >> $GITHUB_OUTPUT
+          echo "cur_max=${CUR_MAX}" >> $GITHUB_OUTPUT
+          echo "cur_size=${CUR_SIZE}" >> $GITHUB_OUTPUT
+
+          echo "Current pool state:"
+          echo "  size:      ${CUR_SIZE}"
+          echo "  nodes now: ${CUR_COUNT}"
+          echo "  min_nodes: ${CUR_MIN}"
+          echo "  max_nodes: ${CUR_MAX}"
+
+      - name: Apply pool sizing
+        id: apply
+        run: |
+          POOL_ID="${{ steps.resolve.outputs.pool_id }}"
+          CLUSTER_ID="${{ steps.resolve.outputs.cluster_id }}"
+          MIN_NODES="${{ steps.validate.outputs.min_nodes }}"
+          MAX_NODES="${{ steps.validate.outputs.max_nodes }}"
+
+          if [ "${{ github.event.inputs.apply }}" != "true" ]; then
+            echo "🧪 DRY RUN - no changes applied."
+            echo "Would run:"
+            echo "  doctl kubernetes cluster node-pool update ${CLUSTER_ID} ${POOL_ID} \\"
+            echo "    --auto-scale --min-nodes ${MIN_NODES} --max-nodes ${MAX_NODES}"
+            echo "Re-run with 'apply' checked to make the change."
+            exit 0
+          fi
+
+          echo "🚀 Applying node pool sizing..."
+          # --auto-scale is passed explicitly: omitting it on an update can clear
+          # autoscaling and pin the pool to a fixed node count.
+          doctl kubernetes cluster node-pool update "${CLUSTER_ID}" "${POOL_ID}" \
+            --auto-scale --min-nodes "${MIN_NODES}" --max-nodes "${MAX_NODES}"
+
+          echo "✅ Applied"
+
+      - name: Verify pool sizing
+        if: github.event.inputs.apply == 'true'
+        run: |
+          echo "🔍 Verifying applied configuration..."
+          POOL_NAME="${{ steps.validate.outputs.pool_name }}"
+          CLUSTER_ID="${{ steps.resolve.outputs.cluster_id }}"
+          MIN_NODES="${{ steps.validate.outputs.min_nodes }}"
+          MAX_NODES="${{ steps.validate.outputs.max_nodes }}"
+
+          POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
+            | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
+
+          NEW_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
+          NEW_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
+          NEW_AUTO=$(echo "${POOL_JSON}" | jq -r '.auto_scale')
+
+          echo "  auto_scale: ${NEW_AUTO}"
+          echo "  min_nodes:  ${NEW_MIN}"
+          echo "  max_nodes:  ${NEW_MAX}"
+
+          FAILED=0
+          [ "${NEW_AUTO}" = "true" ]        || { echo "❌ auto_scale is not enabled"; FAILED=1; }
+          [ "${NEW_MIN}" = "${MIN_NODES}" ] || { echo "❌ min_nodes is ${NEW_MIN}, expected ${MIN_NODES}"; FAILED=1; }
+          [ "${NEW_MAX}" = "${MAX_NODES}" ] || { echo "❌ max_nodes is ${NEW_MAX}, expected ${MAX_NODES}"; FAILED=1; }
+
+          # Labels and taints must survive the update or runners lose their
+          # dedicated pool and can land on production nodes.
+          LABEL=$(echo "${POOL_JSON}" | jq -r '.labels["node-type"] // "MISSING"')
+          TAINT=$(echo "${POOL_JSON}" | jq -r '[.taints[]? | select(.key=="github-runner")] | length')
+          [ "${LABEL}" = "github-runner" ] || { echo "❌ node-type label lost (got '${LABEL}')"; FAILED=1; }
+          [ "${TAINT}" -ge 1 ]             || { echo "❌ github-runner taint lost"; FAILED=1; }
+
+          if [ "${FAILED}" != "0" ]; then
+            echo "❌ Verification failed"
+            exit 1
+          fi
+          echo "✅ Node pool sizing verified (labels and taints intact)"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Node Pool Sizing"
+            echo ""
+            if [ "${{ github.event.inputs.apply }}" = "true" ]; then
+              echo "**Applied** to pool \`${{ steps.validate.outputs.pool_name }}\`"
+            else
+              echo "**Dry run** - nothing was changed"
+            fi
+            echo ""
+            echo "| | Before | After |"
+            echo "|---|---|---|"
+            echo "| min_nodes | ${{ steps.resolve.outputs.cur_min }} | ${{ steps.validate.outputs.min_nodes }} |"
+            echo "| max_nodes | ${{ steps.resolve.outputs.cur_max }} | ${{ steps.validate.outputs.max_nodes }} |"
+            echo ""
+            echo "Node size: \`${{ steps.resolve.outputs.cur_size }}\`."
+            echo "Cost scales linearly with node count; \`min_nodes\` is the always-billed floor."
+            echo "See \`docs/runbooks/node-pool-sizing.md\`."
+          } >> $GITHUB_STEP_SUMMARY
