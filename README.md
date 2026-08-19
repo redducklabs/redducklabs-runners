@@ -89,9 +89,9 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 ## Included Tools
 
 ### Development Tools
-- Python 3.13.13 with pip, black, flake8, mypy, ruff, pytest, pytest-mock
-- Node.js 22.22.3 with npm, pnpm 11.5.0 (via corepack)
-- uv 0.11.17 (Python package/installer manager)
+- Python 3.13.15 with pip, black, flake8, mypy, ruff, pytest, pytest-mock
+- Node.js 22.23.2 with npm, pnpm 11.5.0 (via corepack)
+- uv 0.12.5 (Python package/installer manager)
 - Go 1.27.0 runtime (for CI workflows that build Go)
 - Git, curl, wget, jq, zip, unzip, bc, libmagic1
 - WeasyPrint native libs (libpango, libpangoft2, libharfbuzz, libfontconfig,
@@ -106,11 +106,11 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
   `@playwright/test` version.
 
 ### Infrastructure Tools
-- Terraform 1.15.5
-- kubectl 1.36.1
-- Helm 3.21.0
-- doctl 1.160.1 (DigitalOcean CLI)
-- AWS CLI v2 2.34.57 (GPG-verified, pinned signing key)
+- Terraform 1.15.9
+- kubectl 1.36.3
+- Helm 3.21.4
+- doctl 1.167.0 (DigitalOcean CLI)
+- AWS CLI v2 2.36.27 (GPG-verified, pinned signing key)
 - Docker CLI v28.3.3+ with buildx 0.36.1 and Compose plugin (CVE-2025-54388)
 - GitHub CLI
 
@@ -135,7 +135,7 @@ runtime stays for CI use.
 `test/verify-cve-floor.sh`**)**: every Go tool's toolchain ≥ Go 1.24.6
 (CVE-2025-47907), Trivy's `hashicorp/go-getter` ≥ v1.7.9 (CVE-2025-8959), and
 kubesec's `golang.org/x/crypto` ≥ v0.35.0 (CVE-2025-22869 / CVE-2024-45337).
-Measured at adoption: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.27.0,
+Measured at adoption: kubectl go1.26.5, doctl go1.25.0, kubeconform go1.27.0,
 kubesec go1.27.0 (x/crypto v0.55.0), trivy go1.26.6 (go-getter v1.8.6), buildx
 go1.26.5. Trivy's full HIGH/CRITICAL scan runs **report-only** (SARIF to the
 Security tab) because upstream release binaries and the dind base image carry
@@ -156,16 +156,16 @@ These are the current pins in `docker/Dockerfile.custom-runner`.
 | Tool | Version | Source / pin |
 |------|---------|--------------|
 | GitHub Actions Runner | 2.336.0 | official GitHub runner base image |
-| Python | 3.13.13 (python-build-standalone rel 20260510) | tarball + SHA256 |
-| Node.js | 22.22.3 | nodejs.org tarball + SHA256 |
+| Python | 3.13.15 (python-build-standalone rel 20260814) | tarball + SHA256 |
+| Node.js | 22.23.2 | nodejs.org tarball + SHA256 |
 | pnpm | 11.5.0 | corepack |
-| uv | 0.11.17 | release tarball + SHA256 |
+| uv | 0.12.5 | release tarball + SHA256 |
 | Go (runtime) | 1.27.0 | go.dev tarball + SHA256 |
-| Terraform | 1.15.5 | HashiCorp apt, keyring fingerprint + exact pin |
-| kubectl | 1.36.1 | release binary + SHA256 |
-| Helm | 3.21.0 | get.helm.sh tarball + SHA256 |
-| doctl | 1.160.1 | release binary + SHA256 |
-| AWS CLI | v2 2.34.57 | bundle + GPG (pinned key) |
+| Terraform | 1.15.9 | HashiCorp apt, keyring fingerprint + exact pin |
+| kubectl | 1.36.3 | release binary + SHA256 |
+| Helm | 3.21.4 | get.helm.sh tarball + SHA256 |
+| doctl | 1.167.0 | release binary + SHA256 |
+| AWS CLI | v2 2.36.27 | bundle + GPG (pinned key) |
 | kubeconform | 0.8.0 | source-built (Go 1.27.0) |
 | kubesec | 2.14.2 | source-built (Go 1.27.0, x/crypto v0.55.0) |
 | Trivy | 0.74.0 | release tarball + SHA256 |
@@ -346,13 +346,13 @@ the live runner fleet, so use them only when local operations are intended.
 
 **CVE-2025-47907 (HIGH)** - Go stdlib vulnerability (database/sql, Postgres):
 - Enforced via the CVE-floor gate: every Go tool's toolchain must be ≥ Go 1.24.6.
-- Measured: kubectl go1.26.2, doctl go1.25.0, kubeconform go1.27.0, kubesec
+- Measured: kubectl go1.26.5, doctl go1.25.0, kubeconform go1.27.0, kubesec
   go1.27.0, trivy go1.26.6, buildx go1.26.5 — all above the floor.
 
 **CVE-2025-55199 & CVE-2025-55198 (MEDIUM)** - Fixed Helm vulnerabilities:
 - **CVE-2025-55199**: Helm Chart JSON Schema Denial of Service vulnerability
 - **CVE-2025-55198**: Helm YAML Parsing Panic vulnerability
-- **Helm**: Updated to v3.21.0 (tarball + pinned SHA256).
+- **Helm**: Updated to v3.21.4 (tarball + pinned SHA256).
 
 **CVE-2025-8959** - go-getter vulnerability in Trivy:
 - **Fix**: Trivy 0.74.0's release binary embeds `hashicorp/go-getter` v1.8.6
