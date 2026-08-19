@@ -117,6 +117,34 @@ jobs:
           chmod +x test/verify-runner-resources.sh
           ./test/verify-runner-resources.sh
 
+      - name: Check ARC chart version pins agree
+        run: |
+          echo "🔍 Checking ARC chart version pins..."
+          # Two places pin the ARC chart: the deploy workflow (which installs
+          # both the controller chart and the scale set chart) and the resource
+          # verifier (which renders the scale set chart offline). If they drift,
+          # the verifier proves invariants against a chart version the fleet
+          # does not actually run - the check passes and means nothing.
+          DEPLOY_VER="$(grep -oP "^\s*ARC_CHART_VERSION:\s*'\K[^']+" \
+            .github/workflows/deploy-runners.yml || true)"
+          TEST_VER="$(grep -oP '^CHART_VERSION="\$\{CHART_VERSION:-\K[^}]+' \
+            test/verify-runner-resources.sh || true)"
+
+          echo "  deploy-runners.yml ARC_CHART_VERSION: ${DEPLOY_VER:-<unset>}"
+          echo "  verify-runner-resources.sh CHART_VERSION: ${TEST_VER:-<unset>}"
+
+          if [ -z "${DEPLOY_VER}" ] || [ -z "${TEST_VER}" ]; then
+            echo "❌ Could not read one or both ARC chart pins."
+            exit 1
+          fi
+
+          if [ "${DEPLOY_VER}" != "${TEST_VER}" ]; then
+            echo "❌ ARC chart version pins disagree."
+            echo "   Update both so the verifier tests the deployed chart."
+            exit 1
+          fi
+          echo "✅ ARC chart pins agree (${DEPLOY_VER})"
+
       - name: Check runner pod label selectors
         run: |
           echo "🔍 Checking for stale ARC pod label selectors..."
