@@ -50,6 +50,12 @@ env:
   RUNNER_SCALE_SET_NAME: ${{ vars.RUNNER_SCALE_SET_NAME || 'redducklabs-runners' }}
   REGISTRY: ${{ vars.REGISTRY || 'registry.digitalocean.com' }}
   REPOSITORY: ${{ vars.REPOSITORY || 'redducklabs/github-runner' }}
+  # Single pin for BOTH ARC charts. The controller chart
+  # (gha-runner-scale-set-controller) and the scale set chart
+  # (gha-runner-scale-set) are released together and are expected to run at the
+  # same version, so they must not drift apart. Keep this in sync with
+  # CHART_VERSION in test/verify-runner-resources.sh.
+  ARC_CHART_VERSION: '0.14.2'
 
 # Use minimal permissions
 permissions:
@@ -292,15 +298,14 @@ jobs:
             echo "Registry secret already exists"
           fi
       
-      - name: Check for existing ARC controller
-        id: check-controller
+      - name: Report current ARC controller state
         run: |
           echo "🔍 Checking for Actions Runner Controller..."
-          
+
           if helm list -n arc-systems 2>/dev/null | grep -q arc; then
-            echo "controller_exists=true" >> $GITHUB_OUTPUT
-            echo "✅ ARC controller found"
-            
+            echo "✅ ARC controller release found"
+            helm list -n arc-systems || true
+
             # Check controller health
             if kubectl get pods -n arc-systems -l app.kubernetes.io/name=gha-rs-controller --no-headers | grep -q Running; then
               echo "✅ ARC controller is running"
@@ -308,46 +313,108 @@ jobs:
               echo "⚠️ ARC controller pods may not be ready"
             fi
           else
-            echo "controller_exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ ARC controller not found - will install"
+            echo "⚠️ ARC controller not found - will be installed"
           fi
-      
-      - name: Install ARC controller if needed
-        if: steps.check-controller.outputs.controller_exists == 'false'
+
+          echo ""
+          echo "Installed CRD generation (drifts from the chart because Helm"
+          echo "never updates crds/ on upgrade - the next step reconciles it):"
+          kubectl get crd autoscalingrunnersets.actions.github.com \
+            -o jsonpath='{.metadata.annotations.controller-gen\.kubebuilder\.io/version}' 2>/dev/null || echo "(CRD not installed yet)"
+          echo ""
+
+      - name: Sync ARC CRDs
         run: |
-          echo "📦 Installing Actions Runner Controller..."
-          
-          # Create namespace first
+          echo "📦 Reconciling ARC CRDs to chart ${ARC_CHART_VERSION}..."
+
+          # WHY THIS STEP EXISTS
+          #
+          # Helm installs a chart's crds/ directory exactly once, on first
+          # install, and NEVER touches it again on `helm upgrade`. That is
+          # documented Helm behaviour, not an ARC quirk. So every ARC chart
+          # upgrade silently leaves the CRDs at whatever generation they were
+          # first installed with, while the controller moves forward. The drift
+          # is invisible until a newer controller writes a field the stale CRD
+          # schema prunes.
+          #
+          # WHY --server-side
+          #
+          # These CRDs are 575 KB - 1.2 MB each (they embed a full PodSpec).
+          # Client-side `kubectl apply` stores the whole manifest in the
+          # kubectl.kubernetes.io/last-applied-configuration annotation, which
+          # is capped at 256 KB, so a plain apply FAILS on them. Server-side
+          # apply carries no such annotation. --force-conflicts takes ownership
+          # of fields whose current field manager is Helm's.
+          CRD_DIR="$(mktemp -d)"
+          helm pull \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+            --version "${ARC_CHART_VERSION}" \
+            --untar --untardir "${CRD_DIR}"
+
+          CRD_PATH="${CRD_DIR}/gha-runner-scale-set-controller/crds"
+          if [ ! -d "${CRD_PATH}" ]; then
+            echo "❌ Error: no crds/ directory in chart ${ARC_CHART_VERSION}"
+            exit 1
+          fi
+
+          echo "CRDs to apply:"
+          ls -la "${CRD_PATH}"
+
+          kubectl apply --server-side --force-conflicts -f "${CRD_PATH}"
+
+          echo ""
+          echo "✅ CRDs reconciled. Generation now:"
+          kubectl get crd autoscalingrunnersets.actions.github.com \
+            -o jsonpath='{.metadata.annotations.controller-gen\.kubebuilder\.io/version}'
+          echo ""
+
+          rm -rf "${CRD_DIR}"
+
+      - name: Install or upgrade ARC controller
+        run: |
+          echo "📦 Installing/upgrading Actions Runner Controller to ${ARC_CHART_VERSION}..."
+
+          # `helm upgrade --install` (not bare `helm install` behind an
+          # existence check). The previous form only ran when the controller was
+          # ABSENT, which made the pinned chart version dead code on any cluster
+          # that already had ARC: the repo claimed one version while the cluster
+          # ran another, and the controller could never be upgraded through CI.
+          # This form is idempotent and expresses the desired end state, so the
+          # pin above is the single source of truth.
+          #
+          # The controller and scale set charts are released as a matched pair;
+          # both use ARC_CHART_VERSION so they cannot drift apart.
           kubectl create namespace arc-systems --dry-run=client -o yaml | kubectl apply -f -
-          
-          # Install with retry logic
+
           for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Installing ARC controller..."
-            if helm install arc \
+            echo "Attempt ${attempt}/3: Installing/upgrading ARC controller..."
+            if helm upgrade --install arc \
               --namespace arc-systems \
               --create-namespace \
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
-              --version 0.12.1 \
+              --version "${ARC_CHART_VERSION}" \
               --wait \
               --timeout 300s; then
-              
-              echo "✅ ARC controller installed successfully"
+
+              echo "✅ ARC controller at ${ARC_CHART_VERSION}"
               break
             elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to install ARC controller"
+              echo "❌ Error: Failed to install/upgrade ARC controller"
+              helm status arc -n arc-systems || true
+              kubectl get pods -n arc-systems || true
               exit 1
             else
-              echo "⚠️ Installation failed, retrying in 10s..."
+              echo "⚠️ Failed, retrying in 10s..."
               sleep 10
             fi
           done
-          
+
           echo "⏳ Waiting for controller to be ready..."
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=gha-rs-controller \
             -n arc-systems \
             --timeout=300s
-      
+
       - name: Deploy runners
         run: |
           echo "🚀 Deploying GitHub runners..."
@@ -373,7 +440,7 @@ jobs:
               --set minRunners="${MIN_RUNNERS}" \
               --set maxRunners="${MAX_RUNNERS}" \
               --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
-              --version 0.12.1 \
+              --version "${ARC_CHART_VERSION}" \
               --wait \
               --timeout 300s; then
 

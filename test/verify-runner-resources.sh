@@ -23,7 +23,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 CHART="oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set"
-CHART_VERSION="${CHART_VERSION:-0.12.1}"
+CHART_VERSION="${CHART_VERSION:-0.14.2}"
 KUBE_VERSION="${KUBE_VERSION:-1.33.12}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

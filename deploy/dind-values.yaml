@@ -38,7 +38,7 @@ runnerScaleSetName: "redducklabs-runners"
 #
 #   helm template redducklabs-runners \
 #     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-#     --version 0.12.1 --kube-version 1.33.12 -f deploy/dind-values.yaml
+#     --version 0.14.2 --kube-version 1.33.12 -f deploy/dind-values.yaml
 #
 # Anything we now own that the chart used to own:
 #   - init-dind-externals init container
