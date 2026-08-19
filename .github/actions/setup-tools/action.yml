@@ -5,15 +5,27 @@ inputs:
   kubectl-version:
     description: 'kubectl version to install'
     required: false
-    default: 'v1.33.3'
+    # Tracks the DOKS CLUSTER minor, NOT the runner image's kubectl.
+    #
+    # This action is used only by this repo's own workflows (deploy-runners,
+    # deploy-cluster-addons, emergency-stop, node-pool-sizing, runner-status,
+    # scale-runners) -- all of which talk to the production cluster. Kubernetes
+    # supports kubectl within ONE minor of the API server, so this pin must stay
+    # on the cluster's minor. The cluster is 1.33.x, so this is 1.33.x.
+    #
+    # Do NOT "align" this with docker/Dockerfile.custom-runner's KUBECTL_VERSION.
+    # That one ships to consumer projects targeting arbitrary clusters, so it
+    # tracks latest; matching it here would put emergency-stop and deploy three
+    # minors outside the supported skew. Bump this when the cluster minor moves.
+    default: 'v1.33.13'
   helm-version:
     description: 'Helm version to install'
     required: false
-    default: 'v3.18.6'
+    default: 'v3.21.4'
   doctl-version:
     description: 'doctl version to install'
     required: false
-    default: 'v1.139.0'
+    default: 'v1.167.0'
   install-jq:
     description: 'Install jq package'
     required: false
@@ -67,7 +79,7 @@ runs:
         echo "Cache key: ${CACHE_KEY}"
 
     - name: Cache tools
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       id: cache-tools
       with:
         path: |
