@@ -244,7 +244,7 @@ jobs:
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           # Get pod information with error handling
-          PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" -o json 2>/dev/null)
+          PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json 2>/dev/null)
           
           if [ $? -eq 0 ] && [ "${PODS_JSON}" != "" ]; then
             TOTAL_PODS=$(echo "${PODS_JSON}" | jq '.items | length')
@@ -280,7 +280,7 @@ jobs:
           if [ "${{ needs.validate-inputs.outputs.detailed }}" = "true" ] && [ "${TOTAL_PODS}" -gt 0 ]; then
             echo ""
             echo "Pod Details:"
-            kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" 2>/dev/null || echo "Could not retrieve pod details"
+            kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" 2>/dev/null || echo "Could not retrieve pod details"
           fi
 
       - name: Check memory headroom and OOM kills
@@ -462,7 +462,7 @@ jobs:
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           echo "Pod resource usage:"
-          kubectl top pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" 2>/dev/null || echo "⚠️ Metrics server not available or no pods found"
+          kubectl top pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" 2>/dev/null || echo "⚠️ Metrics server not available or no pods found"
       
       - name: Generate status report
         if: always()

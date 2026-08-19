@@ -95,7 +95,7 @@ get_status() {
     
     # Get pod status
     echo "Runner Pods:"
-    kubectl get pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME" 2>/dev/null || echo "No runner pods found"
+    kubectl get pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME" 2>/dev/null || echo "No runner pods found"
     echo ""
     
     # Get GitHub registration status

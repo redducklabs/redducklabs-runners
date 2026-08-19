@@ -35,7 +35,7 @@ show_menu() {
 
 check_status() {
     echo -e "${BLUE}Current Status:${NC}"
-    kubectl get pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME"
+    kubectl get pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME"
     echo ""
     kubectl get autoscalingrunnersets -n "$NAMESPACE" "$RELEASE_NAME"
 }
@@ -69,7 +69,7 @@ restart_all() {
     read -r response
     
     if [[ "$response" =~ ^[Yy]$ ]]; then
-        kubectl delete pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME"
+        kubectl delete pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME"
         echo "Pods deleted. New ones will be created automatically."
         sleep 5
         check_status
@@ -80,11 +80,11 @@ restart_all() {
 
 view_logs() {
     echo "Available runner pods:"
-    kubectl get pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME" --no-headers | awk '{print NR") " $1 " (" $3 ")"}'
+    kubectl get pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME" --no-headers | awk '{print NR") " $1 " (" $3 ")"}'
     echo -n "Enter number: "
     read num
     
-    pod=$(kubectl get pods -n "$NAMESPACE" -l runner-scale-set-name="$RELEASE_NAME" --no-headers | awk "NR==$num {print \$1}")
+    pod=$(kubectl get pods -n "$NAMESPACE" -l actions.github.com/scale-set-name="$RELEASE_NAME" --no-headers | awk "NR==$num {print \$1}")
     if [ -n "$pod" ]; then
         echo -e "${BLUE}Logs for $pod:${NC}"
         kubectl logs -n "$NAMESPACE" "$pod" -c runner --tail=100

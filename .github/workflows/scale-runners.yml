@@ -222,7 +222,7 @@ jobs:
           echo "  Max runners: ${CURRENT_MAX}"
           
           # Get pod count
-          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
+          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
           echo "pod_count=${POD_COUNT}" >> $GITHUB_OUTPUT
           echo "  Active pods: ${POD_COUNT}"
       
@@ -242,7 +242,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Pod Details" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
       
       - name: Scale up (default)
@@ -385,7 +385,7 @@ jobs:
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           echo "📊 New runner status:"
-          kubectl get pods -n "${NAMESPACE}" -l runner-deployment-name="${RELEASE_NAME}"
+          kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}"
           
           # Get new values with error handling
           NEW_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)

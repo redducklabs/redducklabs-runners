@@ -117,6 +117,30 @@ jobs:
           chmod +x test/verify-runner-resources.sh
           ./test/verify-runner-resources.sh
 
+      - name: Check runner pod label selectors
+        run: |
+          echo "🔍 Checking for stale ARC pod label selectors..."
+          # ARC's gha-runner-scale-set labels runner pods with
+          # actions.github.com/scale-set-name. The legacy labels
+          # runner-deployment-name and runner-scale-set-name match NOTHING on a
+          # modern scale set, and kubectl exits 0 with an empty result - so a
+          # wrong selector fails silently. That previously made runner-status
+          # report "0 pods" with runners live, made emergency-stop's pod
+          # deletion a no-op while reporting success, and would have made the
+          # documented NetworkPolicy examples select no pods at all.
+          # --exclude this file: it necessarily names the legacy labels in its
+          # own comment and grep pattern, and would otherwise match itself.
+          if grep -rn --exclude-dir=.git --exclude=validate-config.yml \
+               -e 'runner-deployment-name' \
+               -e '[^./]runner-scale-set-name' \
+               .github/ scripts/ test/ docs/ 2>/dev/null | grep -v 'runnerScaleSetName'; then
+            echo ""
+            echo "❌ Stale runner pod label selector found (shown above)."
+            echo "   Use: actions.github.com/scale-set-name=<release>"
+            exit 1
+          fi
+          echo "✅ No stale runner pod label selectors"
+
       - name: Check for secrets in tracked files
         run: |
           echo "🔍 Checking that no token-like values were committed..."

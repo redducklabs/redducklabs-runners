@@ -16,7 +16,7 @@ echo "Verifying security fixes in redducklabs GitHub Actions runners..."
 echo "=================================================================="
 
 # Get a runner pod
-RUNNER_POD=$(kubectl get pods -n arc-runners -l runner-scale-set-name=redducklabs-runners --no-headers | head -1 | awk '{print $1}')
+RUNNER_POD=$(kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners --no-headers | head -1 | awk '{print $1}')
 
 if [ -z "$RUNNER_POD" ]; then
     echo "Error: No redducklabs runner pods found!"
