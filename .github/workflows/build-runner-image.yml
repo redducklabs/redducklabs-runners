@@ -419,8 +419,29 @@ jobs:
             gh --version | head -1; psql --version; redis-cli --version
             bc --version | head -1
             python3 -c "import pytest_mock"'
-          docker run --rm "$IMG" kubectl version --client -o json | grep -q '"gitVersion": "v1.36'
-          docker run --rm "$IMG" doctl version | grep -q 1.160
+          # Same ARG-derived assertions as the PR smoke test above - see the
+          # comment there. This job runs only on main, so a stale hardcoded pin
+          # here survives every PR and fails only after the image is published.
+          DF=docker/Dockerfile.custom-runner
+          KUBECTL_EXPECT=$(grep -oP '^ARG KUBECTL_VERSION=\K.*' "$DF")
+          DOCTL_EXPECT=$(grep -oP '^ARG DOCTL_VERSION=\K.*' "$DF")
+          [ -n "$KUBECTL_EXPECT" ] && [ -n "$DOCTL_EXPECT" ] || {
+            echo "FAIL: could not read version pins from $DF"; exit 1; }
+
+          KUBECTL_GOT=$(docker run --rm "$IMG" kubectl version --client -o json | grep gitVersion)
+          echo "kubectl: $KUBECTL_GOT (expect $KUBECTL_EXPECT)"
+          case "$KUBECTL_GOT" in
+            *"\"$KUBECTL_EXPECT\""*) echo "OK kubectl version" ;;
+            *) echo "FAIL: kubectl reports '$KUBECTL_GOT', expected $KUBECTL_EXPECT"; exit 1 ;;
+          esac
+
+          DOCTL_GOT=$(docker run --rm "$IMG" doctl version | head -1)
+          echo "doctl: $DOCTL_GOT (expect ${DOCTL_EXPECT#v})"
+          case "$DOCTL_GOT" in
+            *"${DOCTL_EXPECT#v}"*) echo "OK doctl version" ;;
+            *) echo "FAIL: doctl reports '$DOCTL_GOT', expected ${DOCTL_EXPECT#v}"; exit 1 ;;
+          esac
+
           docker run --rm "$IMG" kubesec version | grep -vq '0.0.0'
           # WeasyPrint's hard (import-time) native libs (consumer CI jobs
           # import weasyprint); optional HarfBuzz subset lib omitted by design.

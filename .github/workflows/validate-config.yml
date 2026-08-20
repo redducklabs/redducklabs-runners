@@ -145,6 +145,31 @@ jobs:
           fi
           echo "✅ ARC chart pins agree (${DEPLOY_VER})"
 
+      - name: Check for hardcoded tool version assertions
+        run: |
+          echo "🔍 Checking for hardcoded version assertions in workflows..."
+          # Anti-pattern: asserting a tool's version with a literal, e.g.
+          #     doctl version | grep -q 1.160
+          #     kubectl version --client -o json | grep -q '"gitVersion": "v1.36'
+          # These rot on every version bump. Three copies of exactly this
+          # existed (the Dockerfile install step, the PR smoke test, and the
+          # main-only security-scan verify step); the doctl one broke the build
+          # on a bump, and the third copy failed only AFTER the image was
+          # published because that job never runs on a PR. Worse, `grep -q` is
+          # silent, so the job died with no indication of which check failed.
+          # Derive expected versions from the Dockerfile ARGs instead, and print
+          # what was found before failing.
+          if grep -rnE "version.*\|[[:space:]]*grep[[:space:]]+-q[[:space:]].*[0-9]+\.[0-9]+" \
+               --exclude=validate-config.yml .github/workflows/; then
+            echo ""
+            echo "❌ Hardcoded tool version assertion found (shown above)."
+            echo "   Read the expected value from docker/Dockerfile.custom-runner:"
+            echo "     EXPECT=\$(grep -oP '^ARG FOO_VERSION=\\K.*' \"\$DF\")"
+            echo "   and print the actual value before exiting non-zero."
+            exit 1
+          fi
+          echo "✅ No hardcoded tool version assertions"
+
       - name: Check runner pod label selectors
         run: |
           echo "🔍 Checking for stale ARC pod label selectors..."
