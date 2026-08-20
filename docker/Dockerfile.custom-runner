@@ -7,13 +7,14 @@ ARG GO_VERSION=1.27.0
 ARG GO_SHA256=675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685
 ARG TRIVY_VERSION=v0.74.0
 ARG TRIVY_SHA256=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
-ARG KUBECTL_VERSION=v1.36.1
-ARG KUBECTL_SHA256=629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
-# doctl v1.160.0 was withdrawn upstream (the release/asset now 404s, breaking
-# the build); v1.160.1 is the current stable patch. SHA256 from DigitalOcean's
-# published doctl-1.160.1-checksums.sha256.
-ARG DOCTL_VERSION=v1.160.1
-ARG DOCTL_SHA256=615b03e678ffe391b3f3a3afe74a125f7fde1842135b7c3528862eba9ff16168
+ARG KUBECTL_VERSION=v1.36.3
+ARG KUBECTL_SHA256=ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336
+# SHA256 from DigitalOcean's published doctl-<version>-checksums.sha256.
+# Note when bumping: DigitalOcean has withdrawn a doctl release before (v1.160.0
+# was pulled and its assets began 404ing, breaking the build), so confirm the
+# release assets actually resolve rather than trusting the tag list.
+ARG DOCTL_VERSION=v1.167.0
+ARG DOCTL_SHA256=8d7b39ad749698693458aa701c0c8d522035f923455a9bf0ee03a0b01601e51c
 # kubeconform and kubesec are built from source in the go-builder stage (their
 # upstream release binaries are below the CVE floor), so only the version pins
 # are needed here -- no download checksum.
@@ -22,23 +23,23 @@ ARG KUBESEC_VERSION=v2.14.2
 # Pinned x/crypto for the kubesec source build (CVE-2025-22869 / CVE-2024-45337).
 # Keep deterministic; the CVE-floor gate enforces >= v0.35.0.
 ARG KUBESEC_XCRYPTO_VERSION=v0.55.0
-ARG HELM_VERSION=v3.21.0
-ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
-ARG TERRAFORM_VERSION=1.15.5-1
+ARG HELM_VERSION=v3.21.4
+ARG HELM_SHA256=61f88ab166748cb19604d7884cb100ae9ccb13804ddeb98e08af167eacbb6a14
+ARG TERRAFORM_VERSION=1.15.9-1
 ARG BUILDX_VERSION=v0.36.1
 ARG BUILDX_SHA256=48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778
-ARG UV_VERSION=0.11.17
-ARG UV_SHA256=0017ccecaeb4d431d7f93b583ebff0c5c38e00eb734fcf13d05f72ca419125fe
-ARG AWSCLI_VERSION=2.34.57
+ARG UV_VERSION=0.12.5
+ARG UV_SHA256=68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2
+ARG AWSCLI_VERSION=2.36.27
 ARG PYTHON_VERSION=3.13
-ARG PYTHON_BUILD_RELEASE=20260510
-ARG PYTHON_FULL_VERSION=3.13.13
-ARG PYTHON_TARBALL_SHA256=928d08ecda5bbf4d8851c5872e363dd9c9be938fdb90f525b6f36a8c90ff8407
+ARG PYTHON_BUILD_RELEASE=20260814
+ARG PYTHON_FULL_VERSION=3.13.15
+ARG PYTHON_TARBALL_SHA256=45816a2653b47a6cc48d8ada4ea1185758a4c2db389d012b31e0205e5ccb548b
 # Node installs from the official nodejs.org release tarball (verified SHA256),
 # not NodeSource apt: NodeSource's node_22.x deb channel is stale at 22.15.0 and
-# cannot deliver 22.22.3 (the current Node 22 LTS).
-ARG NODE_VERSION=22.22.3
-ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
+# cannot deliver 22.23.2 (the current Node 22 LTS).
+ARG NODE_VERSION=22.23.2
+ARG NODE_SHA256=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.336.0
 # Playwright minor used only to resolve Chromium's apt system-dep list at build
 # (install-deps). The consumer downloads its own browser binary at job time, so
@@ -211,7 +212,7 @@ COPY --from=python-builder /tmp/python-packages /opt/python/lib/python${PYTHON_V
 
 # Install Node.js from the official nodejs.org release tarball (verified SHA256).
 # NodeSource's node_22.x apt channel is stale at 22.15.0 and cannot deliver the
-# current 22.22.3 LTS, so we pin and checksum the upstream binary instead, in
+# current 22.23.2 LTS, so we pin and checksum the upstream binary instead, in
 # line with the other release-binary tools in this image. pnpm via corepack
 # (bundled with Node); we never `npm install -g`.
 RUN set -eux && \
@@ -254,9 +255,16 @@ RUN set -eux && \
     tar -xzf doctl.tgz && install -m 0755 doctl /usr/local/bin/doctl && \
     # cleanup
     rm -f /tmp/kubectl /tmp/doctl /tmp/doctl.tgz && \
-    # verify meaningful (non-0.0.0) versions
-    kubectl version --client -o json | grep -q '"gitVersion": "v1.36' && \
-    doctl version | grep -q '1.160'
+    # Verify each binary reports the version we pinned. Derived from the ARGs on
+    # purpose: these assertions used to hardcode the version prefix
+    # ('"gitVersion": "v1.36' and '1.160'), which silently rots on every bump -
+    # the doctl one broke this build the moment DOCTL_VERSION moved past 1.160,
+    # and the kubectl one only survived because 1.36.1 -> 1.36.3 happened to stay
+    # inside the hardcoded prefix. Deriving from the ARG keeps the original
+    # intent (catch bogus 0.0.0/dev version strings) and additionally catches
+    # installing a different version than the one pinned.
+    kubectl version --client -o json | grep -q "gitVersion.*${KUBECTL_VERSION}" && \
+    doctl version | grep -q "${DOCTL_VERSION#v}"
 
 # Copy source-built kubeconform and kubesec from the go-builder stage.
 COPY --from=go-builder /tmp/binaries/kubeconform /tmp/binaries/kubesec /usr/local/bin/

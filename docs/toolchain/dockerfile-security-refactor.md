@@ -27,7 +27,7 @@
   (upstream-binary and dind base-image fixed CVEs cannot be remediated here).
 - **Go runtime:** a clean Go 1.27.0 stays in the final image for CI workflows.
 
-Measured toolchains (2026-08-19 version refresh): kubectl go1.26.2, doctl
+Measured toolchains (2026-08-19 version refresh): kubectl go1.26.5, doctl
 go1.25.0, kubeconform go1.27.0, kubesec go1.27.0 (x/crypto v0.55.0), trivy
 go1.26.6 (go-getter v1.8.6), buildx go1.26.5.
 

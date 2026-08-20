@@ -39,15 +39,15 @@ test_tool() {
 }
 
 # Test each tool
-test_tool "Python 3.13.13" "python3 --version"
-test_tool "Node.js 22.22.3" "node --version"
+test_tool "Python 3.13.15" "python3 --version"
+test_tool "Node.js 22.23.2" "node --version"
 test_tool "npm" "npm --version"
 test_tool "pnpm" "pnpm --version"
 test_tool "uv" "uv --version"
-test_tool "Terraform 1.15.5" "terraform version -json | jq -r .terraform_version"
-test_tool "kubectl 1.36.1" "kubectl version --client -o json | jq -r .clientVersion.gitVersion"
-test_tool "Helm 3.21.0" "helm version --short"
-test_tool "doctl 1.160.1" "doctl version"
+test_tool "Terraform 1.15.9" "terraform version -json | jq -r .terraform_version"
+test_tool "kubectl 1.36.3" "kubectl version --client -o json | jq -r .clientVersion.gitVersion"
+test_tool "Helm 3.21.4" "helm version --short"
+test_tool "doctl 1.167.0" "doctl version"
 test_tool "AWS CLI" "aws --version"
 test_tool "Docker CLI" "docker --version"
 test_tool "Docker Compose" "docker compose version"
