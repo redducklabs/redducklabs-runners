@@ -255,9 +255,16 @@ RUN set -eux && \
     tar -xzf doctl.tgz && install -m 0755 doctl /usr/local/bin/doctl && \
     # cleanup
     rm -f /tmp/kubectl /tmp/doctl /tmp/doctl.tgz && \
-    # verify meaningful (non-0.0.0) versions
-    kubectl version --client -o json | grep -q '"gitVersion": "v1.36' && \
-    doctl version | grep -q '1.160'
+    # Verify each binary reports the version we pinned. Derived from the ARGs on
+    # purpose: these assertions used to hardcode the version prefix
+    # ('"gitVersion": "v1.36' and '1.160'), which silently rots on every bump -
+    # the doctl one broke this build the moment DOCTL_VERSION moved past 1.160,
+    # and the kubectl one only survived because 1.36.1 -> 1.36.3 happened to stay
+    # inside the hardcoded prefix. Deriving from the ARG keeps the original
+    # intent (catch bogus 0.0.0/dev version strings) and additionally catches
+    # installing a different version than the one pinned.
+    kubectl version --client -o json | grep -q "gitVersion.*${KUBECTL_VERSION}" && \
+    doctl version | grep -q "${DOCTL_VERSION#v}"
 
 # Copy source-built kubeconform and kubesec from the go-builder stage.
 COPY --from=go-builder /tmp/binaries/kubeconform /tmp/binaries/kubesec /usr/local/bin/
