@@ -170,6 +170,25 @@ jobs:
           fi
           echo "✅ No hardcoded tool version assertions"
 
+      - name: Check setup-tools versions are not overridden
+        run: |
+          echo "🔍 Checking for stale setup-tools version overrides..."
+          # The setup-tools action's defaults are the single source of truth for
+          # the kubectl/helm/doctl versions this repo uses against the cluster.
+          # runner-status.yml used to pass its own copies of all three, which
+          # meant it silently kept v1.33.3 / v3.18.6 / v1.139.0 while the
+          # defaults moved on - and its kubectl drifted three minors out of the
+          # supported skew from the API server. Callers should pass only
+          # install-jq and inherit the rest.
+          if grep -rn --exclude=validate-config.yml                -e 'kubectl-version:' -e 'helm-version:' -e 'doctl-version:'                .github/workflows/; then
+            echo ""
+            echo "❌ A workflow pins setup-tools versions (shown above)."
+            echo "   Remove the override and inherit the action's defaults, or"
+            echo "   change the defaults in .github/actions/setup-tools/action.yml."
+            exit 1
+          fi
+          echo "✅ No setup-tools version overrides"
+
       - name: Check runner pod label selectors
         run: |
           echo "🔍 Checking for stale ARC pod label selectors..."
