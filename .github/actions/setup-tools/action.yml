@@ -11,13 +11,14 @@ inputs:
     # deploy-cluster-addons, emergency-stop, node-pool-sizing, runner-status,
     # scale-runners) -- all of which talk to the production cluster. Kubernetes
     # supports kubectl within ONE minor of the API server, so this pin must stay
-    # on the cluster's minor. The cluster is 1.33.x, so this is 1.33.x.
+    # on the cluster's minor. The cluster is 1.36.x, so this is 1.36.x.
     #
-    # Do NOT "align" this with docker/Dockerfile.custom-runner's KUBECTL_VERSION.
-    # That one ships to consumer projects targeting arbitrary clusters, so it
-    # tracks latest; matching it here would put emergency-stop and deploy three
-    # minors outside the supported skew. Bump this when the cluster minor moves.
-    default: 'v1.33.13'
+    # Do NOT "align" this with docker/Dockerfile.custom-runner's KUBECTL_VERSION
+    # just because they currently agree. They track different things: that one
+    # ships to consumer projects targeting arbitrary clusters and follows latest,
+    # while this one follows OUR cluster. They will diverge again the next time
+    # upstream kubectl moves ahead of DOKS. Bump this when the cluster minor moves.
+    default: 'v1.36.3'
   helm-version:
     description: 'Helm version to install'
     required: false
