@@ -91,9 +91,9 @@ print('✓ Chromium runtime libraries loadable')
 echo ""
 
 # Test security tools
-test_tool "kubeconform 0.7.0" "kubeconform -v"
+test_tool "kubeconform 0.8.0" "kubeconform -v"
 test_tool "kubesec 2.14.2" "kubesec version"
-test_tool "Trivy 0.70.0" "trivy version | grep Version"
+test_tool "Trivy 0.74.0" "trivy version | grep Version"
 
 echo "====================================================="
 echo -e "${GREEN}All tools verified successfully in redducklabs runners!${NC}"

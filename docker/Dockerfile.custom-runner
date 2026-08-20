@@ -3,10 +3,10 @@
 # official release binaries; kubeconform and kubesec are source-built because their
 # release binaries are below the CVE floor. See
 # docs/specs/2026-05-31-runner-toolchain-refresh-design.md.
-ARG GO_VERSION=1.26.3
-ARG GO_SHA256=2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556
-ARG TRIVY_VERSION=v0.70.0
-ARG TRIVY_SHA256=8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+ARG GO_VERSION=1.27.0
+ARG GO_SHA256=675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685
+ARG TRIVY_VERSION=v0.74.0
+ARG TRIVY_SHA256=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
 ARG KUBECTL_VERSION=v1.36.1
 ARG KUBECTL_SHA256=629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
 # doctl v1.160.0 was withdrawn upstream (the release/asset now 404s, breaking
@@ -17,16 +17,16 @@ ARG DOCTL_SHA256=615b03e678ffe391b3f3a3afe74a125f7fde1842135b7c3528862eba9ff1616
 # kubeconform and kubesec are built from source in the go-builder stage (their
 # upstream release binaries are below the CVE floor), so only the version pins
 # are needed here -- no download checksum.
-ARG KUBECONFORM_VERSION=v0.7.0
+ARG KUBECONFORM_VERSION=v0.8.0
 ARG KUBESEC_VERSION=v2.14.2
 # Pinned x/crypto for the kubesec source build (CVE-2025-22869 / CVE-2024-45337).
 # Keep deterministic; the CVE-floor gate enforces >= v0.35.0.
-ARG KUBESEC_XCRYPTO_VERSION=v0.52.0
+ARG KUBESEC_XCRYPTO_VERSION=v0.55.0
 ARG HELM_VERSION=v3.21.0
 ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
 ARG TERRAFORM_VERSION=1.15.5-1
-ARG BUILDX_VERSION=v0.34.1
-ARG BUILDX_SHA256=f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b
+ARG BUILDX_VERSION=v0.36.1
+ARG BUILDX_SHA256=48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778
 ARG UV_VERSION=0.11.17
 ARG UV_SHA256=0017ccecaeb4d431d7f93b583ebff0c5c38e00eb734fcf13d05f72ca419125fe
 ARG AWSCLI_VERSION=2.34.57
