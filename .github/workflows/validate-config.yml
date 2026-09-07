@@ -68,6 +68,68 @@ jobs:
           print(f'\nAll {len(files)} file(s) parsed successfully')
           PY
 
+      - name: Enforce GitHub-hosted runner policy
+        run: |
+          echo "🔍 Enforcing literal ubuntu-latest runners in all workflows..."
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          workflow_path = Path(
+              os.environ.get("WORKFLOW_DIR", ".github/workflows")
+          )
+          if workflow_path.is_file():
+              workflow_files = [workflow_path]
+          elif workflow_path.is_dir():
+              workflow_files = sorted(
+                  path
+                  for path in workflow_path.iterdir()
+                  if path.is_file() and path.suffix in {".yaml", ".yml"}
+              )
+          else:
+              print(f"❌ Workflow path does not exist: {workflow_path}")
+              sys.exit(1)
+
+          if not workflow_files:
+              print(f"❌ No workflow files found at: {workflow_path}")
+              sys.exit(1)
+
+          failures = []
+          for workflow_file in workflow_files:
+              try:
+                  with workflow_file.open(encoding="utf-8") as handle:
+                      workflow = yaml.safe_load(handle)
+              except yaml.YAMLError as error:
+                  failures.append(f"{workflow_file}: invalid YAML: {error}")
+                  continue
+
+              jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
+              if not isinstance(jobs, dict) or not jobs:
+                  failures.append(f"{workflow_file}: missing or invalid jobs mapping")
+                  continue
+
+              for job_name, job in jobs.items():
+                  runner = job.get("runs-on") if isinstance(job, dict) else None
+                  if runner != "ubuntu-latest":
+                      failures.append(
+                          f"{workflow_file}: job {job_name!r} runs on "
+                          f"{runner!r}; expected literal 'ubuntu-latest'"
+                      )
+
+          if failures:
+              print("❌ Every workflow job must use literal ubuntu-latest:")
+              print("\n".join(f"  - {failure}" for failure in failures))
+              sys.exit(1)
+
+          print(
+              f"✅ All {len(workflow_files)} workflow file(s) use literal "
+              "ubuntu-latest runners"
+          )
+          PY
+
       - name: Lint GitHub Actions workflows
         run: |
           echo "🔍 Running actionlint..."

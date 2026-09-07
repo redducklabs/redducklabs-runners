@@ -30,6 +30,84 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VALUES_FILE="${REPO_ROOT}/deploy/dind-values.yaml"
 
+verify_hosted_runner_policy_behavior() {
+    # Exercise the CI policy step itself rather than duplicating its validation
+    # logic here. This catches a removed, renamed, or weakened workflow guard.
+    local workflow_file="${REPO_ROOT}/.github/workflows/validate-config.yml"
+    local temporary_dir validator fixture_dir fixture_name output
+
+    temporary_dir="$(mktemp -d)"
+    validator="${temporary_dir}/validate-hosted-runners.sh"
+    fixture_dir="${temporary_dir}/workflows"
+    trap 'rm -rf "${temporary_dir}"' RETURN
+
+    python3 - "$workflow_file" > "$validator" <<'PY'
+import sys
+import yaml
+
+workflow_path = sys.argv[1]
+with open(workflow_path, encoding="utf-8") as workflow_file:
+    workflow = yaml.safe_load(workflow_file)
+
+for step in workflow["jobs"]["validate"]["steps"]:
+    if step.get("name") == "Enforce GitHub-hosted runner policy":
+        print(step["run"])
+        break
+else:
+    raise SystemExit(
+        "Enforce GitHub-hosted runner policy step is missing from "
+        f"{workflow_path}"
+    )
+PY
+
+    info "Exercising the GitHub-hosted runner policy against repository workflows..."
+    WORKFLOW_DIR="${REPO_ROOT}/.github/workflows" bash "$validator"
+    pass "Repository workflows use literal ubuntu-latest runners"
+
+    mkdir -p "$fixture_dir"
+    cat > "${fixture_dir}/self-hosted.yml" <<'YAML'
+name: Hostile self-hosted runner fixture
+on: workflow_dispatch
+jobs:
+  hostile:
+    runs-on: self-hosted
+    steps:
+      - run: true
+YAML
+    cat > "${fixture_dir}/redducklabs-runners.yml" <<'YAML'
+name: Hostile Red Duck Labs runner fixture
+on: workflow_dispatch
+jobs:
+  hostile:
+    runs-on: redducklabs-runners
+    steps:
+      - run: true
+YAML
+    cat > "${fixture_dir}/dynamic.yml" <<'YAML'
+name: Hostile dynamic runner fixture
+on: workflow_dispatch
+jobs:
+  hostile:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest]
+    steps:
+      - run: true
+YAML
+
+    for fixture_name in self-hosted redducklabs-runners dynamic; do
+        if output=$(WORKFLOW_DIR="${fixture_dir}/${fixture_name}.yml" bash "$validator" 2>&1); then
+            fail "${fixture_name} runner fixture was accepted"
+        elif [[ "$output" == *"expected literal 'ubuntu-latest'"* ]]; then
+            pass "${fixture_name} runner fixture was rejected"
+        else
+            fail "${fixture_name} runner fixture did not report a runner-policy violation"
+            echo "$output"
+        fi
+    done
+}
+
 # Node budget for github-runners-pool-16g (s-8vcpu-16gb).
 NODE_ALLOCATABLE_MI=13639     # 13967028Ki
 SYSTEM_OVERHEAD_MI=694        # cilium, kube-proxy, csi, do-node-agent
@@ -39,6 +117,12 @@ FAILURES=0
 pass() { echo -e "${GREEN}✅ $1${NC}"; }
 fail() { echo -e "${RED}❌ $1${NC}"; FAILURES=$((FAILURES + 1)); }
 info() { echo -e "${YELLOW}$1${NC}"; }
+
+if [ "${1:-}" = "--test-hosted-runner-policy" ]; then
+    verify_hosted_runner_policy_behavior
+    [ "$FAILURES" -eq 0 ]
+    exit $?
+fi
 
 echo "======================================================"
 info "Runner Resource Reservation Verification"
@@ -56,6 +140,10 @@ if [ ! -f "$VALUES_FILE" ]; then
     echo -e "${RED}❌ Values file not found: $VALUES_FILE${NC}"
     exit 1
 fi
+
+echo ""
+info "Checking GitHub-hosted workflow runner policy..."
+verify_hosted_runner_policy_behavior
 
 # --- Static check on the values file -----------------------------------------
 info "Checking deploy/dind-values.yaml..."
