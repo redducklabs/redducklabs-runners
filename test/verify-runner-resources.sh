@@ -167,7 +167,9 @@ DIND_RESTART=$(printf '%s' "$SPEC_JSON" | jq -r \
 # The floating docker:dind tag silently changes the Docker version under builds.
 DIND_IMAGE=$(printf '%s' "$SPEC_JSON" | jq -r \
     '.spec.template.spec.initContainers[]? | select(.name=="dind") | .image // ""')
-if [ "$DIND_IMAGE" = "docker:dind" ] || [ "$DIND_IMAGE" = "docker:latest" ]; then
+if [ -z "$DIND_IMAGE" ]; then
+    fail "dind image is empty - pin an explicit version"
+elif [ "$DIND_IMAGE" = "docker:dind" ] || [ "$DIND_IMAGE" = "docker:latest" ] || [[ "$DIND_IMAGE" = *:latest ]]; then
     fail "dind image '$DIND_IMAGE' is a floating tag - pin an explicit version"
 else
     pass "dind image is pinned: $DIND_IMAGE"
@@ -179,6 +181,18 @@ DOCKER_HOST_SET=$(printf '%s' "$SPEC_JSON" | jq -r \
 [ "$DOCKER_HOST_SET" = "1" ] \
     && pass "runner has DOCKER_HOST set" \
     || fail "runner is missing DOCKER_HOST - it will not find the Docker daemon"
+
+RUNNER_SOCKET_MOUNTS=$(printf '%s' "$SPEC_JSON" | jq -r \
+    '[.spec.template.spec.containers[]? | select(.name=="runner") | .volumeMounts[]? | select(.name=="dind-sock" and .mountPath=="/var/run")] | length')
+DIND_SOCKET_MOUNTS=$(printf '%s' "$SPEC_JSON" | jq -r \
+    '[.spec.template.spec.initContainers[]? | select(.name=="dind") | .volumeMounts[]? | select(.name=="dind-sock" and .mountPath=="/var/run")] | length')
+SOCKET_VOLUME=$(printf '%s' "$SPEC_JSON" | jq -r \
+    '[.spec.template.spec.volumes[]? | select(.name=="dind-sock" and has("emptyDir"))] | length')
+if [ "$RUNNER_SOCKET_MOUNTS" = "1" ] && [ "$DIND_SOCKET_MOUNTS" = "1" ] && [ "$SOCKET_VOLUME" = "1" ]; then
+    pass "runner and native dind share the dind-sock volume at /var/run"
+else
+    fail "runner/dind Docker socket wiring is incomplete (runner=$RUNNER_SOCKET_MOUNTS dind=$DIND_SOCKET_MOUNTS volume=$SOCKET_VOLUME)"
+fi
 echo ""
 
 # --- Two pods per node -------------------------------------------------------
@@ -370,15 +384,19 @@ PY
 
 run_fixture() {  # script, mutation log, output log
     local fixture_script=$1 mutation_log=$2 output_log=$3
+    : > "$FIXTURE_DIR/sha-reads"
     (
-        set -o pipefail
         export GITHUB_OUTPUT="$FIXTURE_DIR/github-output"
         export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
         export CLUSTER_NAME=redducklabs-cluster
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
         export RELEASE_NAME=redducklabs-runners
+        export FIXTURE_ACTUAL_SHA
+        export FIXTURE_MUTATION_LOG="$mutation_log"
+        export FIXTURE_SHA_READ_LOG="$FIXTURE_DIR/sha-reads"
         git() {
             if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+                printf 'git %s\n' "$*" >> "$FIXTURE_SHA_READ_LOG"
                 printf '%s\n' "$FIXTURE_ACTUAL_SHA"
                 return 0
             fi
@@ -386,7 +404,7 @@ run_fixture() {  # script, mutation log, output log
         }
         helm() {
             case " $* " in
-                *" upgrade "*|*" rollback "*|*" uninstall "*) echo "helm $*" >> "$mutation_log" ;;
+                *" upgrade "*|*" rollback "*|*" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             if [ "$1" = "get" ] && [ "$2" = "values" ]; then
                 echo '{"minRunners":2,"maxRunners":4}'
@@ -395,7 +413,7 @@ run_fixture() {  # script, mutation log, output log
         }
         doctl() {
             case " $* " in
-                *" node-pool update "*) echo "doctl $*" >> "$mutation_log" ; return 0 ;;
+                *" node-pool update "*) echo "doctl $*" >> "$FIXTURE_MUTATION_LOG" ; return 0 ;;
                 *" cluster list "*) echo '[{"name":"redducklabs-cluster","id":"fixture-cluster"}]' ; return 0 ;;
                 *" node-pool list "*) echo '[{"id":"fixture-pool","name":"github-runners-pool-16g","min_nodes":2,"max_nodes":1,"count":1,"size":"s-8vcpu-16gb","auto_scale":true,"labels":{"node-type":"github-runner"},"taints":[{"key":"github-runner"}]}]' ; return 0 ;;
             esac
@@ -403,19 +421,31 @@ run_fixture() {  # script, mutation log, output log
         }
         kubectl() {
             case " $* " in
-                *" apply "*|*" create "*|*" delete "*|*" patch "*) echo "kubectl $*" >> "$mutation_log" ;;
+                *" apply "*|*" create "*|*" delete "*|*" patch "*) echo "kubectl $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             return 0
         }
         curl() {
             case " $* " in
-                *" -X POST "*|*" -X PATCH "*|*" -X PUT "*|*" -X DELETE "*) echo "curl $*" >> "$mutation_log" ;;
+                *" -X POST "*|*" -X PATCH "*|*" -X PUT "*|*" -X DELETE "*) echo "curl $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             echo '{"id":1,"runner_groups":[],"repositories":[]}'
             return 0
         }
+        gh() {
+            if [[ " $* " == *" api "* ]] \
+               && { [[ " $* " == *" -X POST "* ]] || [[ " $* " == *" -X PATCH "* ]] \
+                   || [[ " $* " == *" -X PUT "* ]] || [[ " $* " == *" -X DELETE "* ]] \
+                   || [[ " $* " == *" --method POST "* ]] || [[ " $* " == *" --method PATCH "* ]] \
+                   || [[ " $* " == *" --method PUT "* ]] || [[ " $* " == *" --method DELETE "* ]]; }; then
+                echo "gh $*" >> "$FIXTURE_MUTATION_LOG"
+            fi
+            echo '{"id":1,"runner_groups":[],"repositories":[]}'
+            return 0
+        }
         sleep() { :; }
-        source "$fixture_script"
+        export -f git helm doctl kubectl curl gh sleep
+        bash -euo pipefail -c 'source "$1"' -- "$fixture_script"
     ) >"$output_log" 2>&1
 }
 
@@ -466,8 +496,8 @@ assert_live_capacity_drift_fails() {
     fi
 }
 
-assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation token, mutation command label
-    local label=$1 workflow=$2 validation_step=$3 mutation_token=$4 mutation_label=$5
+assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation token, mutation command label, expected mutation pattern
+    local label=$1 workflow=$2 validation_step=$3 mutation_token=$4 mutation_label=$5 expected_mutation_pattern=$6
     local mismatched=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     local script="$FIXTURE_DIR/${label// /_}.sh"
 
@@ -477,10 +507,15 @@ assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation to
         fail "$label has no executable expected_sha guard and $mutation_label boundary"
     else
         : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-       || [ -s "$FIXTURE_DIR/mutations" ] \
-       || ! grep -qiE 'expected[_ -]?sha|checkout.*sha' "$FIXTURE_DIR/output"; then
-        fail "$label does not reject a mismatched expected_sha before $mutation_label"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "$label mismatched expected_sha fixture completed before $mutation_label"
+    elif [ -s "$FIXTURE_DIR/mutations" ]; then
+        fail "$label reached a mutation despite a mismatched expected_sha"
+    elif ! grep -q '^git rev-parse ' "$FIXTURE_DIR/sha-reads"; then
+        fail "$label did not read the checked-out SHA before stopping"
+    elif ! grep -Fq "$mismatched" "$FIXTURE_DIR/output" \
+      || ! grep -Fq "$FIXTURE_ACTUAL_SHA" "$FIXTURE_DIR/output"; then
+        fail "$label stopped for a reason other than the mismatched expected_sha"
     else
         pass "$label mismatched expected_sha stops before $mutation_label"
     fi
@@ -493,10 +528,10 @@ assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation to
     else
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-       && [ -s "$FIXTURE_DIR/mutations" ]; then
+       && grep -Eq "$expected_mutation_pattern" "$FIXTURE_DIR/mutations"; then
         pass "$label matching expected_sha reaches $mutation_label"
     else
-        fail "$label matching expected_sha does not reach $mutation_label"
+        fail "$label matching expected_sha does not reach the expected $mutation_label boundary"
     fi
     fi
 }
@@ -506,11 +541,11 @@ assert_rejects_oversized_max 'Deploy' .github/workflows/deploy-runners.yml 'Vali
 assert_node_pool_bounds
 assert_live_capacity_drift_fails
 
-assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' 'helm upgrade' Helm
-assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizing.yml 'Validate inputs against deploy/dind-values.yaml' 'node-pool update' doctl
-assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm upgrade --install arc' Helm
-assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation'
-assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback'
+assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' 'helm upgrade' Helm '^helm upgrade .*gha-runner-scale-set'
+assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizing.yml 'Validate inputs against deploy/dind-values.yaml' 'node-pool update' doctl '^doctl kubernetes cluster node-pool update '
+assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm upgrade --install arc' Helm '^helm upgrade --install arc '
+assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation' '^(curl|gh) .*actions/runner-groups'
+assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback' '^helm rollback '
 echo ""
 
 echo "======================================================"
