@@ -42,3 +42,7 @@ Codex-specific adapter rules:
   complete `scripts/` directory into the plan's ignored SDD workspace, run
   `sed -i 's/\r$//'` on the copies, and invoke the copied script. Streaming one
   script to `bash -s` breaks scripts that locate sibling helpers via `$0`.
+- Collaboration subagent calls require the complete declared JSON schema. If a
+  call fails argument parsing, resend it with valid `task_name`, `fork_turns`,
+  `model`, `reasoning_effort`, and `message` fields; parsing failures do not
+  create an agent or change repository state.
