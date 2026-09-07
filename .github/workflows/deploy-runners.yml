@@ -615,7 +615,8 @@ jobs:
               yaml.safe_dump(matches[0], stream, sort_keys=False)
           PY
 
-          kubectl apply --server-side --dry-run=server -f "${ASRS}" -o json > "${ADMITTED_ASRS}"
+          kubectl apply --server-side --force-conflicts --dry-run=server \
+            -f "${ASRS}" -o json > "${ADMITTED_ASRS}"
 
           python3 - "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${NAMESPACE}" <<'PY'
           import json
@@ -638,7 +639,8 @@ jobs:
               json.dump(pod, stream)
           PY
 
-          kubectl apply --server-side --dry-run=server -f "${REPRESENTATIVE_POD}" -o json > "${ADMITTED_POD}"
+          kubectl apply --server-side --force-conflicts --dry-run=server \
+            -f "${REPRESENTATIVE_POD}" -o json > "${ADMITTED_POD}"
 
           python3 - "${ASRS}" "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${ADMITTED_POD}" "${RUNNER_IMAGE}" <<'PY'
           from copy import deepcopy

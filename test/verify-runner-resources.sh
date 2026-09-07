@@ -1950,7 +1950,7 @@ rollback_steps = jobs.get('rollback', {}).get('steps', [])
 rollback = next(step for step in rollback_steps if step.get('name') == 'Rollback runners').get('run', '')
 if preflight.count('helm template ') != 1:
     raise SystemExit('candidate must be rendered exactly once')
-if preflight.count('kubectl apply --server-side --dry-run=server') != 2:
+if preflight.count('kubectl apply --server-side --force-conflicts --dry-run=server') != 2:
     raise SystemExit('ASRS and representative Pod server dry-runs are required')
 if '--post-renderer "${HASH_GATE}"' not in deploy_shell:
     raise SystemExit('Helm deployment is not guarded by the preflight manifest hash')
@@ -2064,9 +2064,10 @@ assert_rollback_revision_prevalidation() {
     unset FIXTURE_ROLLBACK_INVALID
 }
 
-run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mutation, request shape, server major/minor, deploy drift, output
+run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mutation, request shape, server major/minor, deploy drift, output, field ownership
     local fail_dry_run=$1 system_memory_mi=$2 system_cpu_m=$3 admission_mutation=$4
     local request_shape=$5 server_major=$6 server_minor=$7 deploy_drift=$8 output=$9
+    local existing_field_ownership=${10:-false}
     local script="$FIXTURE_DIR/deploy-preflight.sh"
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
@@ -2086,6 +2087,7 @@ run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mu
         export FIXTURE_SERVER_MAJOR="$server_major"
         export FIXTURE_SERVER_MINOR="$server_minor"
         export FIXTURE_DEPLOY_DRIFT="$deploy_drift"
+        export FIXTURE_EXISTING_FIELD_OWNERSHIP="$existing_field_ownership"
         export FIXTURE_CALL_LOG="$FIXTURE_DIR/preflight-calls"
         export FIXTURE_RENDER_FILE="$FIXTURE_DIR/preflight-render.yaml"
         export RELEASE_NAME=redducklabs-runners
@@ -2159,7 +2161,11 @@ print(json.dumps({"items": [
 ]}))
 PY
                     ;;
-                *" apply --server-side --dry-run=server "*)
+                *" apply --server-side --dry-run=server "*|*" apply --server-side --force-conflicts --dry-run=server "*)
+                    if [ "$FIXTURE_EXISTING_FIELD_OWNERSHIP" = true ] \
+                      && [[ " $* " != *" --force-conflicts "* ]]; then
+                        return 42
+                    fi
                     if [ "$FIXTURE_FAIL_DRY_RUN" = true ]; then
                         return 1
                     fi
@@ -2279,9 +2285,17 @@ assert_deploy_preflight_fixtures() {
         pass "Server-side dry-run failure prevents Helm deployment"
     fi
 
+    if run_deploy_preflight_fixture false 500 500 none container 1 36 false \
+      "$FIXTURE_DIR/preflight-output" true \
+      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+        pass "Existing Helm field ownership does not block a non-persisting server dry-run"
+    else
+        fail "Existing Helm field ownership blocks the deployment preflight"
+    fi
+
     if run_deploy_preflight_fixture false 500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output" \
       && [ "$(grep -c '^helm template ' "$FIXTURE_DIR/preflight-calls")" -eq 1 ] \
-      && [ "$(grep -c '^kubectl apply --server-side --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
+      && [ "$(grep -c '^kubectl apply --server-side --force-conflicts --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
       && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
         pass "Compatible ASRS and Pod dry-runs reach the Helm boundary after one render"
     else
