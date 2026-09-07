@@ -108,9 +108,9 @@ jobs:
           shellcheck -S error scripts/*.sh test/*.sh deploy/*.sh || exit 1
           echo "✅ No shellcheck errors"
 
-      - name: Verify runner resource reservations
+      - name: Verify runner resources and rollout safety boundaries
         run: |
-          echo "🔍 Verifying runner memory reservations and pod-per-node invariant..."
+          echo "🔍 Verifying runner resources, trust fixtures, preflight, and rollback boundaries..."
           # Guards against silently reintroducing containerMode.type: dind,
           # which would drop the Docker daemon's memory reservation with no
           # error and no visible diff in the values file.
@@ -240,6 +240,7 @@ jobs:
             echo "- YAML syntax (workflows, composite actions, deploy values)"
             echo "- actionlint"
             echo "- \`bash -n\` + shellcheck (errors) on all scripts"
-            echo "- Runner memory reservations and the one-pod-per-node invariant"
+            echo "- Runner pod-level reservations and the two-pods-per-node invariant"
+            echo "- Mocked trust-boundary, API preflight, rollback, and autoscaler diagnostics"
             echo "- No committed tokens"
           } >> $GITHUB_STEP_SUMMARY

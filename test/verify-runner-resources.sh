@@ -296,6 +296,9 @@ for job in (document.get("jobs") or {}).values():
             shell = step["run"]
             replacements = {
                 "github.event.inputs.action": "scale-custom",
+                "github.event.inputs.operation": "deploy",
+                "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
+                "github.event.inputs.rollback_revision": "7",
                 "github.event.inputs.apply": "true",
                 "github.event.inputs.expected_sha": expected_sha,
                 "github.event.inputs.max_runners": max_runners,
@@ -352,6 +355,9 @@ for job in (document.get("jobs") or {}).values():
             continue
         replacements = {
             "github.event.inputs.expected_sha": expected_sha,
+            "github.event.inputs.operation": "deploy",
+            "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
+            "github.event.inputs.rollback_revision": "7",
             "github.event.inputs.max_runners": max_runners,
             "github.event.inputs.min_runners": "2",
             "github.event.inputs.max_nodes": max_nodes,
@@ -391,6 +397,7 @@ run_fixture() {  # script, mutation log, output log
     (
         export GITHUB_OUTPUT="$FIXTURE_DIR/github-output"
         export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
+        export GH_TOKEN=fixture-token
         export CLUSTER_NAME=redducklabs-cluster
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
         export RELEASE_NAME=redducklabs-runners
@@ -409,10 +416,11 @@ run_fixture() {  # script, mutation log, output log
         }
         helm() {
             case " $* " in
-                *" upgrade "*|*" rollback "*|*" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
+                *" rollback "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG"; export FIXTURE_ROLLBACK_ACTIVE=true ;;
+                *" upgrade "*|*" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             if [ "$1" = "get" ] && [ "$2" = "values" ]; then
-                echo '{"minRunners":2,"maxRunners":4}'
+                echo '{"minRunners":2,"maxRunners":2,"runnerGroup":"redducklabs-private-runners","template":{"spec":{"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}'
             fi
             return 0
         }
@@ -446,7 +454,29 @@ run_fixture() {  # script, mutation log, output log
                    || [[ " $* " == *" --method PUT "* ]] || [[ " $* " == *" --method DELETE "* ]]; }; then
                 echo "gh $*" >> "$FIXTURE_MUTATION_LOG"
             fi
-            echo '{"id":1,"runner_groups":[],"repositories":[]}'
+            case "$*" in
+                *'/repositories/1193238112'*) echo '{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1025075333'*) echo '{"id":1025075333,"name":"autoduck","full_name":"redducklabs/autoduck","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1351028230'*) echo '{"id":1351028230,"name":"manager","full_name":"redducklabs/manager","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1033531555'*) echo '{"id":1033531555,"name":"platform-observability","full_name":"redducklabs/platform-observability","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1018231298'*) echo '{"id":1018231298,"name":"redducklabs","full_name":"redducklabs/redducklabs","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1154788719'*) echo '{"id":1154788719,"name":"redducklaw","full_name":"redducklabs/redducklaw","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1006277397'*) echo '{"id":1006277397,"name":"therapy-link","full_name":"redducklabs/therapy-link","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/776507734'*) echo '{"id":776507734,"name":"zipbot-internal","full_name":"redducklabs/zipbot-internal","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1037651737'*) echo '{"id":1037651737,"name":"zipbot-v2","full_name":"redducklabs/zipbot-v2","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'repos?type=public'*) echo '[]' ;;
+                *'runner-groups?per_page=100'*)
+                    if [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
+                        echo '{"runner_groups":[{"id":777,"name":"redducklabs-private-runners","visibility":"selected","allows_public_repositories":false}]}'
+                    else
+                        echo '{"runner_groups":[]}'
+                    fi
+                    ;;
+                *'--method POST'*'actions/runner-groups'*) echo '{"id":777,"name":"redducklabs-private-runners"}' ;;
+                *'runner-groups/777/repositories?per_page=100'*) echo '{"repositories":[{"id":776507734,"visibility":"private","private":true},{"id":1006277397,"visibility":"private","private":true},{"id":1018231298,"visibility":"private","private":true},{"id":1025075333,"visibility":"private","private":true},{"id":1033531555,"visibility":"private","private":true},{"id":1037651737,"visibility":"private","private":true},{"id":1154788719,"visibility":"private","private":true},{"id":1193238112,"visibility":"private","private":true},{"id":1351028230,"visibility":"private","private":true}]}' ;;
+                *'runner-groups/777'*) echo '{"id":777,"name":"redducklabs-private-runners","visibility":"selected","allows_public_repositories":false}' ;;
+                *) echo '{"id":1,"runner_groups":[],"repositories":[]}' ;;
+            esac
             return 0
         }
         sleep() { :; }
@@ -618,8 +648,525 @@ assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation to
        && grep -Eq "$expected_mutation_pattern" "$FIXTURE_DIR/mutations"; then
         pass "$label matching expected_sha reaches $mutation_label"
     else
+        sed -n '1,12p' "$FIXTURE_DIR/output" >&2
         fail "$label matching expected_sha does not reach the expected $mutation_label boundary"
     fi
+    fi
+}
+
+write_fake_gh() {
+    mkdir -p "$FIXTURE_DIR/fake-bin"
+    cat > "$FIXTURE_DIR/fake-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+joined="$*"
+body=""
+if [[ " $joined " == *" --input - "* ]]; then
+    body=$(cat)
+fi
+printf '%s\t%s\n' "$joined" "$body" >> "$GH_CALL_LOG"
+
+repo_json() {
+    local id=$1 name=$2 visibility=private
+    if [ "${GH_SCENARIO}" = public_allowlist ] && [ "$name" = manager ]; then
+        visibility=public
+    fi
+    if [ "${GH_SCENARIO}" = unknown_allowlist ] && [ "$name" = manager ]; then
+        name=unexpected-repository
+    fi
+    printf '{"id":%s,"name":"%s","full_name":"redducklabs/%s","visibility":"%s","private":%s,"owner":{"login":"redducklabs"}}\n' \
+        "$id" "$name" "$name" "$visibility" "$([ "$visibility" = private ] && echo true || echo false)"
+}
+
+case "$joined" in
+    *"/repositories/1193238112"*) repo_json 1193238112 aurolegal.ai ;;
+    *"/repositories/1025075333"*) repo_json 1025075333 autoduck ;;
+    *"/repositories/1351028230"*) repo_json 1351028230 manager ;;
+    *"/repositories/1033531555"*) repo_json 1033531555 platform-observability ;;
+    *"/repositories/1018231298"*) repo_json 1018231298 redducklabs ;;
+    *"/repositories/1154788719"*) repo_json 1154788719 redducklaw ;;
+    *"/repositories/1006277397"*) repo_json 1006277397 therapy-link ;;
+    *"/repositories/776507734"*) repo_json 776507734 zipbot-internal ;;
+    *"/repositories/1037651737"*) repo_json 1037651737 zipbot-v2 ;;
+    *"orgs/redducklabs/repos?type=public"*)
+        if [ "${GH_SCENARIO}" = public_label ] || [ "${GH_SCENARIO}" = dynamic_runs_on ] \
+          || [ "${GH_SCENARIO}" = workflow_schema ]; then
+            printf '[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+        else
+            printf '[]\n'
+        fi
+        ;;
+    *"repos/redducklabs/public-repo/actions/workflows"*)
+        if [ "${GH_SCENARIO}" = workflow_schema ]; then
+            printf '{"total":1,"pipelines":[]}\n'
+        else
+            printf '{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
+        fi
+        ;;
+    *"repos/redducklabs/public-repo/contents/.github/workflows/ci.yml"*)
+        if [ "${GH_SCENARIO}" = dynamic_runs_on ]; then
+            printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: ${{ matrix.runner }}' '    steps: []'
+        else
+            printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: redducklabs-runners' '    steps: []'
+        fi
+        ;;
+    *"orgs/redducklabs/actions/runner-groups?per_page=100"*)
+        if [ "${GH_SCENARIO}" = permission_failure ]; then
+            printf '%s\n' 'HTTP 403: Resource not accessible by personal access token' >&2
+            exit 1
+        elif [ "${GH_SCENARIO}" = create ]; then
+            printf '{"total_count":0,"runner_groups":[]}\n'
+        else
+            printf '{"total_count":1,"runner_groups":[{"id":777,"name":"redducklabs-private-runners","visibility":"all","allows_public_repositories":true,"restricted_to_workflows":false}]}\n'
+        fi
+        ;;
+    *"--method POST"*"orgs/redducklabs/actions/runner-groups"*)
+        printf '{"id":777,"name":"redducklabs-private-runners"}\n'
+        ;;
+    *"--method PATCH"*"orgs/redducklabs/actions/runner-groups/777"*)
+        printf '{"id":777,"name":"redducklabs-private-runners","visibility":"selected","allows_public_repositories":false}\n'
+        ;;
+    *"--method PUT"*"orgs/redducklabs/actions/runner-groups/777/repositories"*)
+        if [ "${GH_SCENARIO}" = replacement_failure ]; then
+            printf '%s\n' 'HTTP 403: Resource not accessible by personal access token' >&2
+            exit 1
+        fi
+        printf '{}\n'
+        ;;
+    *"orgs/redducklabs/actions/runner-groups/777/repositories?per_page=100"*)
+        if [ "${GH_SCENARIO}" = readback_drift ]; then
+            printf '{"total_count":1,"repositories":[{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true}]}\n'
+        else
+            printf '{"total_count":9,"repositories":['
+            printf '%s' \
+              '{"id":776507734,"name":"zipbot-internal","full_name":"redducklabs/zipbot-internal","visibility":"private","private":true},' \
+              '{"id":1006277397,"name":"therapy-link","full_name":"redducklabs/therapy-link","visibility":"private","private":true},' \
+              '{"id":1018231298,"name":"redducklabs","full_name":"redducklabs/redducklabs","visibility":"private","private":true},' \
+              '{"id":1025075333,"name":"autoduck","full_name":"redducklabs/autoduck","visibility":"private","private":true},' \
+              '{"id":1033531555,"name":"platform-observability","full_name":"redducklabs/platform-observability","visibility":"private","private":true},' \
+              '{"id":1037651737,"name":"zipbot-v2","full_name":"redducklabs/zipbot-v2","visibility":"private","private":true},' \
+              '{"id":1154788719,"name":"redducklaw","full_name":"redducklabs/redducklaw","visibility":"private","private":true},' \
+              '{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true},' \
+              '{"id":1351028230,"name":"manager","full_name":"redducklabs/manager","visibility":"private","private":true}'
+            printf ']}\n'
+        fi
+        ;;
+    *"orgs/redducklabs/actions/runner-groups/777"*)
+        if [ "${GH_SCENARIO}" = readback_drift ]; then
+            printf '{"id":777,"name":"redducklabs-private-runners","visibility":"all","allows_public_repositories":true,"restricted_to_workflows":false}\n'
+        else
+            printf '{"id":777,"name":"redducklabs-private-runners","visibility":"selected","allows_public_repositories":false,"restricted_to_workflows":false}\n'
+        fi
+        ;;
+    *)
+        printf 'unexpected fake gh call: %s\n' "$joined" >&2
+        exit 64
+        ;;
+esac
+SH
+    chmod +x "$FIXTURE_DIR/fake-bin/gh"
+}
+
+run_trust_fixture() {  # scenario, output
+    local scenario=$1 output=$2
+    : > "$FIXTURE_DIR/gh-calls"
+    (
+        export PATH="$FIXTURE_DIR/fake-bin:$PATH"
+        export GH_SCENARIO="$scenario"
+        export GH_CALL_LOG="$FIXTURE_DIR/gh-calls"
+        bash scripts/verify-runner-trust-boundary.sh \
+          --expected-sha "$(git rev-parse HEAD)"
+    ) >"$output" 2>&1
+}
+
+assert_trust_boundary_fixtures() {
+    write_fake_gh
+
+    : > "$FIXTURE_DIR/gh-calls"
+    if (
+        export PATH="$FIXTURE_DIR/fake-bin:$PATH"
+        export GH_SCENARIO=create GH_CALL_LOG="$FIXTURE_DIR/gh-calls"
+        bash scripts/verify-runner-trust-boundary.sh \
+          --expected-sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    ) >"$FIXTURE_DIR/trust-output" 2>&1; then
+        fail "Trust boundary accepts a mismatched expected_sha"
+    elif [ -s "$FIXTURE_DIR/gh-calls" ]; then
+        fail "Trust boundary calls GitHub before rejecting expected_sha"
+    else
+        pass "Trust boundary rejects expected_sha before every GitHub call"
+    fi
+
+    if run_trust_fixture create "$FIXTURE_DIR/trust-output" \
+      && grep -q -- '--method POST orgs/redducklabs/actions/runner-groups' "$FIXTURE_DIR/gh-calls" \
+      && ! grep -q -- '--method PATCH' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+        if python3 - "$FIXTURE_DIR/gh-calls" <<'PY'
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    calls = [line.split("\t", 1)[0] for line in source]
+expected_reads = [
+    "/repositories/776507734",
+    "/repositories/1006277397",
+    "/repositories/1018231298",
+    "/repositories/1025075333",
+    "/repositories/1033531555",
+    "/repositories/1037651737",
+    "/repositories/1154788719",
+    "/repositories/1193238112",
+    "/repositories/1351028230",
+    "orgs/redducklabs/repos?type=public&per_page=100",
+    "orgs/redducklabs/actions/runner-groups?per_page=100",
+]
+if len(calls) != 14:
+    raise SystemExit(f"expected 14 gh calls, found {len(calls)}")
+for call, endpoint in zip(calls[:11], expected_reads):
+    if endpoint not in call or "--method" in call:
+        raise SystemExit(f"unexpected read call: {call}")
+if "--method POST orgs/redducklabs/actions/runner-groups" not in calls[11]:
+    raise SystemExit("creation is not the first mutation")
+if "runner-groups/777" not in calls[12] or "runner-groups/777/repositories" not in calls[13]:
+    raise SystemExit("readback calls are missing or reordered")
+PY
+        then
+            pass "Trust boundary creates the selected private group atomically with the exact call sequence"
+        else
+            fail "Trust boundary creation gh call sequence drifted"
+        fi
+    else
+        fail "Trust boundary group-creation fixture failed"
+    fi
+
+    if run_trust_fixture existing "$FIXTURE_DIR/trust-output" \
+      && grep -q -- '--method PATCH orgs/redducklabs/actions/runner-groups/777' "$FIXTURE_DIR/gh-calls" \
+      && grep -q -- '--method PUT orgs/redducklabs/actions/runner-groups/777/repositories' "$FIXTURE_DIR/gh-calls"; then
+        patch_line=$(grep -n -- '--method PATCH' "$FIXTURE_DIR/gh-calls" | head -1 | cut -d: -f1)
+        put_line=$(grep -n -- '--method PUT' "$FIXTURE_DIR/gh-calls" | head -1 | cut -d: -f1)
+        if [ "$patch_line" -lt "$put_line" ] \
+          && grep -q '"visibility":"selected"' "$FIXTURE_DIR/gh-calls" \
+          && grep -q '"allows_public_repositories":false' "$FIXTURE_DIR/gh-calls" \
+          && grep -q '"selected_repository_ids":\[776507734,1006277397,1018231298,1025075333,1033531555,1037651737,1154788719,1193238112,1351028230\]' "$FIXTURE_DIR/gh-calls"; then
+            pass "Trust boundary narrows access before exact membership replacement"
+        else
+            fail "Trust boundary existing-group mutation order or payload is unsafe"
+        fi
+    else
+        fail "Trust boundary existing-group reconciliation fixture failed"
+    fi
+
+    local scenario expected
+    for scenario in permission_failure public_allowlist unknown_allowlist readback_drift public_label dynamic_runs_on workflow_schema; do
+        case "$scenario" in
+            permission_failure) expected='permission' ;;
+            public_allowlist) expected='private' ;;
+            unknown_allowlist) expected='identity' ;;
+            readback_drift) expected='readback' ;;
+            public_label) expected='redducklabs-runners' ;;
+            dynamic_runs_on) expected='dynamic runs-on' ;;
+            workflow_schema) expected='schema' ;;
+        esac
+        if run_trust_fixture "$scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary accepts ${scenario//_/ }"
+        elif ! grep -qi "$expected" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary ${scenario//_/ } failure is not diagnostic"
+        elif [ "$scenario" != readback_drift ] && grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+            fail "Trust boundary mutates GitHub before rejecting ${scenario//_/ }"
+        else
+            pass "Trust boundary fails closed on ${scenario//_/ }"
+        fi
+    done
+
+    if run_trust_fixture existing "$FIXTURE_DIR/trust-output"; then
+        mutation_line=$(grep -nE -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls" | head -1 | cut -d: -f1)
+        last_readonly_line=$(grep -n 'orgs/redducklabs/actions/runner-groups?per_page=100' "$FIXTURE_DIR/gh-calls" | head -1 | cut -d: -f1)
+        if [ "$last_readonly_line" -lt "$mutation_line" ]; then
+            pass "Trust boundary completes all read-only checks before mutation"
+        else
+            fail "Trust boundary begins mutation before read-only validation completes"
+        fi
+    else
+        fail "Trust boundary read-only ordering fixture could not complete"
+    fi
+
+    if run_trust_fixture replacement_failure "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary continues after exact membership replacement fails"
+    elif ! grep -q -- '--method PATCH orgs/redducklabs/actions/runner-groups/777' "$FIXTURE_DIR/gh-calls" \
+      || ! grep -q -- '--method PUT orgs/redducklabs/actions/runner-groups/777/repositories' "$FIXTURE_DIR/gh-calls" \
+      || ! grep -Fq 'access may remain more restrictive' "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary partial-failure behavior is not restrictive and diagnostic"
+    else
+        pass "Trust boundary halts safely after partial reconciliation failure"
+    fi
+}
+
+run_autoscaler_fixture() {  # fixture text or MISSING, output
+    local fixture=$1 output=$2 script="$FIXTURE_DIR/autoscaler-diagnostics.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/runner-status.yml \
+      'Report autoscaler diagnostics' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+    (
+        export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
+        export FIXTURE_AUTOSCALER_STATUS="$fixture"
+        kubectl() {
+            if [ "$FIXTURE_AUTOSCALER_STATUS" = MISSING ]; then
+                return 1
+            fi
+            printf '%s\n' "$FIXTURE_AUTOSCALER_STATUS"
+        }
+        export -f kubectl
+        bash -euo pipefail -c 'source "$1"' -- "$script"
+    ) >"$output" 2>&1
+}
+
+assert_autoscaler_diagnostic_fixtures() {
+    local healthy backoff changed
+    healthy=$'health:\n  status: Healthy\nscaleUp:\n  status: NoActivity'
+    backoff=$'health:\n  status: Healthy\nscaleUp:\n  status: Backoff\n  errorCode: cloudProviderError\n  errorMessage: No capacity in pool pool-123 for cluster do-sfo3-secret; requestId=req-deadbeef https://cloud.digitalocean.com/kubernetes/clusters/secret'
+    changed=$'Health:\n  state: providerPassword=do-not-print'
+
+    if run_autoscaler_fixture "$healthy" "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'health.status: Healthy' "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'scaleUp.status: NoActivity' "$FIXTURE_DIR/autoscaler-output"; then
+        pass "Runner Status parses healthy/no-activity autoscaler diagnostics"
+    else
+        fail "Runner Status healthy autoscaler diagnostic fixture failed"
+    fi
+
+    if run_autoscaler_fixture "$backoff" "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'scaleUp.status: Backoff' "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'scaleUp.errorCode: cloudProviderError' "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'scaleUp.errorMessage:' "$FIXTURE_DIR/autoscaler-output" \
+      && ! grep -Eq 'pool-123|do-sfo3-secret|req-deadbeef|https://' "$FIXTURE_DIR/autoscaler-output"; then
+        pass "Runner Status reports provider backoff with identifiers redacted"
+    else
+        fail "Runner Status provider-backoff diagnostic fixture failed"
+    fi
+
+    if run_autoscaler_fixture MISSING "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'Autoscaler diagnostics unavailable' "$FIXTURE_DIR/autoscaler-output" \
+      && run_autoscaler_fixture "$changed" "$FIXTURE_DIR/autoscaler-output" \
+      && grep -Fq 'Autoscaler diagnostics unavailable' "$FIXTURE_DIR/autoscaler-output" \
+      && ! grep -Fq 'do-not-print' "$FIXTURE_DIR/autoscaler-output"; then
+        pass "Runner Status degrades safely for missing or changed diagnostics"
+    else
+        fail "Runner Status does not degrade diagnostics safely"
+    fi
+}
+
+assert_deploy_operation_and_preflight_contract() {
+    if python3 - <<'PY'
+import re
+import yaml
+
+with open('.github/workflows/deploy-runners.yml', encoding='utf-8') as source:
+    workflow = yaml.safe_load(source)
+
+inputs = workflow[True]['workflow_dispatch']['inputs']
+operations = inputs.get('operation', {}).get('options', [])
+if operations != ['deploy', 'prepare-trust-boundary', 'rollback']:
+    raise SystemExit('deploy operation choices are incomplete or unordered')
+if inputs.get('accept_privileged_runner_co_tenancy', {}).get('type') != 'boolean':
+    raise SystemExit('explicit privileged co-tenancy acceptance input is missing')
+if 'rollback_revision' not in inputs:
+    raise SystemExit('rollback revision input is missing')
+
+jobs = workflow.get('jobs') or {}
+trust = jobs.get('trust-boundary')
+deploy = jobs.get('deploy')
+if not trust or not deploy:
+    raise SystemExit('trust-boundary and deploy jobs must both exist')
+trust_shell = '\n'.join(step.get('run', '') for step in trust.get('steps', []))
+if 'scripts/verify-runner-trust-boundary.sh' not in trust_shell:
+    raise SystemExit('trust job does not execute the committed verifier')
+if any(token in trust_shell for token in ('kubectl ', 'helm ', 'doctl ')):
+    raise SystemExit('prepare-trust-boundary job has a cluster/provider command')
+if 'trust-boundary' not in ([deploy.get('needs')] if isinstance(deploy.get('needs'), str) else deploy.get('needs', [])):
+    raise SystemExit('deployment does not depend on trust reconciliation')
+if "needs.validate-inputs.outputs.operation != 'prepare-trust-boundary'" not in deploy.get('if', ''):
+    raise SystemExit('prepare-trust-boundary does not stop before the deployment job')
+
+steps = deploy.get('steps') or []
+preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and preflight candidate')
+deploy_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Deploy runners')
+rollback_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Rollback runners')
+preflight = steps[preflight_index].get('run', '')
+deploy_shell = steps[deploy_index].get('run', '')
+rollback = steps[rollback_index].get('run', '')
+if preflight.count('helm template ') != 1:
+    raise SystemExit('candidate must be rendered exactly once')
+if preflight.count('kubectl apply --server-side --dry-run=server') != 2:
+    raise SystemExit('ASRS and representative Pod server dry-runs are required')
+if preflight_index >= deploy_index:
+    raise SystemExit('preflight does not precede Helm deployment')
+if 'helm rollback ' not in rollback:
+    raise SystemExit('CI rollback boundary is missing')
+
+overlay_patterns = [
+    r'--values deploy/dind-values\.yaml',
+    r'--set githubConfigSecret\.github_token=',
+    r'--set runnerScaleSetName=',
+    r'--set minRunners=',
+    r'--set maxRunners=',
+    r'--set-string "template\.spec\.containers\[0\]\.image=',
+    r'--set runnerGroup=',
+    r'--version "\$\{ARC_CHART_VERSION\}"',
+]
+for pattern in overlay_patterns:
+    if not re.search(pattern, preflight) or not re.search(pattern, deploy_shell):
+        raise SystemExit(f'preflight/deploy overlay drift: {pattern}')
+
+for index, step in enumerate(steps):
+    if index >= preflight_index:
+        break
+    shell = step.get('run', '')
+    if re.search(r'helm (upgrade|rollback|uninstall)|kubectl (apply|create|delete|patch)|node-pool update', shell):
+        raise SystemExit(f'mutation step precedes compatibility preflight: {step.get("name")}')
+PY
+    then
+        pass "Deploy exposes isolated trust preparation, exact preflight overlays, and CI rollback"
+    else
+        fail "Deploy operation, preflight, trust isolation, or rollback contract is incomplete"
+    fi
+}
+
+assert_deploy_requires_cotenancy_acceptance() {
+    local script="$FIXTURE_DIR/deploy-cotenancy.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+        'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Deploy co-tenancy acceptance fixture could not be materialized"
+        return
+    fi
+    sed -i 's/ACCEPT_CO_TENANCY="true"/ACCEPT_CO_TENANCY="false"/' "$script"
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts privileged runner co-tenancy without explicit consent"
+    elif [ -s "$FIXTURE_DIR/mutations" ]; then
+        fail "Deploy mutates state before rejecting missing co-tenancy consent"
+    elif ! grep -Fq 'must be explicitly accepted' "$FIXTURE_DIR/output"; then
+        fail "Deploy co-tenancy rejection is not diagnostic"
+    else
+        pass "Deploy requires explicit privileged runner co-tenancy acceptance"
+    fi
+}
+
+run_deploy_preflight_fixture() {  # fail dry-run, system memory Mi, system CPU m, mutate admission, output
+    local fail_dry_run=$1 system_memory_mi=$2 system_cpu_m=$3 admission_mutation=$4 output=$5
+    local script="$FIXTURE_DIR/deploy-preflight.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Render and preflight candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Deploy runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+    : > "$FIXTURE_DIR/preflight-calls"
+    printf '%s\n' "$RENDER" > "$FIXTURE_DIR/preflight-render.yaml"
+    (
+        export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
+        export RUNNER_TEMP="$FIXTURE_DIR"
+        export FIXTURE_FAIL_DRY_RUN="$fail_dry_run"
+        export FIXTURE_SYSTEM_MEMORY_MI="$system_memory_mi"
+        export FIXTURE_SYSTEM_CPU_M="$system_cpu_m"
+        export FIXTURE_ADMISSION_MUTATION="$admission_mutation"
+        export FIXTURE_CALL_LOG="$FIXTURE_DIR/preflight-calls"
+        export FIXTURE_RENDER_FILE="$FIXTURE_DIR/preflight-render.yaml"
+        export RELEASE_NAME=redducklabs-runners
+        export RUNNER_SCALE_SET_NAME=redducklabs-runners
+        export ARC_CHART_VERSION=0.14.2
+        helm() {
+            printf 'helm %s\n' "$*" >> "$FIXTURE_CALL_LOG"
+            if [ "$1" = template ]; then
+                command cat "$FIXTURE_RENDER_FILE"
+            fi
+        }
+        kubectl() {
+            printf 'kubectl %s\n' "$*" >> "$FIXTURE_CALL_LOG"
+            case " $* " in
+                *" version -o json "*)
+                    printf '{"serverVersion":{"major":"1","minor":"36"}}\n'
+                    ;;
+                *" get nodes "*)
+                    printf '{"items":[{"metadata":{"name":"runner-a"},"status":{"allocatable":{"memory":"13639Mi","cpu":"7880m"},"nodeInfo":{"kubeletVersion":"v1.36.3"},"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"runner-b"},"status":{"allocatable":{"memory":"13639Mi","cpu":"7880m"},"nodeInfo":{"kubeletVersion":"v1.36.3"},"conditions":[{"type":"Ready","status":"True"}]}}]}\n'
+                    ;;
+                *" get pods -A "*)
+                    printf '{"items":[{"metadata":{"name":"system-a","namespace":"kube-system","labels":{}},"spec":{"nodeName":"runner-a","containers":[{"resources":{"requests":{"memory":"%sMi","cpu":"%sm"}}}]}},{"metadata":{"name":"system-b","namespace":"kube-system","labels":{}},"spec":{"nodeName":"runner-b","containers":[{"resources":{"requests":{"memory":"%sMi","cpu":"%sm"}}}]}}]}\n' "$FIXTURE_SYSTEM_MEMORY_MI" "$FIXTURE_SYSTEM_CPU_M" "$FIXTURE_SYSTEM_MEMORY_MI" "$FIXTURE_SYSTEM_CPU_M"
+                    ;;
+                *" apply --server-side --dry-run=server "*)
+                    if [ "$FIXTURE_FAIL_DRY_RUN" = true ]; then
+                        return 1
+                    fi
+                    local previous='' file=''
+                    for arg in "$@"; do
+                        if [ "$previous" = -f ]; then file=$arg; break; fi
+                        previous=$arg
+                    done
+                    python3 - "$file" <<'PY'
+import json, os, sys, yaml
+with open(sys.argv[1], encoding='utf-8') as source:
+    document = yaml.safe_load(source)
+if os.environ.get('FIXTURE_ADMISSION_MUTATION') == 'true':
+    spec = document.get('spec', {})
+    if document.get('kind') == 'AutoscalingRunnerSet':
+        spec = spec.get('template', {}).get('spec', {})
+    for container in spec.get('containers', []):
+        if container.get('name') == 'runner':
+            container['resources'] = {'requests': {'cpu': '1'}}
+print(json.dumps(document))
+PY
+                    ;;
+            esac
+        }
+        sleep() { :; }
+        export -f helm kubectl sleep
+        bash -euo pipefail -c 'source "$1"' -- "$script"
+    ) >"$output" 2>&1
+}
+
+assert_deploy_preflight_fixtures() {
+    if run_deploy_preflight_fixture true 500 500 false "$FIXTURE_DIR/preflight-output"; then
+        fail "Deploy continues after a server-side dry-run failure"
+    elif [ ! -e "$FIXTURE_DIR/preflight-calls" ]; then
+        fail "Deploy dry-run failure fixture could not be materialized"
+    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+        fail "Deploy reaches Helm after a server-side dry-run failure"
+    else
+        pass "Server-side dry-run failure prevents Helm deployment"
+    fi
+
+    if run_deploy_preflight_fixture false 500 500 false "$FIXTURE_DIR/preflight-output" \
+      && [ "$(grep -c '^helm template ' "$FIXTURE_DIR/preflight-calls")" -eq 1 ] \
+      && [ "$(grep -c '^kubectl apply --server-side --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
+      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+        pass "Compatible ASRS and Pod dry-runs reach the Helm boundary after one render"
+    else
+        sed -n '1,20p' "$FIXTURE_DIR/preflight-output" >&2
+        fail "Healthy live compatibility preflight does not reach Helm"
+    fi
+
+    if run_deploy_preflight_fixture false 1500 500 false "$FIXTURE_DIR/preflight-output"; then
+        fail "Deploy accepts a node without two-pod memory headroom"
+    elif [ ! -e "$FIXTURE_DIR/preflight-calls" ]; then
+        fail "Deploy node-headroom fixture could not be materialized"
+    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+        fail "Deploy reaches Helm after live node headroom drift"
+    else
+        pass "Live per-node two-pod plus headroom drift prevents Helm"
+    fi
+
+    if run_deploy_preflight_fixture false 500 1000 false "$FIXTURE_DIR/preflight-output"; then
+        fail "Deploy accepts a node without two-pod CPU headroom"
+    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+        fail "Deploy reaches Helm after live node CPU headroom drift"
+    else
+        pass "Live per-node CPU headroom drift prevents Helm"
+    fi
+
+    if run_deploy_preflight_fixture false 500 500 true "$FIXTURE_DIR/preflight-output"; then
+        fail "Deploy accepts an admission-injected runner resource budget"
+    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+        fail "Deploy reaches Helm after an unsafe admission mutation"
+    else
+        pass "Admission-injected competing budgets prevent Helm"
     fi
 }
 
@@ -635,6 +1182,11 @@ assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizin
 assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm upgrade --install arc' Helm '^helm upgrade --install arc '
 assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation' '^(curl|gh) .*actions/runner-groups'
 assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback' '^helm rollback '
+assert_trust_boundary_fixtures
+assert_autoscaler_diagnostic_fixtures
+assert_deploy_operation_and_preflight_contract
+assert_deploy_requires_cotenancy_acceptance
+assert_deploy_preflight_fixtures
 echo ""
 
 echo "======================================================"
