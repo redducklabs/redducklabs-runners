@@ -765,6 +765,7 @@ PY
         export FIXTURE_POOL_WORKLOAD_LABEL="${FIXTURE_POOL_WORKLOAD_LABEL:-ci-cd}"
         export FIXTURE_POOL_TAINT_VALUE="${FIXTURE_POOL_TAINT_VALUE:-true}"
         export FIXTURE_POOL_TAINT_EFFECT="${FIXTURE_POOL_TAINT_EFFECT:-NoSchedule}"
+        export FIXTURE_PROVIDER_TAINT_STYLE="${FIXTURE_PROVIDER_TAINT_STYLE:-lowercase}"
         export FIXTURE_POOL_EXTRA_LABEL="${FIXTURE_POOL_EXTRA_LABEL:-false}"
         export FIXTURE_POOL_EXTRA_TAINT="${FIXTURE_POOL_EXTRA_TAINT:-false}"
         export FIXTURE_NODE_WORKLOAD_LABEL="${FIXTURE_NODE_WORKLOAD_LABEL:-ci-cd}"
@@ -960,13 +961,18 @@ PY
                         count=$FIXTURE_POOL_RACE_COUNT
                         pool_id=$FIXTURE_SECOND_POOL_ID
                     fi
-                    local extra_label extra_taint
+                    local extra_label extra_taint taint_key taint_value_key taint_effect_key
                     extra_label=""; extra_taint=""
                     [ "$FIXTURE_POOL_EXTRA_LABEL" = true ] && extra_label=',"unexpected":"value"'
-                    [ "$FIXTURE_POOL_EXTRA_TAINT" = true ] && extra_taint=',{"key":"unexpected","value":"true","effect":"NoSchedule"}'
-                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"%s},"taints":[{"key":"github-runner","value":"%s","effect":"%s"}%s]}]\n' \
+                    taint_key=key; taint_value_key=value; taint_effect_key=effect
+                    if [ "$FIXTURE_PROVIDER_TAINT_STYLE" = uppercase ]; then
+                        taint_key=Key; taint_value_key=Value; taint_effect_key=Effect
+                    fi
+                    [ "$FIXTURE_POOL_EXTRA_TAINT" = true ] && extra_taint=",{\"${taint_key}\":\"unexpected\",\"${taint_value_key}\":\"true\",\"${taint_effect_key}\":\"NoSchedule\"}"
+                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"%s},"taints":[{"%s":"github-runner","%s":"%s","%s":"%s"}%s]}]\n' \
                       "$pool_id" "$FIXTURE_POOL_MIN" "$max" "$count" "$FIXTURE_POOL_SIZE" \
-                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$extra_label" "$FIXTURE_POOL_TAINT_VALUE" "$FIXTURE_POOL_TAINT_EFFECT" "$extra_taint" ; return 0 ;;
+                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$extra_label" "$taint_key" "$taint_value_key" \
+                      "$FIXTURE_POOL_TAINT_VALUE" "$taint_effect_key" "$FIXTURE_POOL_TAINT_EFFECT" "$extra_taint" ; return 0 ;;
             esac
             return 0
         }
@@ -2609,10 +2615,12 @@ assert_node_pool_no_removal_contract() {
     FIXTURE_SECOND_NODE_UID=fixture-node-a-uid
     FIXTURE_SECOND_HELM_GROUP=redducklabs-private-runners
     FIXTURE_SECOND_ASRS_GROUP=redducklabs-private-runners
+    FIXTURE_PROVIDER_TAINT_STYLE=uppercase
     FIXTURE_FORCE_LEGACY=true
     export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
     export FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
     export FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
+    export FIXTURE_PROVIDER_TAINT_STYLE
     export FIXTURE_FORCE_LEGACY
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
@@ -2691,6 +2699,7 @@ live ASRS state drift|FIXTURE_SECOND_ASRS_GROUP|foreign-runner-group
 CASES
     FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count
     unset FIXTURE_FORCE_LEGACY
+    unset FIXTURE_PROVIDER_TAINT_STYLE
     unset FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
     unset FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
 }
