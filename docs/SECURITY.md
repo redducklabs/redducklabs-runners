@@ -1,5 +1,7 @@
 # Security Guide - Red Duck Labs GitHub Actions Runners
 
+**Last Updated:** September 7, 2026
+
 This document outlines security best practices and guidelines for the Red Duck Labs GitHub Actions self-hosted runners.
 
 ## 🔒 Core Security Principles

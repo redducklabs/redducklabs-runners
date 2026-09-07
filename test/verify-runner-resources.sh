@@ -297,6 +297,11 @@ for job in (document.get("jobs") or {}).values():
             shell = step["run"]
             replacements = {
                 "github.event.inputs.action": "scale-custom",
+                "inputs.action": "scale-custom",
+                "inputs.apply": "true",
+                "inputs.min_nodes": min_nodes,
+                "inputs.max_nodes": max_nodes,
+                "inputs.pool_name": "github-runners-pool-16g",
                 "inputs.operation": "deploy",
                 "inputs.accept_privileged_runner_co_tenancy": "true",
                 "inputs.rollback_revision": "7",
@@ -327,6 +332,7 @@ for job in (document.get("jobs") or {}).values():
                 "steps.validate.outputs.max_nodes": max_nodes,
                 "steps.validate.outputs.min_nodes": min_nodes,
                 "steps.validate.outputs.pool_name": "github-runners-pool-16g",
+                "steps.validate.outputs.apply": "true",
                 "steps.resolve.outputs.cluster_id": "fixture-cluster",
                 "steps.resolve.outputs.pool_id": "fixture-pool",
                 "github.repository_owner": "redducklabs",
@@ -371,6 +377,11 @@ for job in (document.get("jobs") or {}).values():
             continue
         replacements = {
             "github.event.inputs.expected_sha": expected_sha,
+            "inputs.action": "scale-custom",
+            "inputs.apply": "true",
+            "inputs.min_nodes": min_nodes,
+            "inputs.max_nodes": max_nodes,
+            "inputs.pool_name": "github-runners-pool-16g",
             "inputs.operation": "deploy",
             "inputs.accept_privileged_runner_co_tenancy": "true",
             "inputs.rollback_revision": "7",
@@ -396,6 +407,8 @@ for job in (document.get("jobs") or {}).values():
             "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "steps.validate.outputs.max_nodes": max_nodes,
             "steps.validate.outputs.min_nodes": min_nodes,
+            "steps.validate.outputs.pool_name": "github-runners-pool-16g",
+            "steps.validate.outputs.apply": "true",
             "steps.resolve.outputs.cluster_id": "fixture-cluster",
             "steps.resolve.outputs.pool_id": "fixture-pool",
         }
@@ -425,6 +438,11 @@ run_fixture() {  # script, mutation log, output log
     local fixture_script=$1 mutation_log=$2 output_log=$3
     : > "$FIXTURE_DIR/sha-reads"
     : > "$FIXTURE_DIR/helm-reads"
+    : > "$FIXTURE_DIR/github-output"
+    : > "$FIXTURE_DIR/github-summary"
+    : > "$FIXTURE_DIR/pool-read-count"
+    rm -f "$FIXTURE_DIR/pool-updated"
+    rm -f "$FIXTURE_DIR/helm-updated"
     cat > "$FIXTURE_DIR/rollback-manifest.yaml" <<'YAML'
 apiVersion: actions.github.com/v1alpha1
 kind: AutoscalingRunnerSet
@@ -455,6 +473,7 @@ YAML
         export CLUSTER_NAME=redducklabs-cluster
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
         export RELEASE_NAME=redducklabs-runners
+        export RUNNER_SCALE_SET_NAME=redducklabs-runners
         export ARC_CHART_VERSION=0.14.2
         export FIXTURE_ACTUAL_SHA
         export FIXTURE_MUTATION_LOG="$mutation_log"
@@ -463,6 +482,16 @@ YAML
         export FIXTURE_ROLLBACK_MANIFEST="$FIXTURE_DIR/rollback-manifest.yaml"
         export FIXTURE_ROLLBACK_INVALID="${FIXTURE_ROLLBACK_INVALID:-none}"
         export FIXTURE_POOL_MIN FIXTURE_POOL_MAX FIXTURE_POOL_COUNT
+        export FIXTURE_POOL_SIZE="${FIXTURE_POOL_SIZE:-s-8vcpu-16gb}"
+        export FIXTURE_READY_NODES="${FIXTURE_READY_NODES:-2}"
+        export FIXTURE_SCALE_DEMAND="${FIXTURE_SCALE_DEMAND:-2}"
+        export FIXTURE_PLATFORM_STATE="${FIXTURE_PLATFORM_STATE:-ready}"
+        export FIXTURE_TRUST_FAILURE="${FIXTURE_TRUST_FAILURE:-false}"
+        export FIXTURE_HELM_MAX="${FIXTURE_HELM_MAX:-2}"
+        export FIXTURE_HELM_UPDATED="$FIXTURE_DIR/helm-updated"
+        export FIXTURE_POOL_RACE_COUNT="${FIXTURE_POOL_RACE_COUNT:-$FIXTURE_POOL_COUNT}"
+        export FIXTURE_POOL_READ_COUNT="$FIXTURE_DIR/pool-read-count"
+        export FIXTURE_POOL_UPDATED="$FIXTURE_DIR/pool-updated"
         git() {
             if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
                 printf 'git %s\n' "$*" >> "$FIXTURE_SHA_READ_LOG"
@@ -472,12 +501,20 @@ YAML
             command git "$@"
         }
         helm() {
+            if [ "$1" = list ]; then
+                if [[ " $* " == *" -n arc-systems "* ]]; then
+                    echo '[{"name":"arc","chart":"gha-runner-scale-set-controller-0.14.2","status":"deployed"}]'
+                else
+                    echo '[{"name":"redducklabs-runners","chart":"gha-runner-scale-set-0.14.2","status":"deployed"}]'
+                fi
+                return 0
+            fi
             if [ "$1" = history ]; then
                 echo "helm $*" >> "$FIXTURE_HELM_READ_LOG"
                 if [ "$FIXTURE_ROLLBACK_INVALID" = chart ]; then
                     echo '[{"revision":7,"chart":"gha-runner-scale-set-0.13.0","status":"superseded"}]'
                 else
-                    echo '[{"revision":7,"chart":"gha-runner-scale-set-0.14.2","status":"superseded"}]'
+                    echo '[{"revision":7,"chart":"gha-runner-scale-set-0.14.2","status":"superseded"},{"revision":8,"chart":"gha-runner-scale-set-0.14.2","status":"deployed"}]'
                 fi
                 return 0
             fi
@@ -485,6 +522,8 @@ YAML
                 echo "helm $*" >> "$FIXTURE_HELM_READ_LOG"
                 if [ "$FIXTURE_ROLLBACK_INVALID" = manifest ]; then
                     sed 's/memory: 5Gi/memory: 4Gi/g' "$FIXTURE_ROLLBACK_MANIFEST"
+                elif [ ! -e "$FIXTURE_HELM_UPDATED" ] && [ "$FIXTURE_HELM_MAX" != 2 ]; then
+                    sed "s/maxRunners: 2/maxRunners: $FIXTURE_HELM_MAX/" "$FIXTURE_ROLLBACK_MANIFEST"
                 else
                     command cat "$FIXTURE_ROLLBACK_MANIFEST"
                 fi
@@ -492,30 +531,67 @@ YAML
             fi
             case " $* " in
                 *" rollback "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG"; export FIXTURE_ROLLBACK_ACTIVE=true ;;
-                *" upgrade "*|*" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
+                *" upgrade "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ; : > "$FIXTURE_HELM_UPDATED" ;;
+                *" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             if [ "$1" = "get" ] && [ "$2" = "values" ]; then
                 echo "helm $*" >> "$FIXTURE_HELM_READ_LOG"
                 if [ "$FIXTURE_ROLLBACK_INVALID" = values ]; then
                     echo '{"minRunners":2,"maxRunners":4,"runnerGroup":"redducklabs-private-runners"}'
                 else
-                    echo '{"minRunners":2,"maxRunners":2,"runnerGroup":"redducklabs-private-runners","template":{"spec":{"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}'
+                    local helm_max=$FIXTURE_HELM_MAX
+                    if [ -e "$FIXTURE_HELM_UPDATED" ]; then helm_max=2; fi
+                    printf '{"minRunners":2,"maxRunners":%s,"runnerGroup":"redducklabs-private-runners","template":{"spec":{"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}\n' "$helm_max"
                 fi
             fi
             return 0
         }
         doctl() {
             case " $* " in
-                *" node-pool update "*) echo "doctl $*" >> "$FIXTURE_MUTATION_LOG" ; return 0 ;;
+                *" node-pool update "*) echo "doctl $*" >> "$FIXTURE_MUTATION_LOG" ; : > "$FIXTURE_POOL_UPDATED" ; return 0 ;;
                 *" cluster list "*) echo '[{"name":"redducklabs-cluster","id":"fixture-cluster"}]' ; return 0 ;;
-                *" node-pool list "*) printf '[{"id":"fixture-pool","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"s-8vcpu-16gb","auto_scale":true,"labels":{"node-type":"github-runner"},"taints":[{"key":"github-runner"}]}]\n' "$FIXTURE_POOL_MIN" "$FIXTURE_POOL_MAX" "$FIXTURE_POOL_COUNT" ; return 0 ;;
+                *" node-pool list "*)
+                    local reads max count
+                    reads=$(wc -l < "$FIXTURE_POOL_READ_COUNT")
+                    echo read >> "$FIXTURE_POOL_READ_COUNT"
+                    max=$FIXTURE_POOL_MAX
+                    count=$FIXTURE_POOL_COUNT
+                    if [ -e "$FIXTURE_POOL_UPDATED" ]; then max=2; fi
+                    if [ "$reads" -eq 1 ]; then count=$FIXTURE_POOL_RACE_COUNT; fi
+                    printf '[{"id":"fixture-pool","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner"},"taints":[{"key":"github-runner"}]}]\n' "$FIXTURE_POOL_MIN" "$max" "$count" "$FIXTURE_POOL_SIZE" ; return 0 ;;
             esac
             return 0
         }
         kubectl() {
             case " $* " in
                 *" apply "*|*" create "*|*" delete "*|*" patch "*) echo "kubectl $*" >> "$FIXTURE_MUTATION_LOG" ;;
-                *" get nodes "*) echo '{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' ; return 0 ;;
+                *" get namespace "*|*" get secret "*|*" get serviceaccount "*)
+                    [ "$FIXTURE_PLATFORM_STATE" != missing ]
+                    return
+                    ;;
+                *" get crd autoscalingrunnersets.actions.github.com "*)
+                    if [ "$FIXTURE_PLATFORM_STATE" = missing ]; then return 1; fi
+                    echo '{"status":{"conditions":[{"type":"Established","status":"True"}]}}'
+                    return 0
+                    ;;
+                *" get deployment "*)
+                    if [ "$FIXTURE_PLATFORM_STATE" = stale ]; then
+                        echo '{"items":[{"metadata":{"generation":2},"spec":{"replicas":1},"status":{"observedGeneration":1,"readyReplicas":0,"availableReplicas":0}}]}'
+                    else
+                        echo '{"items":[{"metadata":{"generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"readyReplicas":1,"availableReplicas":1}}]}'
+                    fi
+                    return 0
+                    ;;
+                *" get nodes "*)
+                    if [ "$FIXTURE_READY_NODES" = 2 ]; then
+                        echo '{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}'
+                    else
+                        echo '{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}'
+                    fi
+                    return 0
+                    ;;
+                *" get pods "*) echo '{"items":[]}' ; return 0 ;;
+                *" get ephemeralrunnersets.actions.github.com "*) printf '{"items":[{"spec":{"replicas":%s}}]}\n' "$FIXTURE_SCALE_DEMAND" ; return 0 ;;
             esac
             return 0
         }
@@ -527,6 +603,9 @@ YAML
             return 0
         }
         gh() {
+            if [ "$FIXTURE_TRUST_FAILURE" = true ] && [[ " $* " == *" runner-groups"* ]]; then
+                return 1
+            fi
             if [[ " $* " == *" api "* ]] \
                && { [[ " $* " == *" -X POST "* ]] || [[ " $* " == *" -X PATCH "* ]] \
                    || [[ " $* " == *" -X PUT "* ]] || [[ " $* " == *" -X DELETE "* ]] \
@@ -677,8 +756,10 @@ scale_steps = workflow['jobs']['scale']['steps']
 capacity_index = next(index for index, step in enumerate(scale_steps) if step.get('name') == 'Check runner pool capacity')
 helm_steps = [step for step in scale_steps if 'helm upgrade ' in step.get('run', '')]
 helm_indices = [index for index, step in enumerate(scale_steps) if 'helm upgrade ' in step.get('run', '')]
-if len(helm_steps) != 4 or any('--version "${ARC_CHART_VERSION}"' not in step['run'] for step in helm_steps):
+if len(helm_steps) != 5 or any('--version "${ARC_CHART_VERSION}"' not in step['run'] for step in helm_steps):
     raise SystemExit('every Scale Helm upgrade must use ARC_CHART_VERSION')
+if any('--set runnerGroup=redducklabs-private-runners' not in step['run'] for step in helm_steps):
+    raise SystemExit('every Scale Helm upgrade must preserve the private runner group')
 if any(capacity_index >= index for index in helm_indices):
     raise SystemExit('capacity gate must run before every Scale Helm upgrade')
 
@@ -1139,7 +1220,7 @@ if any(token in trust_shell for token in ('kubectl ', 'helm ', 'doctl ')):
     raise SystemExit('prepare-trust-boundary job has a cluster/provider command')
 if 'trust-boundary' not in ([deploy.get('needs')] if isinstance(deploy.get('needs'), str) else deploy.get('needs', [])):
     raise SystemExit('deployment does not depend on trust reconciliation')
-if "needs.validate-inputs.outputs.operation != 'prepare-trust-boundary'" not in deploy.get('if', ''):
+if "needs.validate-inputs.outputs.operation == 'deploy'" not in deploy.get('if', ''):
     raise SystemExit('prepare-trust-boundary does not stop before the deployment job')
 
 steps = deploy.get('steps') or []
@@ -1149,10 +1230,10 @@ for job in jobs.values():
             raise SystemExit(f'raw workflow_dispatch input interpolation in shell step: {step.get("name")}')
 preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and preflight candidate')
 deploy_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Deploy runners')
-rollback_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Rollback runners')
 preflight = steps[preflight_index].get('run', '')
 deploy_shell = steps[deploy_index].get('run', '')
-rollback = steps[rollback_index].get('run', '')
+rollback_steps = jobs.get('rollback', {}).get('steps', [])
+rollback = next(step for step in rollback_steps if step.get('name') == 'Rollback runners').get('run', '')
 if preflight.count('helm template ') != 1:
     raise SystemExit('candidate must be rendered exactly once')
 if preflight.count('kubectl apply --server-side --dry-run=server') != 2:
@@ -1556,6 +1637,307 @@ assert_deploy_preflight_fixtures() {
     fi
 }
 
+assert_hostile_dispatch_inputs_are_data() {
+    local workflow step label script sentinel payload
+    sentinel="$FIXTURE_DIR/hostile-final-wave-executed"
+    payload='$(touch '"$sentinel"')'
+    while IFS='|' read -r workflow step label; do
+        script="$FIXTURE_DIR/hostile-$(basename "$workflow").sh"
+        : > "$script"
+        rm -f "$sentinel"
+        materialize_workflow_step "$workflow" "$step" "$payload" 4 2 2 "$script" || {
+            fail "$label hostile input fixture could not be materialized"
+            continue
+        }
+        : > "$FIXTURE_DIR/mutations"
+        run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" || true
+        if [ -e "$sentinel" ]; then
+            fail "$label executes hostile expected_sha input as shell code"
+        elif [ -s "$FIXTURE_DIR/mutations" ]; then
+            fail "$label reaches mutation while rejecting hostile expected_sha"
+        else
+            pass "$label treats hostile expected_sha as inert data"
+        fi
+    done <<'CASES'
+.github/workflows/scale-runners.yml|Validate and sanitize inputs|Scale Runners
+.github/workflows/node-pool-sizing.yml|Validate inputs against deploy/dind-values.yaml|Node Pool Sizing
+CASES
+}
+
+assert_rollout_quiesce_contract() {
+    if python3 - <<'PY'
+import yaml
+
+with open('.github/workflows/scale-runners.yml', encoding='utf-8') as stream:
+    workflow = yaml.safe_load(stream)
+options = (workflow.get('on') or workflow[True])['workflow_dispatch']['inputs']['action']['options']
+if 'rollout-quiesce' not in options:
+    raise SystemExit('rollout-quiesce action is missing')
+steps = workflow['jobs']['scale']['steps']
+step = next(item for item in steps if item.get('name') == 'Quiesce rollout and record rollback revision')
+shell = step['run']
+required = [
+    '--version "${ARC_CHART_VERSION}"', '--set minRunners=2', '--set maxRunners=2',
+    '--set runnerGroup=redducklabs-private-runners', 'ephemeralrunnersets.actions.github.com',
+    'Pending', 'helm history', 'rollback_revision=',
+]
+missing = [item for item in required if item not in shell]
+if missing:
+    raise SystemExit(f'quiesce step missing: {missing}')
+capacity = next(item for item in steps if item.get('name') == 'Check runner pool capacity')['run']
+if 's-8vcpu-16gb' not in capacity or 'rollout-quiesce' not in capacity:
+    raise SystemExit('quiesce transition is not admitted by the exact-size capacity gate')
+PY
+    then
+        pass "Scale Runners exposes a pinned quiesce transition and rollback revision"
+    else
+        fail "Scale Runners lacks the executable rollout-quiesce transition"
+    fi
+
+    local script="$FIXTURE_DIR/rollout-quiesce.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/scale-runners.yml \
+      'Check runner pool capacity' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
+      || ! materialize_workflow_step .github/workflows/scale-runners.yml \
+      'Quiesce rollout and record rollback revision' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Rollout-quiesce functional fixture could not be materialized"
+        return
+    fi
+    sed -i 's/export ACTION=fixture/export ACTION=rollout-quiesce/' "$script"
+    local original_max=$FIXTURE_POOL_MAX
+    for FIXTURE_POOL_MAX in 8 2; do
+        FIXTURE_HELM_MAX=$FIXTURE_POOL_MAX
+        export FIXTURE_POOL_MAX
+        export FIXTURE_HELM_MAX
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+          && grep -Eq '^helm upgrade .*--set minRunners=2 .*--set maxRunners=2 .*--set runnerGroup=redducklabs-private-runners' "$FIXTURE_DIR/mutations" \
+          && grep -q '^rollback_revision=' "$FIXTURE_DIR/github-output"; then
+            pass "Rollout-quiesce accepts safe pool max=${FIXTURE_POOL_MAX} and emits a rollback revision"
+        else
+            fail "Rollout-quiesce cannot execute from safe pool max=${FIXTURE_POOL_MAX}"
+        fi
+    done
+    FIXTURE_POOL_MAX=$original_max FIXTURE_HELM_MAX=2
+}
+
+assert_node_pool_no_removal_contract() {
+    local script="$FIXTURE_DIR/node-pool-no-removal.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/node-pool-sizing.yml \
+      'Reduce pool maximum without node removal' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Node-pool no-removal functional fixture could not be materialized"
+        return
+    fi
+
+    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT
+    FIXTURE_POOL_MAX=8 FIXTURE_POOL_COUNT=2 FIXTURE_POOL_SIZE=s-8vcpu-16gb
+    FIXTURE_READY_NODES=2 FIXTURE_SCALE_DEMAND=2 FIXTURE_POOL_RACE_COUNT=2
+    export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+      && grep -Eq '^doctl .*node-pool update .*--max-nodes 2' "$FIXTURE_DIR/mutations"; then
+        pass "Node Pool Sizing changes only max_nodes for a safe 2/8 to 2/2 transition"
+    else
+        fail "Node Pool Sizing cannot perform the safe max8 transition"
+    fi
+
+    local scenario variable value
+    while IFS='|' read -r scenario variable value; do
+        FIXTURE_POOL_MAX=8 FIXTURE_POOL_COUNT=2 FIXTURE_POOL_SIZE=s-8vcpu-16gb
+        FIXTURE_READY_NODES=2 FIXTURE_SCALE_DEMAND=2 FIXTURE_POOL_RACE_COUNT=2
+        printf -v "$variable" '%s' "$value"
+        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Node Pool Sizing accepts unsafe ${scenario}"
+        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
+            fail "Node Pool Sizing mutates despite unsafe ${scenario}"
+        else
+            pass "Node Pool Sizing rejects unsafe ${scenario} before mutation"
+        fi
+    done <<'CASES'
+count drift|FIXTURE_POOL_COUNT|3
+NotReady node|FIXTURE_READY_NODES|1
+ARC demand|FIXTURE_SCALE_DEMAND|3
+pool size|FIXTURE_POOL_SIZE|s-16vcpu-32gb
+pre-mutation count race|FIXTURE_POOL_RACE_COUNT|3
+CASES
+    FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count
+}
+
+assert_prepared_platform_prerequisites() {
+    local script="$FIXTURE_DIR/prepared-platform.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Verify prepared platform prerequisites' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Prepared-platform fixture could not be materialized"
+        return
+    fi
+
+    local state
+    for state in missing stale; do
+        FIXTURE_PLATFORM_STATE=$state
+        export FIXTURE_PLATFORM_STATE
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Deploy accepts ${state} platform prerequisites"
+        elif [ -s "$FIXTURE_DIR/mutations" ]; then
+            fail "Deploy mutates while rejecting ${state} platform prerequisites"
+        else
+            pass "Deploy rejects ${state} platform prerequisites before ASRS preflight"
+        fi
+    done
+
+    FIXTURE_PLATFORM_STATE=ready
+    export FIXTURE_PLATFORM_STATE
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+      && [ ! -s "$FIXTURE_DIR/mutations" ]; then
+        pass "Deploy accepts a prepared and Ready platform without mutation"
+    else
+        fail "Deploy rejects healthy prepared-platform prerequisites"
+    fi
+}
+
+assert_rollback_recovery_route() {
+    local script="$FIXTURE_DIR/rollback-recovery-route.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
+      || ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Verify trust and pool after rollback' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Rollback recovery-route fixture could not be materialized"
+        return
+    fi
+
+    FIXTURE_TRUST_FAILURE=true FIXTURE_READY_NODES=1
+    export FIXTURE_TRUST_FAILURE FIXTURE_READY_NODES
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Rollback post-verification fixture unexpectedly succeeds"
+    elif grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
+        pass "Trust API and node-health failures occur only after Helm rollback"
+    else
+        fail "Trust API or node-health failure prevents Helm rollback"
+    fi
+    FIXTURE_TRUST_FAILURE=false FIXTURE_READY_NODES=2
+    export FIXTURE_TRUST_FAILURE FIXTURE_READY_NODES
+}
+
+assert_rollback_ignores_deploy_only_inputs() {
+    local script="$FIXTURE_DIR/rollback-input-isolation.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Rollback input-isolation fixture could not be materialized"
+        return
+    fi
+    sed -i \
+      -e 's/export INPUT_OPERATION=deploy/export INPUT_OPERATION=rollback/' \
+      -e 's/export INPUT_MAX_RUNNERS=4/export INPUT_MAX_RUNNERS=not-a-deploy-count/' \
+      -e 's#export INPUT_RUNNER_IMAGE=.*#export INPUT_RUNNER_IMAGE=not-a-deploy-image#' \
+      "$script"
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+      && [ ! -s "$FIXTURE_DIR/mutations" ]; then
+        pass "Rollback validation depends only on rollback inputs"
+    else
+        fail "Deploy-only runner inputs can block rollback validation"
+    fi
+}
+
+assert_final_workflow_graph_and_prerequisites() {
+    if python3 - <<'PY'
+import pathlib
+import yaml
+
+def load(path):
+    with open(path, encoding='utf-8') as stream:
+        return yaml.safe_load(stream)
+
+scale = load('.github/workflows/scale-runners.yml')
+pool = load('.github/workflows/node-pool-sizing.yml')
+deploy = load('.github/workflows/deploy-runners.yml')
+platform = load('.github/workflows/prepare-runner-platform.yml')
+for path, workflow in (
+    ('scale-runners.yml', scale), ('node-pool-sizing.yml', pool),
+):
+    for job in workflow['jobs'].values():
+        for step in job.get('steps', []):
+            if '${{ github.event.inputs.' in step.get('run', '') or '${{ inputs.' in step.get('run', ''):
+                raise SystemExit(f'{path} contains raw dispatch input interpolation in {step.get("name")}')
+
+trust = deploy['jobs']['trust-boundary']
+if "operation == 'rollback'" in str(trust.get('if', '')) or "operation != 'rollback'" not in str(trust.get('if', '')):
+    raise SystemExit('trust reconciliation is not limited away from rollback')
+rollback = deploy['jobs'].get('rollback')
+if not rollback or rollback.get('needs') != 'validate-inputs':
+    raise SystemExit('rollback must be a separate job needing only validated inputs')
+if 'trust-boundary' in str(rollback.get('needs')):
+    raise SystemExit('rollback depends on trust mutation')
+rollback_steps = rollback.get('steps', [])
+rollback_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Rollback runners')
+post_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Verify trust and pool after rollback')
+if rollback_index >= post_index:
+    raise SystemExit('post-recovery checks precede Helm rollback')
+before_rollback = '\n'.join(item.get('run', '') for item in rollback_steps[:rollback_index])
+if any(token in before_rollback for token in
+       ('verify-runner-trust-boundary.sh', 'get nodes', 'node-pool list')):
+    raise SystemExit('trust or capacity health can block rollback')
+deploy_job = deploy['jobs']['deploy']
+if "operation == 'deploy'" not in str(deploy_job.get('if', '')):
+    raise SystemExit('deployment job is not deploy-only')
+steps = deploy_job['steps']
+pre = next(i for i, item in enumerate(steps) if item.get('name') == 'Verify prepared platform prerequisites')
+render = next(i for i, item in enumerate(steps) if item.get('name') == 'Render and preflight candidate')
+if pre >= render:
+    raise SystemExit('prepared-platform checks do not precede ASRS dry-run')
+pre_shell = steps[pre]['run']
+for token in ('get namespace', 'get crd autoscalingrunnersets.actions.github.com',
+              'helm list -n arc-systems', 'gha-runner-scale-set-controller-',
+              'readyReplicas', 'do-registry-secret'):
+    if token not in pre_shell:
+        raise SystemExit(f'platform prerequisite missing: {token}')
+for step in steps:
+    if step.get('name') in {'Create namespace if not exists', 'Sync ARC CRDs',
+                            'Install or upgrade ARC controller', 'Configure registry access'}:
+        raise SystemExit(f'deploy still mutates platform prerequisite: {step.get("name")}')
+
+platform_shell = '\n'.join(
+    step.get('run', '') for job in platform['jobs'].values()
+    for step in job.get('steps', [])
+)
+for token in ('kubectl apply --server-side --force-conflicts',
+              'gha-runner-scale-set-controller', 'helm upgrade --install arc'):
+    if token not in platform_shell:
+        raise SystemExit(f'explicit platform preparation path missing: {token}')
+platform_steps = platform['jobs']['prepare-platform']['steps']
+platform_guard = next(i for i, item in enumerate(platform_steps)
+                      if item.get('name') == 'Revalidate expected SHA')
+platform_mutation = next(i for i, item in enumerate(platform_steps)
+                         if 'kubectl apply' in item.get('run', '')
+                         or 'helm upgrade' in item.get('run', ''))
+if platform_guard >= platform_mutation:
+    raise SystemExit('platform preparation mutation is not SHA guarded')
+
+status_text = pathlib.Path('.github/workflows/runner-status.yml').read_text(encoding='utf-8')
+if 'gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100"' not in status_text:
+    raise SystemExit('Runner Status registration enumeration is not paginated/slurped')
+local_text = pathlib.Path('scripts/scale-runners.sh').read_text(encoding='utf-8')
+if '--paginate --slurp' not in local_text or '| head -10' in local_text:
+    raise SystemExit('local status runner aggregation is pagination/pipefail unsafe')
+readme = pathlib.Path('README.md').read_text(encoding='utf-8')
+if '8 maximum by default' in readme or 'dedicated memory reservation for the Docker daemon' in readme:
+    raise SystemExit('README retains superseded runner capacity/resource claims')
+PY
+    then
+        pass "Workflow graph, prepared-platform boundary, pagination, and docs are aligned"
+    else
+        fail "Final workflow graph, prerequisite, pagination, or documentation contract is incomplete"
+    fi
+}
+
 assert_rejects_oversized_max 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs'
 assert_rejects_oversized_max 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs'
 assert_node_pool_bounds
@@ -1564,8 +1946,12 @@ assert_scale_capacity_gate
 assert_scale_workflow_static_contract
 
 assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' 'helm upgrade' Helm '^helm upgrade .*gha-runner-scale-set'
+FIXTURE_POOL_MAX=8
 assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizing.yml 'Validate inputs against deploy/dind-values.yaml' 'node-pool update' doctl '^doctl kubernetes cluster node-pool update '
-assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm upgrade --install arc' Helm '^helm upgrade --install arc '
+FIXTURE_POOL_MAX=2
+printf '#!/usr/bin/env bash\ncat\n' > "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
+chmod 0700 "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
+assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm upgrade --install "${RELEASE_NAME}"' Helm '^helm upgrade --install redducklabs-runners '
 assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation' '^(curl|gh) .*actions/runner-groups'
 assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback' '^helm rollback '
 assert_trust_boundary_fixtures
@@ -1575,6 +1961,13 @@ assert_hostile_inputs_are_data
 assert_deploy_requires_cotenancy_acceptance
 assert_rollback_revision_prevalidation
 assert_deploy_preflight_fixtures
+assert_hostile_dispatch_inputs_are_data
+assert_rollout_quiesce_contract
+assert_node_pool_no_removal_contract
+assert_prepared_platform_prerequisites
+assert_rollback_recovery_route
+assert_rollback_ignores_deploy_only_inputs
+assert_final_workflow_graph_and_prerequisites
 echo ""
 
 echo "======================================================"

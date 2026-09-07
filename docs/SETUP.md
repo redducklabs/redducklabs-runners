@@ -21,7 +21,19 @@ scale, or roll back the runner fleet.
 | `RUNNER_TOKEN` | Personal Access Token for runner registration | [Create here](https://github.com/settings/tokens/new?scopes=admin:org,repo,workflow) with scopes: `admin:org`, `repo`, `workflow` |
 | `DO_TOKEN` | DigitalOcean API token | [DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens) → Generate New Token |
 
-### Step 2: Deploy Runners
+### Step 2: Prepare the Platform
+
+For initial setup, or a deliberate controller/CRD reconciliation, select
+**"Prepare Runner Platform"**, provide the exact reviewed SHA, and confirm the
+mutation. This separate workflow owns the `arc-systems`/`arc-runners`
+namespaces, registry pull secret, no-permission service account, pinned ARC
+CRDs, and pinned ARC controller.
+
+Normal deploy and rollback runs never create or upgrade these platform
+prerequisites. They fail closed when the prepared platform is missing, stale,
+or not Ready.
+
+### Step 3: Deploy Runners
 
 1. Go to the **Actions** tab in your repository
 2. Select **"Deploy GitHub Runners"** workflow from the left sidebar
@@ -35,7 +47,7 @@ scale, or roll back the runner fleet.
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
 
-### Step 3: Monitor Deployment
+### Step 4: Monitor Deployment
 
 The reviewed workflow validates the expected SHA, reconciles the private runner
 group, performs server-side dry-runs of the rendered `AutoscalingRunnerSet` and
@@ -43,11 +55,12 @@ representative Pod, checks live node capacity, then deploys only when those
 gates pass. The `prepare-trust-boundary` operation performs the runner-group
 and public-workflow checks without Helm, Kubernetes, or DigitalOcean mutation.
 
-### Step 4: Manage Runners
+### Step 5: Manage Runners
 
 Use the GitHub Actions workflows to manage your runners:
 
 - **Prepare trust boundary / deploy / rollback**: Actions → "Deploy GitHub Runners" → Run workflow
+- **Initial platform/controller preparation**: Actions → "Prepare Runner Platform" → Run workflow
 - **Node-pool bounds**: Actions → "Node Pool Sizing" → Run workflow (`min_nodes=2`, `max_nodes=2`)
 - **Check Status**: Actions → "Runner Status" → Run workflow
 - **Emergency Stop**: Actions → "Emergency Stop Runners" → Run workflow

@@ -86,14 +86,13 @@ get_status() {
     
     # Get GitHub registration status
     echo "GitHub Registration:"
-    gh api 'orgs/redducklabs/actions/runners' --paginate \
-        --jq '[.runners[] | select(.name | startswith("redducklabs-runners"))] | length' \
-        | xargs -I{} echo "Registered runners: {}"
-    
-    # Show online/offline status
-    gh api 'orgs/redducklabs/actions/runners' --paginate \
-        --jq '.runners[] | select(.name | startswith("redducklabs-runners")) | "\(.name): \(.status)"' \
-        | head -10
+    runner_pages=$(gh api 'orgs/redducklabs/actions/runners?per_page=100' --paginate --slurp)
+    runner_rows=$(jq -c '[.[]?.runners[]? | select(.name | startswith("redducklabs-runners"))]' \
+        <<<"$runner_pages")
+    echo "Registered runners: $(jq 'length' <<<"$runner_rows")"
+
+    # Show at most ten online/offline records without a pipefail-prone head.
+    jq -r '.[0:10][] | "\(.name): \(.status)"' <<<"$runner_rows"
 }
 
 # Main script logic

@@ -151,6 +151,22 @@ jobs:
               exit 1
               ;;
           esac
+
+          # Namespace is the only non-revision dispatch value needed to locate
+          # the rollback release. Deploy-only runner settings must never block
+          # the recovery path.
+          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+            echo "❌ Error: namespace must be a valid DNS-1123 label"
+            exit 1
+          fi
+          if [ "${OPERATION}" = "rollback" ]; then
+            echo "operation=${OPERATION}" >> "${GITHUB_OUTPUT}"
+            echo "expected_sha=${EXPECTED_SHA}" >> "${GITHUB_OUTPUT}"
+            echo "rollback_revision=${ROLLBACK_REVISION}" >> "${GITHUB_OUTPUT}"
+            echo "namespace=${NAMESPACE}" >> "${GITHUB_OUTPUT}"
+            echo "✅ Rollback SHA, revision, and namespace validated"
+            exit 0
+          fi
           
           # Validate min_runners is numeric
           if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
@@ -172,12 +188,6 @@ jobs:
 
           if [ "${MAX_RUNNERS}" -gt 4 ]; then
             echo "❌ Error: max_runners must not exceed the fixed capacity ceiling of 4"
-            exit 1
-          fi
-          
-          # Validate namespace format (DNS-1123 label)
-          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
-            echo "❌ Error: namespace must be a valid DNS-1123 label"
             exit 1
           fi
           
@@ -206,6 +216,7 @@ jobs:
     name: Prepare Private Runner Trust Boundary
     runs-on: ubuntu-latest
     needs: validate-inputs
+    if: needs.validate-inputs.outputs.operation != 'rollback'
     timeout-minutes: 10
 
     steps:
@@ -230,7 +241,9 @@ jobs:
     name: Deploy Self-Hosted Runners
     runs-on: ubuntu-latest
     needs: [validate-inputs, trust-boundary]
-    if: needs.validate-inputs.outputs.operation != 'prepare-trust-boundary'
+    if: >-
+      always() && needs.validate-inputs.outputs.operation == 'deploy'
+      && needs.trust-boundary.result == 'success'
     timeout-minutes: 15
     
     steps:
@@ -315,6 +328,49 @@ jobs:
               sleep 5
             fi
           done
+
+      - name: Verify prepared platform prerequisites
+        if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+        run: |
+          echo "🔎 Verifying the existing prepared runner platform..."
+          kubectl get namespace "${NAMESPACE}" >/dev/null
+          kubectl get secret do-registry-secret -n "${NAMESPACE}" >/dev/null
+          kubectl get serviceaccount redducklabs-runners-gha-rs-no-permission \
+            -n "${NAMESPACE}" >/dev/null
+
+          CRD=$(kubectl get crd autoscalingrunnersets.actions.github.com -o json)
+          if ! jq -e '
+            .status.conditions | any(.type == "Established" and .status == "True")
+          ' <<<"${CRD}" >/dev/null; then
+            echo "❌ Error: AutoscalingRunnerSet CRD is missing or not Established"
+            exit 1
+          fi
+
+          CONTROLLER_RELEASES=$(helm list -n arc-systems -o json)
+          if ! jq -e --arg version "${ARC_CHART_VERSION}" '
+            [.[] | select(.name == "arc"
+              and .chart == ("gha-runner-scale-set-controller-" + $version)
+              and .status == "deployed")] | length == 1
+          ' <<<"${CONTROLLER_RELEASES}" >/dev/null; then
+            echo "❌ Error: prepared ARC controller chart ${ARC_CHART_VERSION} is not deployed"
+            exit 1
+          fi
+
+          CONTROLLER=$(kubectl get deployment -n arc-systems \
+            -l app.kubernetes.io/name=gha-rs-controller -o json)
+          if ! jq -e '
+            .items | length == 1
+            and .[0].status.observedGeneration == .[0].metadata.generation
+            and (.[0].spec.replicas // 1) > 0
+            and (.[0].status.readyReplicas // 0) == (.[0].spec.replicas // 1)
+            and (.[0].status.availableReplicas // 0) == (.[0].spec.replicas // 1)
+          ' <<<"${CONTROLLER}" >/dev/null; then
+            echo "❌ Error: prepared ARC controller is stale or not fully Ready"
+            exit 1
+          fi
+          echo "✅ Prepared platform prerequisites are present and Ready"
       
       - name: Check node pool capacity
         env:
@@ -347,17 +403,19 @@ jobs:
           POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
           POOL_COUNT=$(echo "${POOL_JSON}" | jq -r '.count')
           POOL_AUTOSCALE=$(echo "${POOL_JSON}" | jq -r '.auto_scale')
+          POOL_SIZE=$(echo "${POOL_JSON}" | jq -r '.size')
 
           REQUIRED_NODES=$(( (MAX_RUNNERS + PODS_PER_NODE - 1) / PODS_PER_NODE ))
-          echo "  Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX} count=${POOL_COUNT} auto_scale=${POOL_AUTOSCALE}"
+          echo "  Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX} count=${POOL_COUNT} size=${POOL_SIZE} auto_scale=${POOL_AUTOSCALE}"
           echo "  Requested: minRunners=${MIN_RUNNERS} maxRunners=${MAX_RUNNERS}"
           echo "  Capacity: ${PODS_PER_NODE} pods/node; maxRunners requires ${REQUIRED_NODES} nodes"
 
           if [ "${POOL_MIN}" != "${REQUIRED_POOL_MIN}" ] \
              || [ "${POOL_MAX}" != "${REQUIRED_POOL_MAX}" ] \
              || [ "${POOL_COUNT}" != "2" ] \
+             || [ "${POOL_SIZE}" != "s-8vcpu-16gb" ] \
              || [ "${POOL_AUTOSCALE}" != "true" ]; then
-            echo "❌ Error: runner pool must be auto-scaling at min/max/count 2/2/2; found ${POOL_MIN}/${POOL_MAX}/${POOL_COUNT} auto_scale=${POOL_AUTOSCALE}"
+            echo "❌ Error: runner pool must be s-8vcpu-16gb and auto-scaling at min/max/count 2/2/2; found ${POOL_SIZE} ${POOL_MIN}/${POOL_MAX}/${POOL_COUNT} auto_scale=${POOL_AUTOSCALE}"
             exit 1
           fi
           if [ "${REQUIRED_NODES}" -gt "${POOL_MAX}" ]; then
@@ -884,257 +942,6 @@ jobs:
           PY
           echo "✅ Live API compatibility and per-node headroom preflight passed"
 
-      - name: Rollback runners
-        if: needs.validate-inputs.outputs.operation == 'rollback'
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
-          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
-        run: |
-          ACTUAL_SHA=$(git rev-parse HEAD)
-          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
-            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
-            exit 1
-          fi
-
-          validate_rollback_values() {
-            jq -e '
-              .minRunners == 2 and .maxRunners == 2
-              and .runnerGroup == "redducklabs-private-runners"
-              and ([.template.spec.containers[]? | select(.name=="runner")
-                    | .resources.requests.memory] == ["5Gi"])
-              and ([.template.spec.initContainers[]? | select(.name=="dind")
-                    | .resources.requests.memory] == ["5Gi"])
-            ' >/dev/null
-          }
-
-          validate_rollback_manifest() {
-            python3 - "$1" <<'PY'
-          import sys
-          import yaml
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              matches = [doc for doc in yaml.safe_load_all(stream)
-                         if isinstance(doc, dict) and doc.get("kind") == "AutoscalingRunnerSet"]
-          if len(matches) != 1:
-              raise SystemExit("rollback manifest must contain exactly one AutoscalingRunnerSet")
-          spec = matches[0].get("spec", {})
-          if spec.get("minRunners") != 2 or spec.get("maxRunners") != 2:
-              raise SystemExit("rollback manifest runner bounds are not 2/2")
-          if spec.get("runnerGroup") != "redducklabs-private-runners":
-              raise SystemExit("rollback manifest runner group is not private")
-          pod = spec.get("template", {}).get("spec", {})
-          runners = [item for item in pod.get("containers", []) if item.get("name") == "runner"]
-          dinds = [item for item in pod.get("initContainers", []) if item.get("name") == "dind"]
-          if len(runners) != 1 or len(dinds) != 1:
-              raise SystemExit("rollback manifest runner/DinD template is incomplete")
-          if runners[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
-              raise SystemExit("rollback manifest runner request is not 5Gi")
-          if dinds[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
-              raise SystemExit("rollback manifest DinD request is not 5Gi")
-          PY
-          }
-
-          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(
-              (.revision | tostring) == $revision
-              and .chart == ("gha-runner-scale-set-" + $version)
-              and (.status == "deployed" or .status == "superseded"))] | length == 1
-          ' <<<"${HISTORY}" >/dev/null; then
-            echo "❌ Error: rollback revision is missing, not chart ${ARC_CHART_VERSION}, or not deployable"
-            exit 1
-          fi
-
-          REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" -o json)
-          if ! validate_rollback_values <<<"${REVISION_VALUES}"; then
-            echo "❌ Error: rollback revision values do not preserve 2/2 bounds, private group, and 5Gi+5Gi requests"
-            exit 1
-          fi
-          REVISION_MANIFEST="${RUNNER_TEMP}/rollback-revision-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
-          if ! validate_rollback_manifest "${REVISION_MANIFEST}"; then
-            echo "❌ Error: rollback revision manifest does not preserve the isolated runner template"
-            exit 1
-          fi
-
-          helm rollback "${RELEASE_NAME}" "${REVISION}" \
-            --namespace "${NAMESPACE}" --wait --timeout 300s
-
-          RESTORED=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! validate_rollback_values <<<"${RESTORED}"; then
-            echo "❌ Error: rollback revision does not restore the isolated 5Gi+5Gi, 2/2 private-group configuration"
-            exit 1
-          fi
-          RESTORED_MANIFEST="${RUNNER_TEMP}/rollback-restored-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${RESTORED_MANIFEST}"
-          if ! validate_rollback_manifest "${RESTORED_MANIFEST}"; then
-            echo "❌ Error: rollback live manifest readback does not restore the isolated runner template"
-            exit 1
-          fi
-          bash scripts/verify-runner-trust-boundary.sh \
-            --expected-sha "${EXPECTED_SHA}" --verify-only
-          echo "✅ Rollback restored revision ${REVISION} with the private trust boundary intact"
-
-      - name: Create namespace if not exists
-        if: needs.validate-inputs.outputs.operation == 'deploy'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          echo "📁 Ensuring namespace exists..."
-          
-          if ! kubectl get namespace "${NAMESPACE}" &>/dev/null; then
-            echo "Creating namespace: ${NAMESPACE}"
-            kubectl create namespace "${NAMESPACE}"
-          else
-            echo "Namespace ${NAMESPACE} already exists"
-          fi
-      
-      - name: Configure registry access
-        if: needs.validate-inputs.outputs.operation == 'deploy'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          echo "🔐 Configuring registry access..."
-          
-          # Check if registry secret exists
-          if ! kubectl get secret do-registry-secret -n "${NAMESPACE}" &>/dev/null; then
-            echo "Creating registry secret..."
-            doctl registry kubernetes-manifest | kubectl apply -n "${NAMESPACE}" -f -
-            
-            # Wait for secret to be created
-            kubectl wait --for=condition=complete \
-              --timeout=30s \
-              secret/do-registry-secret \
-              -n "${NAMESPACE}" || echo "Secret may take time to propagate"
-          else
-            echo "Registry secret already exists"
-          fi
-      
-      - name: Report current ARC controller state
-        if: needs.validate-inputs.outputs.operation == 'deploy'
-        run: |
-          echo "🔍 Checking for Actions Runner Controller..."
-
-          if helm list -n arc-systems 2>/dev/null | grep -q arc; then
-            echo "✅ ARC controller release found"
-            helm list -n arc-systems || true
-
-            # Check controller health
-            if kubectl get pods -n arc-systems -l app.kubernetes.io/name=gha-rs-controller --no-headers | grep -q Running; then
-              echo "✅ ARC controller is running"
-            else
-              echo "⚠️ ARC controller pods may not be ready"
-            fi
-          else
-            echo "⚠️ ARC controller not found - will be installed"
-          fi
-
-          echo ""
-          echo "Installed CRD generation (drifts from the chart because Helm"
-          echo "never updates crds/ on upgrade - the next step reconciles it):"
-          kubectl get crd autoscalingrunnersets.actions.github.com \
-            -o jsonpath='{.metadata.annotations.controller-gen\.kubebuilder\.io/version}' 2>/dev/null || echo "(CRD not installed yet)"
-          echo ""
-
-      - name: Sync ARC CRDs
-        if: needs.validate-inputs.outputs.operation == 'deploy'
-        run: |
-          echo "📦 Reconciling ARC CRDs to chart ${ARC_CHART_VERSION}..."
-
-          # WHY THIS STEP EXISTS
-          #
-          # Helm installs a chart's crds/ directory exactly once, on first
-          # install, and NEVER touches it again on `helm upgrade`. That is
-          # documented Helm behaviour, not an ARC quirk. So every ARC chart
-          # upgrade silently leaves the CRDs at whatever generation they were
-          # first installed with, while the controller moves forward. The drift
-          # is invisible until a newer controller writes a field the stale CRD
-          # schema prunes.
-          #
-          # WHY --server-side
-          #
-          # These CRDs are 575 KB - 1.2 MB each (they embed a full PodSpec).
-          # Client-side `kubectl apply` stores the whole manifest in the
-          # kubectl.kubernetes.io/last-applied-configuration annotation, which
-          # is capped at 256 KB, so a plain apply FAILS on them. Server-side
-          # apply carries no such annotation. --force-conflicts takes ownership
-          # of fields whose current field manager is Helm's.
-          CRD_DIR="$(mktemp -d)"
-          helm pull \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
-            --version "${ARC_CHART_VERSION}" \
-            --untar --untardir "${CRD_DIR}"
-
-          CRD_PATH="${CRD_DIR}/gha-runner-scale-set-controller/crds"
-          if [ ! -d "${CRD_PATH}" ]; then
-            echo "❌ Error: no crds/ directory in chart ${ARC_CHART_VERSION}"
-            exit 1
-          fi
-
-          echo "CRDs to apply:"
-          ls -la "${CRD_PATH}"
-
-          kubectl apply --server-side --force-conflicts -f "${CRD_PATH}"
-
-          echo ""
-          echo "✅ CRDs reconciled. Generation now:"
-          kubectl get crd autoscalingrunnersets.actions.github.com \
-            -o jsonpath='{.metadata.annotations.controller-gen\.kubebuilder\.io/version}'
-          echo ""
-
-          rm -rf "${CRD_DIR}"
-
-      - name: Install or upgrade ARC controller
-        if: needs.validate-inputs.outputs.operation == 'deploy'
-        run: |
-          ARC_CHART_VERSION="${ARC_CHART_VERSION:-0.14.2}"
-          echo "📦 Installing/upgrading Actions Runner Controller to ${ARC_CHART_VERSION}..."
-
-          # `helm upgrade --install` (not bare `helm install` behind an
-          # existence check). The previous form only ran when the controller was
-          # ABSENT, which made the pinned chart version dead code on any cluster
-          # that already had ARC: the repo claimed one version while the cluster
-          # ran another, and the controller could never be upgraded through CI.
-          # This form is idempotent and expresses the desired end state, so the
-          # pin above is the single source of truth.
-          #
-          # The controller and scale set charts are released as a matched pair;
-          # both use ARC_CHART_VERSION so they cannot drift apart.
-          kubectl create namespace arc-systems --dry-run=client -o yaml | kubectl apply -f -
-
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Installing/upgrading ARC controller..."
-            if helm upgrade --install arc \
-              --namespace arc-systems \
-              --create-namespace \
-              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
-              --version "${ARC_CHART_VERSION}" \
-              --wait \
-              --timeout 300s; then
-
-              echo "✅ ARC controller at ${ARC_CHART_VERSION}"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to install/upgrade ARC controller"
-              helm status arc -n arc-systems || true
-              kubectl get pods -n arc-systems || true
-              exit 1
-            else
-              echo "⚠️ Failed, retrying in 10s..."
-              sleep 10
-            fi
-          done
-
-          echo "⏳ Waiting for controller to be ready..."
-          kubectl wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=gha-rs-controller \
-            -n arc-systems \
-            --timeout=300s
-
       - name: Deploy runners
         if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
@@ -1224,10 +1031,10 @@ jobs:
           
           # Check with retry logic
           for attempt in 1 2 3; do
-            RESPONSE=$(gh api "orgs/${ORG}/actions/runners" 2>/dev/null)
+            RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null)
             
             if [ $? -eq 0 ]; then
-              RUNNERS=$(echo "${RESPONSE}" | jq '.total_count // 0' 2>/dev/null)
+              RUNNERS=$(echo "${RESPONSE}" | jq '[.[]?.runners[]?] | length' 2>/dev/null)
               if [ "${RUNNERS}" != "null" ] && [ "${RUNNERS}" != "0" ]; then
                 echo "✅ Found ${RUNNERS} runner(s) registered with GitHub"
                 break
@@ -1272,15 +1079,7 @@ jobs:
           JOB_STATUS="${{ job.status }}"
           if [ "${JOB_STATUS}" != "success" ]; then
             echo "## ❌ Runner ${OPERATION} failed" >> $GITHUB_STEP_SUMMARY
-            echo "Review the failed gate above; no later mutation step was run." >> $GITHUB_STEP_SUMMARY
-            exit 0
-          fi
-          if [ "${OPERATION}" = "rollback" ]; then
-            echo "## ✅ Runner rollback complete" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- **Revision**: ${ROLLBACK_REVISION}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Runner Group**: `redducklabs-private-runners`" >> $GITHUB_STEP_SUMMARY
-            echo "- **Restored Concurrency**: 2" >> $GITHUB_STEP_SUMMARY
+            echo "Review the logs: a prior mutation in this job may already have completed." >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
           echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
@@ -1307,3 +1106,179 @@ jobs:
           echo "- ✅ Checksum verified tool downloads" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Minimal container security context" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Retry logic for network operations" >> $GITHUB_STEP_SUMMARY
+
+  rollback:
+    name: Roll Back Self-Hosted Runners
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.operation == 'rollback'
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
+
+      - name: Configure rollback cluster access
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+        run: |
+          if [ -z "${DO_TOKEN}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set"
+            exit 1
+          fi
+          doctl auth init --access-token "${DO_TOKEN}"
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+
+      - name: Rollback runners
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
+        run: |
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
+          kubectl get namespace "${NAMESPACE}" >/dev/null
+
+          validate_rollback_values() {
+            jq -e '
+              .minRunners == 2 and .maxRunners == 2
+              and .runnerGroup == "redducklabs-private-runners"
+              and ([.template.spec.containers[]? | select(.name=="runner")
+                    | .resources.requests.memory] == ["5Gi"])
+              and ([.template.spec.initContainers[]? | select(.name=="dind")
+                    | .resources.requests.memory] == ["5Gi"])
+            ' >/dev/null
+          }
+
+          validate_rollback_manifest() {
+            python3 - "$1" <<'PY'
+          import sys
+          import yaml
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              matches = [doc for doc in yaml.safe_load_all(stream)
+                         if isinstance(doc, dict) and doc.get("kind") == "AutoscalingRunnerSet"]
+          if len(matches) != 1:
+              raise SystemExit("rollback manifest must contain exactly one AutoscalingRunnerSet")
+          spec = matches[0].get("spec", {})
+          if spec.get("minRunners") != 2 or spec.get("maxRunners") != 2:
+              raise SystemExit("rollback manifest runner bounds are not 2/2")
+          if spec.get("runnerGroup") != "redducklabs-private-runners":
+              raise SystemExit("rollback manifest runner group is not private")
+          pod = spec.get("template", {}).get("spec", {})
+          runners = [item for item in pod.get("containers", []) if item.get("name") == "runner"]
+          dinds = [item for item in pod.get("initContainers", []) if item.get("name") == "dind"]
+          if len(runners) != 1 or len(dinds) != 1:
+              raise SystemExit("rollback manifest runner/DinD template is incomplete")
+          if runners[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
+              raise SystemExit("rollback manifest runner request is not 5Gi")
+          if dinds[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
+              raise SystemExit("rollback manifest DinD request is not 5Gi")
+          PY
+          }
+
+          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
+          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
+            [.[] | select(
+              (.revision | tostring) == $revision
+              and .chart == ("gha-runner-scale-set-" + $version)
+              and (.status == "deployed" or .status == "superseded"))] | length == 1
+          ' <<<"${HISTORY}" >/dev/null; then
+            echo "❌ Error: rollback revision is missing, not chart ${ARC_CHART_VERSION}, or not deployable"
+            exit 1
+          fi
+
+          REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
+            -n "${NAMESPACE}" -o json)
+          if ! validate_rollback_values <<<"${REVISION_VALUES}"; then
+            echo "❌ Error: rollback revision values do not preserve 2/2 bounds, private group, and 5Gi+5Gi requests"
+            exit 1
+          fi
+          REVISION_MANIFEST="${RUNNER_TEMP}/rollback-revision-manifest.yaml"
+          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
+            -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
+          if ! validate_rollback_manifest "${REVISION_MANIFEST}"; then
+            echo "❌ Error: rollback revision manifest does not preserve the isolated runner template"
+            exit 1
+          fi
+
+          helm rollback "${RELEASE_NAME}" "${REVISION}" \
+            --namespace "${NAMESPACE}" --wait --timeout 300s
+
+          RESTORED=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
+          if ! validate_rollback_values <<<"${RESTORED}"; then
+            echo "❌ Error: rollback did not restore the isolated 5Gi+5Gi, 2/2 private-group configuration"
+            exit 1
+          fi
+          RESTORED_MANIFEST="${RUNNER_TEMP}/rollback-restored-manifest.yaml"
+          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${RESTORED_MANIFEST}"
+          if ! validate_rollback_manifest "${RESTORED_MANIFEST}"; then
+            echo "❌ Error: rollback live manifest readback does not restore the isolated runner template"
+            exit 1
+          fi
+          echo "✅ Rollback restored validated revision ${REVISION}"
+
+      - name: Verify trust and pool after rollback
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          STATUS=0
+          bash scripts/verify-runner-trust-boundary.sh \
+            --expected-sha "${EXPECTED_SHA}" --verify-only || STATUS=1
+
+          CLUSTER_ID=$(doctl kubernetes cluster list -o json \
+            | jq -r --arg name "${CLUSTER_NAME}" '.[] | select(.name==$name) | .id')
+          POOL=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
+            | jq -c '.[] | select(.name=="github-runners-pool-16g")')
+          if ! jq -e '
+            .size == "s-8vcpu-16gb"
+            and .auto_scale == true
+            and .min_nodes == 2 and .max_nodes == 2 and .count == 2
+          ' <<<"${POOL}" >/dev/null; then
+            echo "❌ Error: post-rollback pool readback is not the fixed two-node pool"
+            STATUS=1
+          fi
+          NODES=$(kubectl get nodes -l node-type=github-runner -o json)
+          if ! jq -e '
+            .items | length == 2
+            and all(.[]; any(.status.conditions[]?;
+              .type == "Ready" and .status == "True"))
+          ' <<<"${NODES}" >/dev/null; then
+            echo "❌ Error: post-rollback runner nodes are not exactly two Ready nodes"
+            STATUS=1
+          fi
+          PODS=$(kubectl get pods -n arc-runners \
+            -l actions.github.com/scale-set-name=redducklabs-runners -o json)
+          SETS=$(kubectl get ephemeralrunnersets.actions.github.com -n arc-runners \
+            -l actions.github.com/scale-set-name=redducklabs-runners -o json)
+          PENDING=$(jq '[.items[] | select(.status.phase == "Pending")] | length' <<<"${PODS}")
+          DESIRED=$(jq '[.items[] | (.spec.replicas // 0)] | add // 0' <<<"${SETS}")
+          if [ "${PENDING}" != 0 ] || [ "${DESIRED}" -gt 2 ]; then
+            echo "❌ Error: post-rollback ARC still has Pending runners or scale-up demand"
+            STATUS=1
+          fi
+          exit "${STATUS}"
+
+      - name: Rollback summary
+        if: always()
+        env:
+          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "## ✅ Runner rollback complete" >> "${GITHUB_STEP_SUMMARY}"
+            echo "- **Revision**: ${REVISION}" >> "${GITHUB_STEP_SUMMARY}"
+            echo "- **Runner Group**: `redducklabs-private-runners`" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "## ❌ Runner rollback or post-rollback verification failed" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Review the logs: Helm rollback may have completed before a verification failure." >> "${GITHUB_STEP_SUMMARY}"
+          fi

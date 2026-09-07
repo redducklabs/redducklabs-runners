@@ -511,14 +511,15 @@ jobs:
           
           # Check runners via API with retry logic
           for attempt in 1 2 3; do
-            RESPONSE=$(gh api "orgs/${ORG}/actions/runners" 2>/dev/null)
+            RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null)
             
             if [ $? -eq 0 ] && [ "${RESPONSE}" != "" ]; then
               # Check if response is valid JSON
               if echo "${RESPONSE}" | jq . >/dev/null 2>&1; then
-                TOTAL_RUNNERS=$(echo "${RESPONSE}" | jq '.total_count // 0')
-                ONLINE_RUNNERS=$(echo "${RESPONSE}" | jq '[.runners[]? | select(.status=="online")] | length')
-                OFFLINE_RUNNERS=$(echo "${RESPONSE}" | jq '[.runners[]? | select(.status=="offline")] | length')
+                RUNNERS=$(echo "${RESPONSE}" | jq -c '[.[]?.runners[]?]')
+                TOTAL_RUNNERS=$(echo "${RUNNERS}" | jq 'length')
+                ONLINE_RUNNERS=$(echo "${RUNNERS}" | jq '[.[] | select(.status=="online")] | length')
+                OFFLINE_RUNNERS=$(echo "${RUNNERS}" | jq '[.[] | select(.status=="offline")] | length')
                 
                 # Validate numeric values
                 for value in TOTAL_RUNNERS ONLINE_RUNNERS OFFLINE_RUNNERS; do

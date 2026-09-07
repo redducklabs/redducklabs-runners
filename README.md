@@ -7,8 +7,8 @@ Deploy secure, scalable GitHub Actions self-hosted runners on Kubernetes with co
 - **GitHub-first deployment**: Deploy, scale, monitor, and emergency-stop runners from GitHub Actions.
 - **Complete Development Environment**: Python 3.13, Node.js 22, uv, AWS CLI v2, Terraform, kubectl, Helm, and more
 - **Security Tools**: kubeconform 0.8.0, kubesec 2.14.2, Trivy 0.74.0
-- **Docker-in-Docker Support**: Build containers within runners, with a dedicated memory reservation for the Docker daemon
-- **Auto-scaling**: Configurable min/max runner instances (2 warm / 8 maximum by default)
+- **Docker-in-Docker Support**: Build containers within runners under one shared Pod scheduling budget
+- **Auto-scaling**: Configurable min/max runner instances (2 warm / 4 maximum by default)
 - **CI-reviewed configuration**: Resource limits, health checks, and monitoring
 - **Dual Configuration**: Template versions for reuse and reviewed Red Duck Labs target configs
 - **Security optimized**: Multi-stage build with SHA256/GPG-verified tools and a machine-enforced CVE-floor gate
@@ -46,22 +46,30 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
    - `RUNNER_TOKEN`: Your PAT with required scopes
    - `DO_TOKEN`: DigitalOcean API token
 
-### 2. Deploy Runners via GitHub Actions
+### 2. Prepare the Runner Platform
+1. Select **"Prepare Runner Platform"** in the Actions tab
+2. Supply the exact reviewed commit SHA and confirm the platform mutation
+3. Run this workflow for initial setup or a deliberate ARC controller/CRD reconciliation
+
+The normal deployment workflow requires the namespace, registry pull secret,
+service account, pinned ARC CRDs, and Ready pinned controller to already exist.
+
+### 3. Deploy Runners via GitHub Actions
 1. Go to the **Actions** tab in your repository
 2. Select **"Deploy GitHub Runners"** workflow
 3. Click **"Run workflow"**
 4. Configure options (or use defaults):
    - Min runners: 2
-   - Max runners: 8
+   - Max runners: 4
    - Runner image: `registry.digitalocean.com/redducklabs/github-runner:latest`
 5. Click **"Run workflow"** to deploy
 
-### 3. Monitor Deployment
+### 4. Monitor Deployment
 The workflow validates tokens and permissions, configures Kubernetes access,
-installs the ARC controller when needed, deploys the runner scale set, and
-verifies runner registration with GitHub.
+verifies the prepared platform, deploys the runner scale set, and verifies
+runner registration with GitHub.
 
-### 4. Use in Your Workflows
+### 5. Use in Your Workflows
 
 ```yaml
 jobs:
@@ -279,6 +287,7 @@ available for investigation and explicitly requested operations.
 
 | Workflow | Description | Trigger |
 |----------|-------------|---------|
+| **Prepare Runner Platform** | Explicit initial namespace, CRD, controller, and registry preparation | Manual (`workflow_dispatch`) |
 | **Deploy GitHub Runners** | CI-only trust preparation, deployment, and rollback | Manual (`workflow_dispatch`) |
 | **Scale GitHub Runners** | Reviewed runner-bound changes, capped at four | Manual (`workflow_dispatch`) |
 | **Node Pool Sizing** | CI-only fixed runner-pool validation and 2/2 bounds | Manual (`workflow_dispatch`) |
