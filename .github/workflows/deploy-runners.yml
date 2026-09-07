@@ -756,6 +756,18 @@ jobs:
                       }
                       for key, value in container_defaults.items():
                           strip_default(admitted_item, expected_item, key, value)
+                      expected_probe = expected_item.get("startupProbe")
+                      admitted_probe = admitted_item.get("startupProbe")
+                      if isinstance(expected_probe, dict) and isinstance(admitted_probe, dict):
+                          if (expected_probe.get("initialDelaySeconds") == 0
+                                  and "initialDelaySeconds" not in admitted_probe):
+                              expected_probe.pop("initialDelaySeconds")
+                          strip_default(
+                              admitted_probe, expected_probe, "successThreshold", 1
+                          )
+                          strip_default(
+                              admitted_probe, expected_probe, "timeoutSeconds", 1
+                          )
               return expected, admitted
 
           expected_asrs_spec = deepcopy(expected_asrs.get("spec", {}))

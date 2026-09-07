@@ -2276,6 +2276,12 @@ if mutation != 'none':
             )
             item['terminationMessagePath'] = '/dev/termination-log'
             item['terminationMessagePolicy'] = 'File'
+        dind_probe = next(
+            item for item in init_containers if item.get('name') == 'dind'
+        )['startupProbe']
+        dind_probe.pop('initialDelaySeconds', None)
+        dind_probe['successThreshold'] = 1
+        dind_probe['timeoutSeconds'] = 1
 print(json.dumps(document))
 PY
                     ;;
