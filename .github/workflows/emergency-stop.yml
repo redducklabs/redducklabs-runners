@@ -34,7 +34,6 @@ env:
 # Use minimal permissions
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   validate-inputs:
@@ -210,11 +209,12 @@ jobs:
       
       - name: Scale to zero
         if: steps.backup.outputs.deployment_exists == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          STOP_REASON: ${{ needs.validate-inputs.outputs.reason }}
         run: |
           echo "🛑 INITIATING EMERGENCY STOP..."
-          echo "Reason: ${{ needs.validate-inputs.outputs.reason }}"
-          
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          echo "Reason: ${STOP_REASON}"
           
           # Scale to zero with retry logic
           for attempt in 1 2 3; do
@@ -283,13 +283,15 @@ jobs:
       
       - name: Create recovery instructions
         if: always()
+        env:
+          STOP_REASON: ${{ needs.validate-inputs.outputs.reason }}
         run: |
           echo "## 🛑 Emergency Stop Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Stop Details" >> $GITHUB_STEP_SUMMARY
           echo "- **Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- **Initiated by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Reason**: ${{ needs.validate-inputs.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Reason**: ${STOP_REASON}" >> $GITHUB_STEP_SUMMARY
           echo "- **Namespace**: \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
@@ -327,11 +329,13 @@ jobs:
       
       - name: Send notification
         if: always()
+        env:
+          STOP_REASON: ${{ needs.validate-inputs.outputs.reason }}
         run: |
           echo "📧 Emergency stop notification:"
           echo "  - Emergency stop procedure completed"
           echo "  - Initiated by: @${{ github.actor }}"
-          echo "  - Reason: ${{ needs.validate-inputs.outputs.reason }}"
+          echo "  - Reason: ${STOP_REASON}"
           echo "  - Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "  - Namespace: ${{ needs.validate-inputs.outputs.namespace }}"
           if [ "${{ steps.backup.outputs.deployment_exists }}" = "true" ]; then

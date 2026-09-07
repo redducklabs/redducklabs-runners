@@ -469,29 +469,157 @@ run_fixture() {  # script, mutation log, output log
     : > "$FIXTURE_DIR/asrs-read-count"
     rm -f "$FIXTURE_DIR/pool-updated"
     rm -f "$FIXTURE_DIR/helm-updated"
+    rm -f "$FIXTURE_DIR/bootstrap-created"
     cat > "$FIXTURE_DIR/rollback-manifest.yaml" <<'YAML'
 apiVersion: actions.github.com/v1alpha1
 kind: AutoscalingRunnerSet
 metadata:
   name: redducklabs-runners
 spec:
+  githubConfigUrl: https://github.com/redducklabs
+  githubConfigSecret: redducklabs-runners-gha-rs-github-secret
+  runnerScaleSetName: redducklabs-runners
   minRunners: 2
   maxRunners: 2
   runnerGroup: redducklabs-private-runners
   template:
     spec:
-      automountServiceAccountToken: false
-      containers:
-        - name: runner
-          resources:
-            requests:
-              memory: 5Gi
+    automountServiceAccountToken: false
+    imagePullSecrets:
+      - name: do-registry-secret
+    nodeSelector:
+      node-type: github-runner
+    tolerations:
+      - effect: NoSchedule
+        key: github-runner
+        operator: Equal
+        value: "true"
+    restartPolicy: Never
+    serviceAccountName: redducklabs-runners-gha-rs-no-permission
+    containers:
+      - name: runner
+        command: [/home/runner/run.sh]
+        image: registry.digitalocean.com/redducklabs/github-runner:latest
+        imagePullPolicy: Always
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        resources:
+          limits:
+            memory: 10Gi
+          requests:
+            cpu: "2"
+            memory: 5Gi
+        securityContext:
+          allowPrivilegeEscalation: true
+          readOnlyRootFilesystem: false
+          runAsGroup: 121
+          runAsUser: 1001
+        volumeMounts:
+          - mountPath: /home/runner/_work
+            name: work
+          - mountPath: /var/run
+            name: dind-sock
       initContainers:
+        - name: init-dind-externals
+          image: registry.digitalocean.com/redducklabs/github-runner:latest
+          command: [cp]
+          args: [-r, /home/runner/externals/., /home/runner/tmpDir/]
+          volumeMounts:
+            - mountPath: /home/runner/tmpDir
+              name: dind-externals
         - name: dind
+          image: docker:29.7.2-dind
+          args: [dockerd, --host=unix:///var/run/docker.sock, '--group=$(DOCKER_GROUP_GID)']
+          env:
+            - name: DOCKER_GROUP_GID
+              value: "123"
           resources:
+            limits:
+              memory: 10Gi
             requests:
+              cpu: "1"
               memory: 5Gi
+          restartPolicy: Always
+          securityContext:
+            privileged: true
+          startupProbe:
+            exec:
+              command: [docker, info]
+            failureThreshold: 24
+            initialDelaySeconds: 0
+            periodSeconds: 5
+          volumeMounts:
+            - mountPath: /home/runner/_work
+              name: work
+            - mountPath: /var/run
+              name: dind-sock
+            - mountPath: /home/runner/externals
+              name: dind-externals
+    volumes:
+      - emptyDir: {}
+        name: work
+      - emptyDir: {}
+        name: dind-sock
+      - emptyDir: {}
+        name: dind-externals
 YAML
+    # Build the behavioral fixture from the committed desired values so exact
+    # contract checks fail only for the mutation selected by a test case.
+    python3 - deploy/dind-values.yaml "$FIXTURE_DIR/rollback-manifest.yaml" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    values = yaml.safe_load(stream)
+template = values["template"]
+template["spec"]["restartPolicy"] = "Never"
+template["spec"]["serviceAccountName"] = "redducklabs-runners-gha-rs-no-permission"
+manifest = {
+    "apiVersion": "actions.github.com/v1alpha1",
+    "kind": "AutoscalingRunnerSet",
+    "metadata": {"name": "redducklabs-runners"},
+    "spec": {
+        "githubConfigUrl": "https://github.com/redducklabs",
+        "githubConfigSecret": "redducklabs-runners-gha-rs-github-secret",
+        "runnerScaleSetName": "redducklabs-runners",
+        "minRunners": 2,
+        "maxRunners": 2,
+        "runnerGroup": "redducklabs-private-runners",
+        "template": template,
+    },
+}
+with open(sys.argv[2], "w", encoding="utf-8") as stream:
+    yaml.safe_dump(manifest, stream, sort_keys=False)
+PY
+    if [ "${FIXTURE_TEMPLATE_DRIFT:-none}" != none ]; then
+        python3 - "$FIXTURE_DIR/rollback-manifest.yaml" "${FIXTURE_TEMPLATE_DRIFT}" <<'PY'
+import sys
+import yaml
+
+path, mutation = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    document = yaml.safe_load(stream)
+spec = document["spec"]["template"]["spec"]
+if mutation == "automount":
+    spec.pop("automountServiceAccountToken", None)
+elif mutation == "placement":
+    spec["nodeSelector"] = {"node-type": "worker"}
+elif mutation == "token":
+    spec["volumes"].append({
+        "name": "kube-api-access-fixture",
+        "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]},
+    })
+elif mutation == "extra":
+    spec["hostNetwork"] = True
+else:
+    raise SystemExit(f"unknown fixture template mutation: {mutation}")
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(document, stream, sort_keys=False)
+PY
+    fi
     (
         export GITHUB_OUTPUT="$FIXTURE_DIR/github-output"
         export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
@@ -510,6 +638,9 @@ YAML
         export FIXTURE_ROLLBACK_INVALID="${FIXTURE_ROLLBACK_INVALID:-none}"
         export FIXTURE_POOL_MIN FIXTURE_POOL_MAX FIXTURE_POOL_COUNT
         export FIXTURE_POOL_SIZE="${FIXTURE_POOL_SIZE:-s-8vcpu-16gb}"
+        export FIXTURE_POOL_WORKLOAD_LABEL="${FIXTURE_POOL_WORKLOAD_LABEL:-ci-cd}"
+        export FIXTURE_POOL_TAINT_VALUE="${FIXTURE_POOL_TAINT_VALUE:-true}"
+        export FIXTURE_POOL_TAINT_EFFECT="${FIXTURE_POOL_TAINT_EFFECT:-NoSchedule}"
         export FIXTURE_READY_NODES="${FIXTURE_READY_NODES:-2}"
         export FIXTURE_SCALE_DEMAND="${FIXTURE_SCALE_DEMAND:-2}"
         export FIXTURE_PLATFORM_STATE="${FIXTURE_PLATFORM_STATE:-ready}"
@@ -526,9 +657,13 @@ YAML
         export FIXTURE_SECOND_POOL_ID="${FIXTURE_SECOND_POOL_ID:-$FIXTURE_POOL_ID}"
         export FIXTURE_SECOND_NODE_UID="${FIXTURE_SECOND_NODE_UID:-fixture-node-a-uid}"
         export FIXTURE_SA_STATE="${FIXTURE_SA_STATE:-absent}"
+        export FIXTURE_SCALE_RELEASE_STATE="${FIXTURE_SCALE_RELEASE_STATE:-pinned}"
+        export FIXTURE_SCALE_CHART_VERSION="${FIXTURE_SCALE_CHART_VERSION:-0.14.2}"
         export FIXTURE_REGISTRY_STATE="${FIXTURE_REGISTRY_STATE:-ready}"
         export FIXTURE_MISSING_CRD="${FIXTURE_MISSING_CRD:-none}"
+        export FIXTURE_TEMPLATE_DRIFT="${FIXTURE_TEMPLATE_DRIFT:-none}"
         export FIXTURE_HELM_UPDATED="$FIXTURE_DIR/helm-updated"
+        export FIXTURE_BOOTSTRAP_CREATED="$FIXTURE_DIR/bootstrap-created"
         export FIXTURE_POOL_RACE_COUNT="${FIXTURE_POOL_RACE_COUNT:-$FIXTURE_POOL_COUNT}"
         export FIXTURE_POOL_READ_COUNT="$FIXTURE_DIR/pool-read-count"
         export FIXTURE_CLUSTER_READ_COUNT="$FIXTURE_DIR/cluster-read-count"
@@ -548,8 +683,10 @@ YAML
             if [ "$1" = list ]; then
                 if [[ " $* " == *" -n arc-systems "* ]]; then
                     echo '[{"name":"arc","chart":"gha-runner-scale-set-controller-0.14.2","status":"deployed"}]'
+                elif [ "$FIXTURE_SCALE_RELEASE_STATE" = absent ]; then
+                    echo '[]'
                 else
-                    echo '[{"name":"redducklabs-runners","chart":"gha-runner-scale-set-0.14.2","status":"deployed"}]'
+                    printf '[{"name":"redducklabs-runners","chart":"gha-runner-scale-set-%s","status":"deployed"}]\n' "$FIXTURE_SCALE_CHART_VERSION"
                 fi
                 return 0
             fi
@@ -593,7 +730,13 @@ YAML
             fi
             case " $* " in
                 *" rollback "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG"; export FIXTURE_ROLLBACK_ACTIVE=true ;;
-                *" upgrade "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ; : > "$FIXTURE_HELM_UPDATED" ;;
+                *" upgrade "*)
+                    echo "helm $*" >> "$FIXTURE_MUTATION_LOG"
+                    : > "$FIXTURE_HELM_UPDATED"
+                    if [[ " $* " == *"minRunners=0"* ]] && [[ " $* " == *"maxRunners=0"* ]]; then
+                        : > "$FIXTURE_BOOTSTRAP_CREATED"
+                    fi
+                    ;;
                 *" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             if [ "$1" = "get" ] && [ "$2" = "values" ]; then
@@ -613,11 +756,22 @@ YAML
                     elif [ "$reads" -ge 1 ]; then
                         helm_group=$FIXTURE_SECOND_HELM_GROUP
                     fi
-                    if [ "$helm_group" = __missing__ ]; then
-                        printf '{"minRunners":2,"maxRunners":%s,"template":{"spec":{"automountServiceAccountToken":false,"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}\n' "$helm_max"
-                    else
-                        printf '{"minRunners":2,"maxRunners":%s,"runnerGroup":"%s","template":{"spec":{"automountServiceAccountToken":false,"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}\n' "$helm_max" "$helm_group"
-                    fi
+                    python3 - "$FIXTURE_ROLLBACK_MANIFEST" "$helm_max" "$helm_group" <<'PY'
+import json
+import sys
+import yaml
+
+path, maximum, group = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    manifest = yaml.safe_load(stream)
+template = manifest["spec"]["template"]["spec"]
+template.pop("restartPolicy", None)
+template.pop("serviceAccountName", None)
+values = {"minRunners": 2, "maxRunners": int(maximum), "template": {"spec": template}}
+if group != "__missing__":
+    values["runnerGroup"] = group
+print(json.dumps(values))
+PY
                 fi
             fi
             return 0
@@ -646,7 +800,9 @@ YAML
                         count=$FIXTURE_POOL_RACE_COUNT
                         pool_id=$FIXTURE_SECOND_POOL_ID
                     fi
-                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner"},"taints":[{"key":"github-runner"}]}]\n' "$pool_id" "$FIXTURE_POOL_MIN" "$max" "$count" "$FIXTURE_POOL_SIZE" ; return 0 ;;
+                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"},"taints":[{"key":"github-runner","value":"%s","effect":"%s"}]}]\n' \
+                      "$pool_id" "$FIXTURE_POOL_MIN" "$max" "$count" "$FIXTURE_POOL_SIZE" \
+                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$FIXTURE_POOL_TAINT_VALUE" "$FIXTURE_POOL_TAINT_EFFECT" ; return 0 ;;
             esac
             return 0
         }
@@ -675,7 +831,11 @@ YAML
                     ;;
                 *" get serviceaccount redducklabs-runners-gha-rs-no-permission "*)
                     case "$FIXTURE_SA_STATE" in
-                        absent) return 0 ;;
+                        absent)
+                            if [ -e "$FIXTURE_BOOTSTRAP_CREATED" ]; then
+                                echo '{"metadata":{"labels":{"app.kubernetes.io/managed-by":"Helm"},"annotations":{"meta.helm.sh/release-name":"redducklabs-runners","meta.helm.sh/release-namespace":"arc-runners"}}}'
+                            fi
+                            ;;
                         helm)
                             echo '{"metadata":{"labels":{"app.kubernetes.io/managed-by":"Helm"},"annotations":{"meta.helm.sh/release-name":"redducklabs-runners","meta.helm.sh/release-namespace":"arc-runners"}}}'
                             ;;
@@ -721,16 +881,16 @@ YAML
                     echo read >> "$FIXTURE_ASRS_READ_COUNT"
                     asrs_group=redducklabs-private-runners
                     if [ "$asrs_reads" -ge 1 ]; then asrs_group=$FIXTURE_SECOND_ASRS_GROUP; fi
-                    jq -cn --arg group "$asrs_group" '{items:[{spec:{
-                      minRunners:2,
-                      maxRunners:2,
-                      runnerGroup:$group,
-                      template:{spec:{
-                        automountServiceAccountToken:false,
-                        containers:[{name:"runner",resources:{requests:{memory:"5Gi"}}}],
-                        initContainers:[{name:"dind",resources:{requests:{memory:"5Gi"}}}]
-                      }}
-                    }}]}'
+                    python3 - "$FIXTURE_ROLLBACK_MANIFEST" "$asrs_group" <<'PY'
+import json
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    manifest = yaml.safe_load(stream)
+manifest["spec"]["runnerGroup"] = sys.argv[2]
+print(json.dumps({"items": [manifest]}))
+PY
                     return 0
                     ;;
                 *" get ephemeralrunnersets.actions.github.com "*) printf '{"items":[{"spec":{"replicas":%s}}]}\n' "$FIXTURE_SCALE_DEMAND" ; return 0 ;;
@@ -765,6 +925,12 @@ YAML
                 *'/repositories/1006277397'*) echo '{"id":1006277397,"name":"therapy-link","full_name":"redducklabs/therapy-link","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
                 *'/repositories/776507734'*) echo '{"id":776507734,"name":"zipbot-internal","full_name":"redducklabs/zipbot-internal","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
                 *'/repositories/1037651737'*) echo '{"id":1037651737,"name":"zipbot-v2","full_name":"redducklabs/zipbot-v2","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1359405097'*) echo '{"id":1359405097,"name":"agent-handoff-toolkit","full_name":"redducklabs/agent-handoff-toolkit","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1271568186'*) echo '{"id":1271568186,"name":"fountainrank","full_name":"redducklabs/fountainrank","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1208056940'*) echo '{"id":1208056940,"name":"claude-control","full_name":"redducklabs/claude-control","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}' ;;
+                *'repos/redducklabs/agent-handoff-toolkit/commits'*|*'repos/redducklabs/fountainrank/commits'*|*'repos/redducklabs/claude-control/commits'*) echo '[{"sha":"1111111111111111111111111111111111111111"}]' ;;
+                *'repos/redducklabs/agent-handoff-toolkit/actions/workflows'*|*'repos/redducklabs/fountainrank/actions/workflows'*|*'repos/redducklabs/claude-control/actions/workflows'*) echo '{"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}' ;;
+                *'repos/redducklabs/agent-handoff-toolkit/contents/'*|*'repos/redducklabs/fountainrank/contents/'*|*'repos/redducklabs/claude-control/contents/'*) printf '%s\n' 'jobs:' '  safe:' '    runs-on: ubuntu-latest' '    steps: []' ;;
                 *'repos?type=public'*) echo '[]' ;;
                 *'runner-groups?per_page=100'*)
                     if [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
@@ -998,20 +1164,62 @@ case "$joined" in
     *"/repositories/1006277397"*) repo_json 1006277397 therapy-link ;;
     *"/repositories/776507734"*) repo_json 776507734 zipbot-internal ;;
     *"/repositories/1037651737"*) repo_json 1037651737 zipbot-v2 ;;
+    *"/repositories/1359405097"*)
+        printf '{"id":1359405097,"name":"agent-handoff-toolkit","full_name":"redducklabs/agent-handoff-toolkit","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}\n'
+        ;;
+    *"/repositories/1271568186"*)
+        printf '{"id":1271568186,"name":"fountainrank","full_name":"redducklabs/fountainrank","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}\n'
+        ;;
+    *"/repositories/1208056940"*)
+        printf '{"id":1208056940,"name":"claude-control","full_name":"redducklabs/claude-control","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}\n'
+        ;;
+    *"/repositories/4242"*)
+        branch=main
+        [ "${GH_SCENARIO}" = url_sensitive ] && branch='release/#density'
+        metadata_reads=$(grep -c '/repositories/4242' "$GH_CALL_LOG" || true)
+        if [ "${GH_SCENARIO}" = default_branch_drift ] && [ "$metadata_reads" -ge 2 ]; then
+            branch=trunk
+        fi
+        printf '{"id":4242,"name":"public-repo","full_name":"redducklabs/public-repo","visibility":"public","private":false,"default_branch":"%s","owner":{"login":"redducklabs"}}\n' "$branch"
+        ;;
+    *"repos/redducklabs/public-repo/commits"*)
+        sha=1111111111111111111111111111111111111111
+        head_reads=$(grep -c 'repos/redducklabs/public-repo/commits' "$GH_CALL_LOG" || true)
+        if [ "${GH_SCENARIO}" = head_drift ] && [ "$head_reads" -ge 2 ]; then
+            sha=2222222222222222222222222222222222222222
+        fi
+        printf '[{"sha":"%s"}]\n' "$sha"
+        ;;
+    *"repos/redducklabs/agent-handoff-toolkit/commits"*|*"repos/redducklabs/fountainrank/commits"*|*"repos/redducklabs/claude-control/commits"*)
+        printf '[{"sha":"1111111111111111111111111111111111111111"}]\n'
+        ;;
+    *"repos/redducklabs/agent-handoff-toolkit/actions/workflows"*|*"repos/redducklabs/fountainrank/actions/workflows"*|*"repos/redducklabs/claude-control/actions/workflows"*)
+        printf '{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
+        ;;
+    *"repos/redducklabs/agent-handoff-toolkit/contents/.github/workflows/ci.yml"*|*"repos/redducklabs/fountainrank/contents/.github/workflows/ci.yml"*|*"repos/redducklabs/claude-control/contents/.github/workflows/ci.yml"*)
+        printf '%s\n' 'jobs:' '  safe:' '    runs-on: ubuntu-latest' '    steps: []'
+        ;;
     *"orgs/redducklabs/repos?type=public"*)
         if [ "${GH_SCENARIO}" = public_label ] || [ "${GH_SCENARIO}" = dynamic_runs_on ] \
           || [ "${GH_SCENARIO}" = workflow_schema ] || [ "${GH_SCENARIO}" = mixed_case_label ] \
           || [ "${GH_SCENARIO}" = later_page_public_label ] \
           || [ "${GH_SCENARIO}" = later_page_workflow_label ] \
           || [ "${GH_SCENARIO}" = managed_copilot ] \
-          || [ "${GH_SCENARIO}" = unknown_dynamic_path ]; then
+          || [ "${GH_SCENARIO}" = unknown_dynamic_path ] \
+          || [ "${GH_SCENARIO}" = url_sensitive ] \
+          || [ "${GH_SCENARIO}" = default_branch_drift ] \
+          || [ "${GH_SCENARIO}" = head_drift ]; then
             if [ "${GH_SCENARIO}" = later_page_public_label ] && [ "$paginated" = true ]; then
-                printf '[]\n[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+                printf '[]\n[{"id":4242,"name":"public-repo","full_name":"redducklabs/public-repo","owner":{"login":"redducklabs"},"private":false,"default_branch":"main","visibility":"public"}]\n'
             else
                 if [ "${GH_SCENARIO}" = later_page_public_label ]; then
                     printf '[]\n'
                 else
-                    printf '[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+                    if [ "${GH_SCENARIO}" = url_sensitive ]; then
+                        printf '[{"id":4242,"name":"public-repo","full_name":"redducklabs/public-repo","owner":{"login":"redducklabs"},"private":false,"default_branch":"release/#density","visibility":"public"}]\n'
+                    else
+                        printf '[{"id":4242,"name":"public-repo","full_name":"redducklabs/public-repo","owner":{"login":"redducklabs"},"private":false,"default_branch":"main","visibility":"public"}]\n'
+                    fi
                 fi
             fi
         else
@@ -1031,15 +1239,27 @@ case "$joined" in
             printf '{"total_count":1,"workflows":[{"path":"dynamic/agents/copilot-pull-request-reviewer","state":"active"}]}\n'
         elif [ "${GH_SCENARIO}" = unknown_dynamic_path ]; then
             printf '{"total_count":1,"workflows":[{"path":"dynamic/agents/unrecognized","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = url_sensitive ]; then
+            printf '{"total_count":1,"workflows":[{"path":".github/workflows/density #1?.yml","state":"active"}]}\n'
         else
             printf '{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
         fi
+        ;;
+    *"repos/redducklabs/public-repo/contents/.github/workflows/density%20%231%3F.yml"*)
+        if [[ " $joined " != *" --method GET "* ]] \
+          || [[ " $joined " != *" -f ref=1111111111111111111111111111111111111111 "* ]]; then
+            printf 'unsafe URL-sensitive contents request: %s\n' "$joined" >&2
+            exit 64
+        fi
+        printf '%s\n' 'jobs:' '  safe:' '    runs-on: ubuntu-latest' '    steps: []'
         ;;
     *"repos/redducklabs/public-repo/contents/.github/workflows/ci.yml"*)
         if [ "${GH_SCENARIO}" = dynamic_runs_on ]; then
             printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: ${{ matrix.runner }}' '    steps: []'
         elif [ "${GH_SCENARIO}" = mixed_case_label ]; then
             printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: RedDuckLabs-Runners' '    steps: []'
+        elif [ "${GH_SCENARIO}" = default_branch_drift ] || [ "${GH_SCENARIO}" = head_drift ]; then
+            printf '%s\n' 'jobs:' '  safe:' '    runs-on: ubuntu-latest' '    steps: []'
         else
             printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: redducklabs-runners' '    steps: []'
         fi
@@ -1152,16 +1372,23 @@ expected_reads = [
     "/repositories/1193238112",
     "/repositories/1351028230",
     "orgs/redducklabs/repos?type=public&per_page=100",
+    "/repositories/1359405097",
+    "/repositories/1271568186",
+    "/repositories/1208056940",
     "orgs/redducklabs/actions/runner-groups?per_page=100",
 ]
-if len(calls) != 14:
-    raise SystemExit(f"expected 14 gh calls, found {len(calls)}")
-for call, endpoint in zip(calls[:11], expected_reads):
-    if endpoint not in call or "--method" in call:
-        raise SystemExit(f"unexpected read call: {call}")
-if "--method POST orgs/redducklabs/actions/runner-groups" not in calls[11]:
+mutation_index = next(
+    index for index, call in enumerate(calls)
+    if "--method POST orgs/redducklabs/actions/runner-groups" in call
+)
+for endpoint in expected_reads:
+    matches = [index for index, call in enumerate(calls) if endpoint in call]
+    if not matches or max(matches) >= mutation_index:
+        raise SystemExit(f"required read missing or after mutation: {endpoint}")
+if "--method POST orgs/redducklabs/actions/runner-groups" not in calls[mutation_index]:
     raise SystemExit("creation is not the first mutation")
-if "runner-groups/777" not in calls[12] or "runner-groups/777/repositories" not in calls[13]:
+if not any("runner-groups/777" in call for call in calls[mutation_index + 1:]) \
+   or not any("runner-groups/777/repositories" in call for call in calls[mutation_index + 1:]):
     raise SystemExit("readback calls are missing or reordered")
 PY
         then
@@ -1434,6 +1661,8 @@ for index, step in enumerate(steps):
     if index >= preflight_index:
         break
     shell = step.get('run', '')
+    if step.get('name') == 'Bootstrap chart-owned ServiceAccount for first install':
+        continue
     if re.search(r'helm (upgrade|rollback|uninstall)|kubectl (apply|create|delete|patch)|node-pool update', shell):
         raise SystemExit(f'mutation step precedes compatibility preflight: {step.get("name")}')
 PY
@@ -2097,7 +2326,8 @@ assert_prepared_platform_prerequisites() {
 
     local state
     FIXTURE_SA_STATE=absent FIXTURE_REGISTRY_STATE=ready FIXTURE_MISSING_CRD=none
-    export FIXTURE_SA_STATE FIXTURE_REGISTRY_STATE FIXTURE_MISSING_CRD
+    FIXTURE_SCALE_RELEASE_STATE=absent
+    export FIXTURE_SA_STATE FIXTURE_REGISTRY_STATE FIXTURE_MISSING_CRD FIXTURE_SCALE_RELEASE_STATE
     for state in missing stale; do
         FIXTURE_PLATFORM_STATE=$state
         export FIXTURE_PLATFORM_STATE
@@ -2123,8 +2353,9 @@ assert_prepared_platform_prerequisites() {
 
     local collision
     for collision in unmanaged foreign; do
+        FIXTURE_SCALE_RELEASE_STATE=pinned
         FIXTURE_SA_STATE=$collision
-        export FIXTURE_SA_STATE
+        export FIXTURE_SA_STATE FIXTURE_SCALE_RELEASE_STATE
         : > "$FIXTURE_DIR/mutations"
         if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
             fail "Deploy accepts a ${collision} chart ServiceAccount collision"
@@ -2136,7 +2367,8 @@ assert_prepared_platform_prerequisites() {
     done
 
     FIXTURE_SA_STATE=helm
-    export FIXTURE_SA_STATE
+    FIXTURE_SCALE_RELEASE_STATE=pinned
+    export FIXTURE_SA_STATE FIXTURE_SCALE_RELEASE_STATE
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
       && [ ! -s "$FIXTURE_DIR/mutations" ]; then
@@ -2171,7 +2403,7 @@ assert_prepared_platform_prerequisites() {
     else
         pass "Deploy requires all four pinned ARC CRDs to be Established"
     fi
-    unset FIXTURE_SA_STATE FIXTURE_REGISTRY_STATE FIXTURE_MISSING_CRD
+    unset FIXTURE_SA_STATE FIXTURE_REGISTRY_STATE FIXTURE_MISSING_CRD FIXTURE_SCALE_RELEASE_STATE
 }
 
 assert_shared_fleet_concurrency() {
@@ -2227,6 +2459,339 @@ PY
         pass "Platform preparation leaves the chart ServiceAccount to Helm and explicitly generates the registry secret"
     else
         fail "Platform preparation ownership or registry-secret generation contract is incomplete"
+    fi
+}
+
+assert_review_fix_trust_snapshots() {
+    write_fake_gh
+
+    if run_trust_fixture url_sensitive "$FIXTURE_DIR/trust-output" \
+      && grep -Fq 'contents/.github/workflows/density%20%231%3F.yml' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq -- '--method GET' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq -- '-f ref=1111111111111111111111111111111111111111' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary scans URL-sensitive workflow paths at an encoded immutable ref"
+    else
+        fail "Trust boundary does not safely scan a URL-sensitive workflow path/default branch"
+    fi
+
+    local scenario
+    for scenario in default_branch_drift head_drift; do
+        if run_trust_fixture "$scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary accepts ${scenario//_/ } during a public-workflow scan"
+        elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+            fail "Trust boundary mutates after ${scenario//_/ } during a public-workflow scan"
+        elif ! grep -Eqi 'default branch|head.*changed|changed.*head' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary ${scenario//_/ } rejection is not diagnostic"
+        else
+            pass "Trust boundary aborts on ${scenario//_/ } before mutation"
+        fi
+    done
+
+    if run_trust_fixture create "$FIXTURE_DIR/trust-output" \
+      && grep -Fq '/repositories/1359405097' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq '/repositories/1271568186' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq '/repositories/1208056940' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq 'repos/redducklabs/agent-handoff-toolkit/actions/workflows' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq 'repos/redducklabs/fountainrank/actions/workflows' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq 'repos/redducklabs/claude-control/actions/workflows' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary scans all three committed migration identities independently"
+    else
+        fail "Trust boundary does not independently scan all three required migration repositories"
+    fi
+}
+
+assert_emergency_reason_is_inert() {
+    local sentinel="$FIXTURE_DIR/emergency-reason-executed"
+    local backtick_sentinel="$FIXTURE_DIR/emergency-backtick-executed"
+    local payload='$(touch '"$sentinel"') "quoted reason" `touch '"$backtick_sentinel"'`'
+    local step script output
+    for step in 'Scale to zero' 'Create recovery instructions' 'Send notification'; do
+        script="$FIXTURE_DIR/emergency-${step// /-}.sh"
+        output="$FIXTURE_DIR/emergency-${step// /-}.out"
+        python3 - .github/workflows/emergency-stop.yml "$step" "$payload" "$script" <<'PY'
+import re
+import shlex
+import sys
+import yaml
+
+_, workflow_path, step_name, reason, output = sys.argv
+with open(workflow_path, encoding="utf-8") as stream:
+    workflow = yaml.safe_load(stream)
+step = next(
+    item
+    for job in workflow["jobs"].values()
+    for item in job.get("steps", [])
+    if item.get("name") == step_name
+)
+replacements = {
+    "needs.validate-inputs.outputs.reason": reason,
+    "needs.validate-inputs.outputs.namespace": "arc-runners",
+    "steps.backup.outputs.deployment_exists": "true",
+    "steps.backup.outputs.current_min": "2",
+    "steps.backup.outputs.current_max": "4",
+    "steps.backup.outputs.pod_count": "2",
+    "github.actor": "fixture-user",
+    "job.status": "success",
+}
+def render(value):
+    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: replacements.get(match.group(1), "fixture"), str(value))
+with open(output, "w", encoding="utf-8") as target:
+    for name, value in (step.get("env") or {}).items():
+        target.write(f"export {name}={shlex.quote(render(value))}\n")
+    target.write(render(step["run"]))
+    target.write("\n")
+PY
+        rm -f "$sentinel" "$backtick_sentinel"
+        if ! (
+            export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
+            export RELEASE_NAME=redducklabs-runners
+            helm() { :; }
+            sleep() { :; }
+            export -f helm sleep
+            bash -euo pipefail "$script"
+        ) >"$output" 2>&1; then
+            fail "Emergency Stop cannot handle shell-active quoted reason in ${step}"
+        elif [ -e "$sentinel" ] || [ -e "$backtick_sentinel" ]; then
+            fail "Emergency Stop executes a validated reason in ${step}"
+        elif ! grep -Fq 'quoted reason' "$output" && [ "$step" != 'Create recovery instructions' ]; then
+            fail "Emergency Stop loses the validated reason in ${step}"
+        else
+            pass "Emergency Stop treats the validated reason as inert data in ${step}"
+        fi
+    done
+}
+
+assert_deploy_unused_revision_cannot_route() {
+    local script="$FIXTURE_DIR/deploy-unused-revision.sh"
+    local payload=$'7\noperation=rollback\nrollback_revision=99'
+    : > "$script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+        fail "Deploy unused-revision routing fixture could not be materialized"
+        return
+      }
+    python3 - "$script" "$payload" <<'PY'
+import shlex
+import sys
+
+path, payload = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    source = stream.read()
+source = source.replace("export INPUT_ROLLBACK_REVISION=7", f"export INPUT_ROLLBACK_REVISION={shlex.quote(payload)}", 1)
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write(source)
+PY
+    : > "$FIXTURE_DIR/mutations"
+    if ! run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy rejects an unused rollback input instead of ignoring it"
+        return
+    fi
+    if python3 - "$FIXTURE_DIR/github-output" <<'PY'
+import sys
+
+values = {}
+with open(sys.argv[1], encoding="utf-8", newline=None) as stream:
+    for line in stream:
+        line = line.rstrip("\r\n")
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+if values.get("operation") != "deploy" or "rollback_revision" in values:
+    raise SystemExit(1)
+PY
+    then
+        pass "Deploy ignores and does not emit rollback-only input for deploy routing"
+    else
+        fail "Deploy unused rollback input can overwrite operation/revision routing outputs"
+    fi
+}
+
+assert_absent_sa_bootstrap_contract() {
+    if python3 - <<'PY'
+import yaml
+
+with open('.github/workflows/deploy-runners.yml', encoding='utf-8') as stream:
+    workflow = yaml.safe_load(stream)
+steps = workflow['jobs']['deploy']['steps']
+names = [item.get('name') for item in steps]
+required = 'Bootstrap chart-owned ServiceAccount for first install'
+if required not in names:
+    raise SystemExit('first-install bootstrap step is missing')
+bootstrap = next(item for item in steps if item.get('name') == required)
+shell = bootstrap.get('run', '')
+if '--set minRunners=0' not in shell or '--set maxRunners=0' not in shell:
+    raise SystemExit('first-install bootstrap can enable runners')
+if 'helm upgrade --install' not in shell or '--version "${ARC_CHART_VERSION}"' not in shell:
+    raise SystemExit('first-install bootstrap is not chart-owned and pinned')
+if names.index(required) >= names.index('Render and preflight candidate'):
+    raise SystemExit('first-install bootstrap does not precede target Pod dry-run')
+if 'serviceaccount' not in shell or 'redducklabs-runners-gha-rs-no-permission' not in shell:
+    raise SystemExit('first-install bootstrap does not verify chart ownership')
+PY
+    then
+        pass "First install bootstraps the chart-owned ServiceAccount at zero runners before Pod preflight"
+    else
+        fail "Absent chart-owned ServiceAccount has no safe zero-runner first-install preflight route"
+    fi
+
+    local script="$FIXTURE_DIR/absent-sa-bootstrap.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Bootstrap chart-owned ServiceAccount for first install' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Absent-ServiceAccount bootstrap fixture could not be materialized"
+        return
+    fi
+    sed -i 's/export STEPS_PREREQUISITES_OUTPUTS_FIRST_INSTALL=fixture/export STEPS_PREREQUISITES_OUTPUTS_FIRST_INSTALL=true/' "$script"
+    FIXTURE_SA_STATE=absent FIXTURE_SCALE_RELEASE_STATE=absent
+    export FIXTURE_SA_STATE FIXTURE_SCALE_RELEASE_STATE
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+      && grep -Eq '^helm upgrade --install .*minRunners=0 .*maxRunners=0' "$FIXTURE_DIR/mutations"; then
+        pass "Absent ServiceAccount executes a chart-owned zero-runner bootstrap"
+    else
+        fail "Absent ServiceAccount cannot execute the zero-runner bootstrap"
+    fi
+    unset FIXTURE_SA_STATE FIXTURE_SCALE_RELEASE_STATE
+}
+
+assert_complete_isolation_and_pool_contracts() {
+    local node_script="$FIXTURE_DIR/node-incomplete-contract.sh"
+    : > "$node_script"
+    materialize_workflow_step .github/workflows/node-pool-sizing.yml \
+      'Reduce pool maximum without node removal' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$node_script" || {
+        fail "Complete isolation fixture could not materialize Node Pool Sizing"
+        return
+      }
+    FIXTURE_POOL_MAX=8
+    local label_value taint_value taint_effect
+    while IFS='|' read -r label_value taint_value taint_effect; do
+        FIXTURE_POOL_WORKLOAD_LABEL=$label_value
+        FIXTURE_POOL_TAINT_VALUE=$taint_value
+        FIXTURE_POOL_TAINT_EFFECT=$taint_effect
+        export FIXTURE_POOL_WORKLOAD_LABEL FIXTURE_POOL_TAINT_VALUE FIXTURE_POOL_TAINT_EFFECT
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$node_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Node Pool Sizing accepts dedicated-pool label/taint drift (${label_value},${taint_value},${taint_effect})"
+        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
+            fail "Node Pool Sizing mutates after dedicated-pool label/taint drift"
+        else
+            pass "Node Pool Sizing rejects dedicated-pool label/taint drift (${label_value},${taint_value},${taint_effect})"
+        fi
+    done <<'CASES'
+missing|true|NoSchedule
+ci-cd|false|NoSchedule
+ci-cd|true|PreferNoSchedule
+CASES
+    unset FIXTURE_POOL_WORKLOAD_LABEL FIXTURE_POOL_TAINT_VALUE FIXTURE_POOL_TAINT_EFFECT
+
+    FIXTURE_POOL_MAX=8
+    FIXTURE_TEMPLATE_DRIFT=token
+    export FIXTURE_TEMPLATE_DRIFT
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$node_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Node Pool Sizing accepts injected token material in the ARC contract"
+    elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
+        fail "Node Pool Sizing mutates before rejecting token material"
+    else
+        pass "Node Pool Sizing rejects injected token material before mutation"
+    fi
+    unset FIXTURE_TEMPLATE_DRIFT
+
+    FIXTURE_SCALE_CHART_VERSION=0.13.0
+    export FIXTURE_SCALE_CHART_VERSION
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$node_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Node Pool Sizing accepts an unpinned deployed runner chart"
+    elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
+        fail "Node Pool Sizing mutates before rejecting an unpinned chart"
+    else
+        pass "Node Pool Sizing requires the pinned deployed runner chart"
+    fi
+    unset FIXTURE_SCALE_CHART_VERSION
+
+    local scale_script="$FIXTURE_DIR/scale-incomplete-contract.sh"
+    : > "$scale_script"
+    materialize_workflow_step .github/workflows/scale-runners.yml \
+      'Quiesce rollout and record rollback revision' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$scale_script" || {
+        fail "Complete isolation fixture could not materialize Scale Runners"
+        return
+      }
+    FIXTURE_HELM_MAX=8 FIXTURE_HELM_GROUP=Default FIXTURE_TEMPLATE_DRIFT=placement
+    export FIXTURE_HELM_MAX FIXTURE_HELM_GROUP FIXTURE_TEMPLATE_DRIFT
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$scale_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Scale Runners accepts placement drift in the recognized legacy prestate"
+    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
+        fail "Scale Runners mutates before rejecting placement drift"
+    else
+        pass "Scale Runners rejects placement drift before mutation"
+    fi
+    unset FIXTURE_TEMPLATE_DRIFT
+    FIXTURE_HELM_MAX=2 FIXTURE_HELM_GROUP=redducklabs-private-runners
+
+    FIXTURE_POOL_MAX=2
+
+    local rollback_script="$FIXTURE_DIR/rollback-incomplete-contract.sh"
+    : > "$rollback_script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$rollback_script" || {
+        fail "Complete rollback fixture could not be materialized"
+        return
+      }
+    local drift
+    for drift in automount placement token extra; do
+        FIXTURE_TEMPLATE_DRIFT=$drift
+        export FIXTURE_TEMPLATE_DRIFT
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$rollback_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Rollback accepts ${drift} drift in the exact template"
+        elif grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
+            fail "Rollback mutates before rejecting ${drift} drift"
+        else
+            pass "Rollback rejects ${drift} drift before mutation"
+        fi
+    done
+    unset FIXTURE_TEMPLATE_DRIFT
+}
+
+assert_registry_temp_and_oidc_hardening() {
+    local script="$FIXTURE_DIR/registry-temp-symlink.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Verify prepared platform prerequisites' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+        fail "Registry temporary-file fixture could not be materialized"
+        return
+      }
+    printf 'do-not-overwrite\n' > "$FIXTURE_DIR/registry-target"
+    rm -f "$FIXTURE_DIR/do-registry-config.json"
+    ln -s "$FIXTURE_DIR/registry-target" "$FIXTURE_DIR/do-registry-config.json"
+    FIXTURE_PLATFORM_STATE=ready FIXTURE_SA_STATE=helm FIXTURE_REGISTRY_STATE=ready
+    export FIXTURE_PLATFORM_STATE FIXTURE_SA_STATE FIXTURE_REGISTRY_STATE
+    : > "$FIXTURE_DIR/mutations"
+    run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" || true
+    if grep -Fxq 'do-not-overwrite' "$FIXTURE_DIR/registry-target"; then
+        pass "Deploy registry validation uses a protected unpredictable temporary file"
+    else
+        fail "Deploy registry validation follows a predictable temporary-file path"
+    fi
+    rm -f "$FIXTURE_DIR/do-registry-config.json"
+
+    if python3 - <<'PY'
+import yaml
+for path in (
+    '.github/workflows/deploy-runners.yml',
+    '.github/workflows/scale-runners.yml',
+    '.github/workflows/emergency-stop.yml',
+):
+    with open(path, encoding='utf-8') as stream:
+        workflow = yaml.safe_load(stream)
+    if (workflow.get('permissions') or {}).get('id-token') == 'write':
+        raise SystemExit(f'unused OIDC permission remains in {path}')
+PY
+    then
+        pass "Runner mutation workflows do not grant unused OIDC token permission"
+    else
+        fail "Runner mutation workflows retain unused id-token: write permission"
     fi
 }
 
@@ -2387,7 +2952,7 @@ assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizin
 FIXTURE_POOL_MAX=2
 printf '#!/usr/bin/env bash\ncat\n' > "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
 chmod 0700 "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
-assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm upgrade --install "${RELEASE_NAME}"' Helm '^helm upgrade --install redducklabs-runners '
+assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' '--post-renderer "${HASH_GATE}"' Helm '^helm upgrade --install redducklabs-runners '
 assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation' '^(curl|gh) .*actions/runner-groups'
 assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback' '^helm rollback '
 assert_trust_boundary_fixtures
@@ -2404,6 +2969,12 @@ assert_node_pool_no_removal_contract
 assert_prepared_platform_prerequisites
 assert_shared_fleet_concurrency
 assert_platform_ownership_and_registry_generation
+assert_review_fix_trust_snapshots
+assert_emergency_reason_is_inert
+assert_deploy_unused_revision_cannot_route
+assert_absent_sa_bootstrap_contract
+assert_complete_isolation_and_pool_contracts
+assert_registry_temp_and_oidc_hardening
 assert_rollback_recovery_route
 assert_rollback_ignores_deploy_only_inputs
 assert_final_workflow_graph_and_prerequisites

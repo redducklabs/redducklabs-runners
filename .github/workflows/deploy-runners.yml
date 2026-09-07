@@ -84,7 +84,6 @@ env:
 # Use minimal permissions
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   validate-inputs:
@@ -137,6 +136,16 @@ jobs:
             exit 1
           fi
 
+          write_output() {
+            local key=$1 value=$2
+            if ! [[ "${key}" =~ ^[a-z_]+$ ]] \
+               || [[ "${value}" == *$'\r'* || "${value}" == *$'\n'* ]]; then
+              echo "❌ Error: refusing unsafe workflow output ${key}"
+              return 1
+            fi
+            printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_OUTPUT}"
+          }
+
           case "${OPERATION}" in
             deploy|prepare-trust-boundary)
               if [ "${ACCEPT_CO_TENANCY}" != "true" ]; then
@@ -156,6 +165,14 @@ jobs:
               ;;
           esac
 
+          write_output operation "${OPERATION}"
+          write_output expected_sha "${EXPECTED_SHA}"
+
+          if [ "${OPERATION}" = "prepare-trust-boundary" ]; then
+            echo "✅ Trust-boundary operation and SHA validated"
+            exit 0
+          fi
+
           # Namespace is the only non-revision dispatch value needed to locate
           # the rollback release. Deploy-only runner settings must never block
           # the recovery path.
@@ -164,10 +181,8 @@ jobs:
             exit 1
           fi
           if [ "${OPERATION}" = "rollback" ]; then
-            echo "operation=${OPERATION}" >> "${GITHUB_OUTPUT}"
-            echo "expected_sha=${EXPECTED_SHA}" >> "${GITHUB_OUTPUT}"
-            echo "rollback_revision=${ROLLBACK_REVISION}" >> "${GITHUB_OUTPUT}"
-            echo "namespace=${NAMESPACE}" >> "${GITHUB_OUTPUT}"
+            write_output rollback_revision "${ROLLBACK_REVISION}"
+            write_output namespace "${NAMESPACE}"
             echo "✅ Rollback SHA, revision, and namespace validated"
             exit 0
           fi
@@ -202,13 +217,10 @@ jobs:
           fi
           
           # Set validated outputs
-          echo "operation=${OPERATION}" >> $GITHUB_OUTPUT
-          echo "expected_sha=${EXPECTED_SHA}" >> $GITHUB_OUTPUT
-          echo "rollback_revision=${ROLLBACK_REVISION}" >> $GITHUB_OUTPUT
-          echo "min_runners=${MIN_RUNNERS}" >> $GITHUB_OUTPUT
-          echo "max_runners=${MAX_RUNNERS}" >> $GITHUB_OUTPUT
-          echo "runner_image=${RUNNER_IMAGE}" >> $GITHUB_OUTPUT
-          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
+          write_output min_runners "${MIN_RUNNERS}"
+          write_output max_runners "${MAX_RUNNERS}"
+          write_output runner_image "${RUNNER_IMAGE}"
+          write_output namespace "${NAMESPACE}"
           
           echo "✅ All inputs validated successfully"
           echo "  Min runners: ${MIN_RUNNERS}"
@@ -334,6 +346,7 @@ jobs:
           done
 
       - name: Verify prepared platform prerequisites
+        id: prerequisites
         if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
@@ -349,18 +362,20 @@ jobs:
             echo "❌ Error: do-registry-secret has the wrong type or no Docker config"
             exit 1
           fi
-          REGISTRY_CONFIG="${RUNNER_TEMP}/do-registry-config.json"
+          umask 077
+          REGISTRY_CONFIG=$(mktemp "${RUNNER_TEMP}/do-registry-config.XXXXXX")
+          trap 'rm -f "${REGISTRY_CONFIG}"' EXIT
           if ! jq -r '.data[".dockerconfigjson"]' <<<"${REGISTRY_SECRET}" \
             | base64 --decode > "${REGISTRY_CONFIG}" \
             || ! jq -e '
               .auths["registry.digitalocean.com"].auth
               | type == "string" and length > 0
             ' "${REGISTRY_CONFIG}" >/dev/null; then
-            rm -f "${REGISTRY_CONFIG}"
             echo "❌ Error: do-registry-secret lacks valid DigitalOcean registry auth"
             exit 1
           fi
           rm -f "${REGISTRY_CONFIG}"
+          trap - EXIT
 
           if ! SERVICE_ACCOUNT=$(kubectl get serviceaccount \
             redducklabs-runners-gha-rs-no-permission -n "${NAMESPACE}" \
@@ -368,6 +383,9 @@ jobs:
             echo "❌ Error: could not validate runner ServiceAccount ownership"
             exit 1
           fi
+          SCALE_RELEASES=$(helm list -n "${NAMESPACE}" -o json)
+          RELEASE_MATCHES=$(jq -c --arg name "${RELEASE_NAME}" \
+            '[.[] | select(.name == $name)]' <<<"${SCALE_RELEASES}")
           if [ -n "${SERVICE_ACCOUNT}" ]; then
             if ! jq -e '
               .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
@@ -377,6 +395,21 @@ jobs:
               echo "❌ Error: existing runner ServiceAccount is not owned by the redducklabs-runners Helm release"
               exit 1
             fi
+            if ! jq -e --arg version "${ARC_CHART_VERSION}" '
+              length == 1
+              and .[0].chart == ("gha-runner-scale-set-" + $version)
+              and .[0].status == "deployed"
+            ' <<<"${RELEASE_MATCHES}" >/dev/null; then
+              echo "❌ Error: existing runner ServiceAccount has no matching deployed pinned Helm release"
+              exit 1
+            fi
+            printf 'first_install=false\n' >> "${GITHUB_OUTPUT}"
+          else
+            if [ "$(jq 'length' <<<"${RELEASE_MATCHES}")" != "0" ]; then
+              echo "❌ Error: runner Helm release exists without its chart-owned ServiceAccount"
+              exit 1
+            fi
+            printf 'first_install=true\n' >> "${GITHUB_OUTPUT}"
           fi
 
           CRDS=(
@@ -418,6 +451,42 @@ jobs:
             exit 1
           fi
           echo "✅ Prepared platform prerequisites are present and Ready"
+
+      - name: Bootstrap chart-owned ServiceAccount for first install
+        if: steps.prerequisites.outputs.first_install == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          echo "🔐 Bootstrapping the chart-owned ServiceAccount with runners disabled..."
+          helm upgrade --install "${RELEASE_NAME}" \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace "${NAMESPACE}" \
+            --values deploy/dind-values.yaml \
+            --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
+            --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
+            --set minRunners=0 \
+            --set maxRunners=0 \
+            --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
+            --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
+            --set runnerGroup=redducklabs-private-runners \
+            --set controllerServiceAccount.name=arc-gha-rs-controller \
+            --set controllerServiceAccount.namespace=arc-systems \
+            --version "${ARC_CHART_VERSION}" \
+            --wait --timeout 300s
+
+          SERVICE_ACCOUNT=$(kubectl get serviceaccount \
+            redducklabs-runners-gha-rs-no-permission -n "${NAMESPACE}" -o json)
+          if ! jq -e '
+            .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
+            and .metadata.annotations["meta.helm.sh/release-name"] == "redducklabs-runners"
+            and .metadata.annotations["meta.helm.sh/release-namespace"] == "arc-runners"
+          ' <<<"${SERVICE_ACCOUNT}" >/dev/null; then
+            echo "❌ Error: zero-runner bootstrap did not create the expected Helm-owned ServiceAccount"
+            exit 1
+          fi
+          echo "✅ Chart-owned ServiceAccount bootstrapped with minRunners=0 maxRunners=0"
       
       - name: Check node pool capacity
         env:
@@ -1154,41 +1223,16 @@ jobs:
           kubectl get namespace "${NAMESPACE}" >/dev/null
 
           validate_rollback_values() {
-            jq -e '
-              .minRunners == 2 and .maxRunners == 2
-              and .runnerGroup == "redducklabs-private-runners"
-              and ([.template.spec.containers[]? | select(.name=="runner")
-                    | .resources.requests.memory] == ["5Gi"])
-              and ([.template.spec.initContainers[]? | select(.name=="dind")
-                    | .resources.requests.memory] == ["5Gi"])
-            ' >/dev/null
+            python3 scripts/validate-runner-isolation-contract.py \
+              --kind values --max-runners 2 \
+              --runner-group redducklabs-private-runners --require-automount
           }
 
           validate_rollback_manifest() {
-            python3 - "$1" <<'PY'
-          import sys
-          import yaml
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              matches = [doc for doc in yaml.safe_load_all(stream)
-                         if isinstance(doc, dict) and doc.get("kind") == "AutoscalingRunnerSet"]
-          if len(matches) != 1:
-              raise SystemExit("rollback manifest must contain exactly one AutoscalingRunnerSet")
-          spec = matches[0].get("spec", {})
-          if spec.get("minRunners") != 2 or spec.get("maxRunners") != 2:
-              raise SystemExit("rollback manifest runner bounds are not 2/2")
-          if spec.get("runnerGroup") != "redducklabs-private-runners":
-              raise SystemExit("rollback manifest runner group is not private")
-          pod = spec.get("template", {}).get("spec", {})
-          runners = [item for item in pod.get("containers", []) if item.get("name") == "runner"]
-          dinds = [item for item in pod.get("initContainers", []) if item.get("name") == "dind"]
-          if len(runners) != 1 or len(dinds) != 1:
-              raise SystemExit("rollback manifest runner/DinD template is incomplete")
-          if runners[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
-              raise SystemExit("rollback manifest runner request is not 5Gi")
-          if dinds[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
-              raise SystemExit("rollback manifest DinD request is not 5Gi")
-          PY
+            python3 scripts/validate-runner-isolation-contract.py \
+              --kind manifest --max-runners 2 \
+              --runner-group redducklabs-private-runners --require-automount \
+              < "$1"
           }
 
           HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)

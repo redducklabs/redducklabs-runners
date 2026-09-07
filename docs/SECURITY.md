@@ -69,7 +69,10 @@ or adopt it. If the object already exists before deploy, its Helm release and
 namespace annotations must identify `redducklabs-runners` in `arc-runners`,
 and its managed-by label must be `Helm`. Runner Pods set
 `automountServiceAccountToken: false`; server-side admission validation rejects
-an injected service-account token volume or mount.
+an injected service-account token volume or mount. For a first install, the
+pinned scale-set chart is bootstrapped at zero runners to create this
+ServiceAccount under Helm ownership; the target Pod is then server-dry-run
+before runner capacity is enabled.
 
 ## 🌐 Network Security
 

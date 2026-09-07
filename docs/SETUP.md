@@ -36,7 +36,11 @@ prerequisites. Deploy validates the registry secret type, Docker config, and
 non-empty `registry.digitalocean.com` auth without logging credential data. A
 pre-existing no-permission ServiceAccount is accepted only with exact Helm
 ownership for release `redducklabs-runners` in `arc-runners`. Missing, stale,
-foreign-owned, or malformed prerequisites fail closed before Helm.
+foreign-owned, or malformed prerequisites fail closed before Helm. If the
+ServiceAccount is absent on the first install, deploy installs the pinned
+scale-set chart with `minRunners=0` and `maxRunners=0`, verifies exact Helm
+ownership, and only then server-dry-runs the admitted target Pod. The final
+Helm operation enables the requested runner count after preflight succeeds.
 
 ### Step 3: Deploy Runners
 
@@ -224,6 +228,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
 ```
+
+The trust-boundary verifier scans every public repository at an immutable
+default-branch head SHA and rechecks the branch and head before any runner-group
+mutation. The committed repository identities for `agent-handoff-toolkit`,
+`fountainrank`, and `claude-control` are always resolved and scanned even if an
+enumeration response omits them.
 
 ## 🛠️ Status monitoring
 

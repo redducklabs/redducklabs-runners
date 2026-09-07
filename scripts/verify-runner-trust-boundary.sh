@@ -62,6 +62,15 @@ TRUSTED_REPOSITORIES=(
     '1351028230:manager'
 )
 
+# These public repositories are rollout prerequisites even when GitHub's public
+# repository enumeration is incomplete or changes shape. Their committed IDs
+# prevent a rename or transfer from silently changing what is audited.
+REQUIRED_PUBLIC_MIGRATIONS=(
+    '1359405097:agent-handoff-toolkit'
+    '1271568186:fountainrank'
+    '1208056940:claude-control'
+)
+
 EXPECTED_IDS_JSON=$(printf '%s\n' "${TRUSTED_REPOSITORIES[@]}" \
     | cut -d: -f1 | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')
 
@@ -74,6 +83,57 @@ github_read() {
         return 1
     fi
     printf '%s\n' "$output"
+}
+
+encode_url_component() {
+    python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+
+print(quote(sys.argv[1], safe=""))
+PY
+}
+
+encode_url_path() {
+    python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+
+parts = sys.argv[1].split("/")
+if any(part in ("", ".", "..") for part in parts):
+    raise SystemExit("workflow path contains an unsafe path segment")
+print("/".join(quote(part, safe="") for part in parts))
+PY
+}
+
+resolve_branch_head() {
+    local repo_name=$1 default_branch=$2 encoded_org encoded_repo commits
+    encoded_org=$(encode_url_component "$ORG")
+    encoded_repo=$(encode_url_component "$repo_name")
+    commits=$(github_read "default-branch head for ${repo_name}" --method GET \
+        "repos/${encoded_org}/${encoded_repo}/commits" \
+        -f "sha=${default_branch}" -f per_page=1) || return 1
+    if ! jq -e 'type == "array" and length == 1 and (.[0].sha | test("^[0-9a-f]{40}$"))' \
+        <<<"$commits" >/dev/null; then
+        echo "ERROR: could not resolve one immutable default-branch head for ${repo_name}" >&2
+        return 1
+    fi
+    jq -r '.[0].sha' <<<"$commits"
+}
+
+validate_public_identity() {
+    local repository=$1 expected_id=$2 expected_name=$3 expected_branch=${4:-}
+    jq -e --argjson id "$expected_id" --arg owner "$ORG" \
+        --arg name "$expected_name" --arg branch "$expected_branch" '
+        .id == $id
+        and .owner.login == $owner
+        and .name == $name
+        and .full_name == ($owner + "/" + $name)
+        and .visibility == "public"
+        and .private == false
+        and (.default_branch | type == "string" and length > 0)
+        and ($branch == "" or .default_branch == $branch)
+    ' <<<"$repository" >/dev/null
 }
 
 echo "Validating committed private repository identities..."
@@ -104,16 +164,54 @@ if ! public_repos=$(jq -sc 'add // []' <<<"$public_pages"); then
     echo "ERROR: public repository enumeration returned an unrecognized schema" >&2
     exit 1
 fi
-if ! jq -e 'type == "array" and all(.[]; .visibility == "public" and (.name | type == "string") and (.default_branch | type == "string"))' \
+if ! jq -e --arg owner "$ORG" '
+    type == "array"
+    and all(.[].id; type == "number")
+    and ([.[].id] | unique | length) == length
+    and all(.[];
+        .owner.login == $owner
+        and .full_name == ($owner + "/" + .name)
+        and .visibility == "public"
+        and .private == false
+        and (.name | type == "string" and length > 0)
+        and (.default_branch | type == "string" and length > 0))
+' \
     <<<"$public_repos" >/dev/null; then
     echo "ERROR: public repository enumeration returned an unrecognized schema" >&2
     exit 1
 fi
 
-while IFS=$'\t' read -r repo_name default_branch; do
+required_public='[]'
+for entry in "${REQUIRED_PUBLIC_MIGRATIONS[@]}"; do
+    repo_id=${entry%%:*}
+    repo_name=${entry#*:}
+    repo_json=$(github_read "required migration repository ${repo_name}" \
+        "/repositories/${repo_id}") || exit 1
+    if ! validate_public_identity "$repo_json" "$repo_id" "$repo_name"; then
+        echo "ERROR: required migration identity ${repo_id}:${repo_name} is unknown, transferred, renamed, or not public" >&2
+        exit 1
+    fi
+    required_public=$(jq -c --argjson repo "$repo_json" '. + [$repo]' \
+        <<<"$required_public")
+done
+
+audit_repos=$(jq -cn --argjson enumerated "$public_repos" \
+    --argjson required "$required_public" \
+    '$enumerated + $required | unique_by(.id)')
+
+while IFS=$'\t' read -r repo_id repo_name enumerated_branch; do
     [ -n "$repo_name" ] || continue
+    initial_repo=$(github_read "repository snapshot for ${repo_name}" \
+        "/repositories/${repo_id}") || exit 1
+    if ! validate_public_identity "$initial_repo" "$repo_id" "$repo_name" \
+      "$enumerated_branch"; then
+        echo "ERROR: public repository identity/default branch changed before scan for ${repo_name}" >&2
+        exit 1
+    fi
+    default_branch=$(jq -r '.default_branch' <<<"$initial_repo")
+    head_sha=$(resolve_branch_head "$repo_name" "$default_branch") || exit 1
     workflow_pages=$(github_read "workflow enumeration for ${repo_name}" --paginate \
-        "repos/${ORG}/${repo_name}/actions/workflows?per_page=100") || exit 1
+        "repos/$(encode_url_component "$ORG")/$(encode_url_component "$repo_name")/actions/workflows?per_page=100") || exit 1
     if ! jq -se '
         all(.[];
             type == "object"
@@ -140,8 +238,11 @@ while IFS=$'\t' read -r repo_name default_branch; do
                 ;;
         esac
         workflow_file=$(mktemp)
+        encoded_workflow_path=$(encode_url_path "$workflow_path")
         if ! gh api -H 'Accept: application/vnd.github.raw+json' \
-            "repos/${ORG}/${repo_name}/contents/${workflow_path}?ref=${default_branch}" >"$workflow_file"; then
+            --method GET \
+            "repos/$(encode_url_component "$ORG")/$(encode_url_component "$repo_name")/contents/${encoded_workflow_path}" \
+            -f "ref=${head_sha}" >"$workflow_file"; then
             rm -f "$workflow_file"
             echo "ERROR: could not read public workflow ${repo_name}:${workflow_path}; failing closed" >&2
             exit 1
@@ -203,7 +304,20 @@ PY
         fi
         rm -f "$workflow_file"
     done < <(jq -r '.[].path' <<<"$workflows")
-done < <(jq -r '.[] | [.name, .default_branch] | @tsv' <<<"$public_repos")
+
+    final_repo=$(github_read "repository readback for ${repo_name}" \
+        "/repositories/${repo_id}") || exit 1
+    if ! validate_public_identity "$final_repo" "$repo_id" "$repo_name" \
+      "$default_branch"; then
+        echo "ERROR: public repository identity/default branch changed during scan for ${repo_name}" >&2
+        exit 1
+    fi
+    final_head=$(resolve_branch_head "$repo_name" "$default_branch") || exit 1
+    if [ "$final_head" != "$head_sha" ]; then
+        echo "ERROR: public repository default-branch head changed during scan for ${repo_name}" >&2
+        exit 1
+    fi
+done < <(jq -r '.[] | [.id, .name, .default_branch] | @tsv' <<<"$audit_repos")
 
 group_pages=$(github_read "runner-group enumeration" --paginate \
     "orgs/${ORG}/actions/runner-groups?per_page=100") || exit 1

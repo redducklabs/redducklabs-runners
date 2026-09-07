@@ -55,7 +55,10 @@ The normal deployment workflow requires the namespace, an explicitly named
 `kubernetes.io/dockerconfigjson` pull secret with DigitalOcean registry auth,
 all four pinned ARC CRDs, and the Ready pinned controller. The scale-set chart
 owns its no-permission ServiceAccount; deploy accepts a pre-existing object
-only when its Helm release and namespace ownership are exact.
+only when its Helm release and namespace ownership are exact. On the first
+scale-set install, deploy installs the pinned chart at zero runners to create
+the chart-owned ServiceAccount, then server-dry-runs the target runner Pod
+before enabling runners.
 
 ### 3. Deploy Runners via GitHub Actions
 1. Go to the **Actions** tab in your repository
@@ -273,6 +276,11 @@ unavailable. See [node-pool sizing](docs/runbooks/node-pool-sizing.md).
 ### External acceptance prerequisites
 
 Live acceptance is deterministic only after the trust boundary succeeds. The
+trust check resolves each public repository's default-branch head to an
+immutable SHA, scans URL-encoded workflow paths at that SHA, and aborts if the
+default branch or head changes during the scan. It also resolves the committed
+identities for `agent-handoff-toolkit`, `fountainrank`, and `claude-control`
+independently of public-repository enumeration.
 private `redducklabs/aurolegal.ai` density workflow runs from a unique annotated
 tag at its reviewed workflow SHA, checks `expected_workflow_sha`, and proves four
 overlapping jobs on four distinct ephemeral runners with 2+2 placement across

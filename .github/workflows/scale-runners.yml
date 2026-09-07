@@ -50,7 +50,6 @@ env:
 # Use minimal permissions
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   validate-inputs:
@@ -340,53 +339,21 @@ jobs:
         run: |
           validate_isolated_values() {
             local expected_max=$1 expected_group=$2 require_automount=$3
-            jq -e --arg expected_max "${expected_max}" \
-              --arg expected_group "${expected_group}" \
-              --argjson require_automount "${require_automount}" '
-              .minRunners == 2 and (.maxRunners | tostring) == $expected_max
-              and .runnerGroup == $expected_group
-              and ($require_automount == false
-                   or .template.spec.automountServiceAccountToken == false)
-              and ([.template.spec.containers[]? | select(.name=="runner")
-                    | .resources.requests.memory] == ["5Gi"])
-              and ([.template.spec.initContainers[]? | select(.name=="dind")
-                    | .resources.requests.memory] == ["5Gi"])
-            ' >/dev/null
+            local automount_args=()
+            [ "${require_automount}" = true ] && automount_args+=(--require-automount)
+            python3 scripts/validate-runner-isolation-contract.py \
+              --kind values --max-runners "${expected_max}" \
+              --runner-group "${expected_group}" "${automount_args[@]}"
           }
 
           validate_isolated_manifest() {
-            python3 - "$1" "$2" "$3" "$4" <<'PY'
-          import sys
-          import yaml
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              resources = [item for item in yaml.safe_load_all(stream)
-                           if isinstance(item, dict)
-                           and item.get("kind") == "AutoscalingRunnerSet"]
-          if len(resources) != 1:
-              raise SystemExit("expected exactly one AutoscalingRunnerSet")
-          spec = resources[0].get("spec", {})
-          pod = spec.get("template", {}).get("spec", {})
-          runners = [item for item in pod.get("containers", [])
-                     if item.get("name") == "runner"]
-          dinds = [item for item in pod.get("initContainers", [])
-                   if item.get("name") == "dind"]
-          expected_max = int(sys.argv[2])
-          expected_group = sys.argv[3]
-          require_automount = sys.argv[4] == "true"
-          if spec.get("minRunners") != 2 or spec.get("maxRunners") != expected_max:
-              raise SystemExit(f"runner bounds are not 2/{expected_max}")
-          if spec.get("runnerGroup") != expected_group:
-              raise SystemExit(f"runner group is not {expected_group}")
-          if require_automount and pod.get("automountServiceAccountToken") is not False:
-              raise SystemExit("service-account token automount is not disabled")
-          if len(runners) != 1 or len(dinds) != 1:
-              raise SystemExit("isolated runner/DinD template is incomplete")
-          if runners[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
-              raise SystemExit("runner request is not 5Gi")
-          if dinds[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
-              raise SystemExit("DinD request is not 5Gi")
-          PY
+            local manifest=$1 expected_max=$2 expected_group=$3 require_automount=$4
+            local automount_args=()
+            [ "${require_automount}" = true ] && automount_args+=(--require-automount)
+            python3 scripts/validate-runner-isolation-contract.py \
+              --kind manifest --max-runners "${expected_max}" \
+              --runner-group "${expected_group}" "${automount_args[@]}" \
+              < "${manifest}"
           }
 
           RELEASES=$(helm list -n "${NAMESPACE}" -o json)
@@ -465,17 +432,10 @@ jobs:
             redducklabs-private-runners true
           LIVE_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
             -n "${NAMESPACE}" -o json)
-          if ! jq -e '
-            .items | length == 1
-            and .[0].spec.minRunners == 2
-            and .[0].spec.maxRunners == 2
-            and .[0].spec.runnerGroup == "redducklabs-private-runners"
-            and .[0].spec.template.spec.automountServiceAccountToken == false
-            and ([.[0].spec.template.spec.containers[]? | select(.name=="runner")
-                  | .resources.requests.memory] == ["5Gi"])
-            and ([.[0].spec.template.spec.initContainers[]? | select(.name=="dind")
-                  | .resources.requests.memory] == ["5Gi"])
-          ' <<<"${LIVE_ASRS}" >/dev/null; then
+          if ! python3 scripts/validate-runner-isolation-contract.py \
+            --kind asrs-list --max-runners 2 \
+            --runner-group redducklabs-private-runners --require-automount \
+            <<<"${LIVE_ASRS}"; then
             echo "❌ Error: live quiesced AutoscalingRunnerSet is not exact private 2/2 isolated state"
             exit 1
           fi

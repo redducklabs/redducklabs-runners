@@ -53,6 +53,7 @@ concurrency:
 env:
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
   CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+  ARC_CHART_VERSION: '0.14.2'
 
 permissions:
   contents: read
@@ -202,41 +203,43 @@ jobs:
               and .size == "s-8vcpu-16gb"
               and .auto_scale == true
               and .labels["node-type"] == "github-runner"
-              and any(.taints[]?; .key == "github-runner")
+              and .labels["workload-type"] == "ci-cd"
+              and ([.taints[]? | select(.key == "github-runner")] == [{
+                key: "github-runner", value: "true", effect: "NoSchedule"
+              }])
             ' <<<"${state}" >/dev/null || {
-              echo "❌ Error: ${stage} pool state violates min/count=2/2, max=${expected_max}, size=s-8vcpu-16gb, autoscale, label, or taint"
+              echo "❌ Error: ${stage} pool state violates min/count=2/2, max=${expected_max}, size=s-8vcpu-16gb, autoscale, exact labels, or taint"
               return 1
             }
           }
 
           verify_isolated_arc() {
-            local values asrs
+            local releases values asrs
+            releases=$(helm list -n arc-runners -o json)
+            jq -e --arg version "${ARC_CHART_VERSION}" '
+              [.[] | select(
+                .name == "redducklabs-runners"
+                and .chart == ("gha-runner-scale-set-" + $version)
+                and .status == "deployed"
+              )] | length == 1
+            ' <<<"${releases}" >/dev/null || {
+              echo "❌ Error: deployed runner release is not pinned chart ${ARC_CHART_VERSION}"
+              return 1
+            }
             values=$(helm get values redducklabs-runners -n arc-runners -o json)
-            jq -e '
-              .minRunners == 2 and .maxRunners == 2
-              and .runnerGroup == "redducklabs-private-runners"
-              and .template.spec.automountServiceAccountToken == false
-              and ([.template.spec.containers[]? | select(.name=="runner")
-                    | .resources.requests.memory] == ["5Gi"])
-              and ([.template.spec.initContainers[]? | select(.name=="dind")
-                    | .resources.requests.memory] == ["5Gi"])
-            ' <<<"${values}" >/dev/null || {
+            python3 scripts/validate-runner-isolation-contract.py \
+              --kind values --max-runners 2 \
+              --runner-group redducklabs-private-runners --require-automount \
+              <<<"${values}" || {
               echo "❌ Error: Helm state is not exact private 2/2 isolated 5Gi+5Gi state"
               return 1
             }
             asrs=$(kubectl get autoscalingrunnersets.actions.github.com \
               -n arc-runners -o json)
-            jq -e '
-              .items | length == 1
-              and .[0].spec.minRunners == 2
-              and .[0].spec.maxRunners == 2
-              and .[0].spec.runnerGroup == "redducklabs-private-runners"
-              and .[0].spec.template.spec.automountServiceAccountToken == false
-              and ([.[0].spec.template.spec.containers[]? | select(.name=="runner")
-                    | .resources.requests.memory] == ["5Gi"])
-              and ([.[0].spec.template.spec.initContainers[]? | select(.name=="dind")
-                    | .resources.requests.memory] == ["5Gi"])
-            ' <<<"${asrs}" >/dev/null || {
+            python3 scripts/validate-runner-isolation-contract.py \
+              --kind asrs-list --max-runners 2 \
+              --runner-group redducklabs-private-runners --require-automount \
+              <<<"${asrs}" || {
               echo "❌ Error: live AutoscalingRunnerSet is not exact private 2/2 isolated 5Gi+5Gi state"
               return 1
             }
