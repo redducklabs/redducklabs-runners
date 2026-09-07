@@ -1273,6 +1273,15 @@ jobs:
             echo "❌ Error: rollback live manifest readback does not restore the isolated runner template"
             exit 1
           fi
+          RESTORED_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
+            -n "${NAMESPACE}" -o json)
+          if ! python3 scripts/validate-runner-isolation-contract.py \
+            --contract legacy-isolated --kind asrs-list \
+            --min-runners 2 --max-runners 2 --runner-group private \
+            <<<"${RESTORED_ASRS}"; then
+            echo "❌ Error: rollback live AutoscalingRunnerSet readback does not restore the exact private 2/2 isolated state"
+            exit 1
+          fi
           echo "✅ Rollback restored validated revision ${REVISION}"
 
       - name: Verify trust and pool after rollback

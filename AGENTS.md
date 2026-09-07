@@ -50,6 +50,9 @@ Codex-specific adapter rules:
   explicit controller service-account values. Use the full `helm template`
   invocation from `test/verify-runner-resources.sh`; omitting those values makes
   the chart attempt live controller discovery and fail before kubeconform runs.
+- On Windows, run Helm OCI chart renders sequentially. Concurrent renders of
+  the same chart version can contend on Helm's shared archive cache and fail an
+  otherwise valid render with an `Access is denied` temporary-file rename.
 - In Windows validation sessions, run the installed `shellcheck.exe` from
   PowerShell with an explicit array of script paths. A WSL `bash -lc` session
   does not inherit the Windows executable lookup and reports

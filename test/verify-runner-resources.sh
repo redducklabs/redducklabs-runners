@@ -670,6 +670,7 @@ PY
         export FIXTURE_ROLLBACK_MANIFEST="$FIXTURE_DIR/rollback-manifest.yaml"
         export FIXTURE_LEGACY_MANIFEST="$FIXTURE_DIR/legacy-manifest.yaml"
         export FIXTURE_ROLLBACK_INVALID="${FIXTURE_ROLLBACK_INVALID:-none}"
+        export FIXTURE_POST_ROLLBACK_ASRS_DRIFT="${FIXTURE_POST_ROLLBACK_ASRS_DRIFT:-none}"
         export FIXTURE_POOL_MIN FIXTURE_POOL_MAX FIXTURE_POOL_COUNT
         export FIXTURE_POOL_SIZE="${FIXTURE_POOL_SIZE:-s-8vcpu-16gb}"
         export FIXTURE_POOL_WORKLOAD_LABEL="${FIXTURE_POOL_WORKLOAD_LABEL:-ci-cd}"
@@ -953,7 +954,7 @@ PY
                     ;;
                 *" get pods "*) echo '{"items":[]}' ; return 0 ;;
                 *" get autoscalingrunnersets.actions.github.com "*)
-                    local asrs_reads asrs_group asrs_manifest
+                    local asrs_reads asrs_group asrs_manifest asrs_drift
                     asrs_reads=$(wc -l < "$FIXTURE_ASRS_READ_COUNT")
                     echo read >> "$FIXTURE_ASRS_READ_COUNT"
                     asrs_group=redducklabs-private-runners
@@ -962,7 +963,11 @@ PY
                     if [ "${FIXTURE_FORCE_LEGACY:-false}" = true ] || [ "$FIXTURE_HELM_MAX" = 8 ] || [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
                         asrs_manifest=$FIXTURE_LEGACY_MANIFEST
                     fi
-                    python3 - "$asrs_manifest" "$asrs_group" "$([ -e "$FIXTURE_HELM_UPDATED" ] && cat "$FIXTURE_HELM_UPDATED_MIN" || echo 2)" "$([ -e "$FIXTURE_HELM_UPDATED" ] && cat "$FIXTURE_HELM_UPDATED_MAX" || echo "$FIXTURE_HELM_MAX")" <<'PY'
+                    asrs_drift=none
+                    if [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
+                        asrs_drift=$FIXTURE_POST_ROLLBACK_ASRS_DRIFT
+                    fi
+                    python3 - "$asrs_manifest" "$asrs_group" "$([ -e "$FIXTURE_HELM_UPDATED" ] && cat "$FIXTURE_HELM_UPDATED_MIN" || echo 2)" "$([ -e "$FIXTURE_HELM_UPDATED" ] && cat "$FIXTURE_HELM_UPDATED_MAX" || echo "$FIXTURE_HELM_MAX")" "$asrs_drift" <<'PY'
 import json
 import os
 import sys
@@ -973,8 +978,23 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 manifest["spec"]["runnerGroup"] = sys.argv[2]
 manifest["spec"]["minRunners"] = int(sys.argv[3])
 manifest["spec"]["maxRunners"] = int(sys.argv[4])
+mutation = sys.argv[5]
 if "resources" not in manifest["spec"]["template"]["spec"] and os.environ.get("FIXTURE_TEMPLATE_DRIFT") != "automount":
     manifest["spec"]["template"]["spec"]["automountServiceAccountToken"] = False
+template = manifest["spec"]["template"]["spec"]
+if mutation == "default":
+    manifest["spec"]["runnerGroup"] = "Default"
+elif mutation == "token":
+    template["volumes"].append({
+        "name": "kube-api-access-fixture",
+        "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]},
+    })
+elif mutation == "placement":
+    template["nodeSelector"] = {"node-type": "worker"}
+elif mutation == "extra":
+    template["hostNetwork"] = True
+elif mutation != "none":
+    raise SystemExit(f"unknown post-rollback ASRS mutation: {mutation}")
 print(json.dumps({"items": [manifest]}))
 PY
                     return 0
@@ -3128,6 +3148,31 @@ assert_rollback_recovery_route() {
     export FIXTURE_TRUST_FAILURE FIXTURE_READY_NODES
 }
 
+assert_rollback_live_asrs_contract() {
+    local script="$FIXTURE_DIR/rollback-live-asrs-contract.sh"
+    : > "$script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Rollback live-ASRS fixture could not be materialized"
+        return
+    fi
+
+    local drift
+    for drift in default token placement extra; do
+        FIXTURE_POST_ROLLBACK_ASRS_DRIFT=$drift
+        export FIXTURE_POST_ROLLBACK_ASRS_DRIFT
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Rollback accepts ${drift} drift in the restored live AutoscalingRunnerSet"
+        elif ! grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
+            fail "Rollback rejects ${drift} live AutoscalingRunnerSet drift before Helm rollback"
+        else
+            pass "Rollback rejects ${drift} drift in the restored live AutoscalingRunnerSet after Helm rollback"
+        fi
+    done
+    unset FIXTURE_POST_ROLLBACK_ASRS_DRIFT
+}
+
 assert_rollback_ignores_deploy_only_inputs() {
     local script="$FIXTURE_DIR/rollback-input-isolation.sh"
     : > "$script"
@@ -3288,6 +3333,7 @@ assert_ordinary_scale_contract_guards
 assert_exact_provider_and_live_node_isolation
 assert_exact_deploy_namespace
 assert_rollback_recovery_route
+assert_rollback_live_asrs_contract
 assert_rollback_ignores_deploy_only_inputs
 assert_final_workflow_graph_and_prerequisites
 echo ""
