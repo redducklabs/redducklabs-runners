@@ -34,3 +34,9 @@ Codex-specific adapter rules:
 - MCP servers are configured in Codex user config, not in this repository. If a
   Claude MCP config is added later, keep it for Claude and register equivalent
   servers separately with `codex mcp add` / `codex mcp login`.
+
+## Tooling Warnings
+
+- The bundled Superpowers shell scripts may have CRLF line endings under
+  Windows/WSL. If Bash reports `set: pipefail\r: invalid option name`, stream the
+  script through `sed 's/\r$//'` before invoking `bash -s -- <arguments>`.
