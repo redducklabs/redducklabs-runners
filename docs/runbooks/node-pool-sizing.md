@@ -59,8 +59,11 @@ from a workstation. The local `scripts/scale-runners.sh` helper accepts only
    runner group without Helm, Kubernetes, or DigitalOcean mutation.
 2. Run Scale Runners and Node Pool Sizing from that same SHA. Node Pool Sizing
    accepts only 2/2. Before lowering `max_nodes`, it performs two complete
-   observations of the pool, exact Helm and live ASRS 2/2 private isolated
-   state, queue demand, and two Ready nodes. The provider pool must expose
+   observations of the pool, exact Helm values and manifest plus live ASRS in
+   the private 2/2 legacy-isolated state produced by rollout-quiesce, queue
+   demand, and two Ready nodes. It verifies that same legacy-isolated state
+   immediately after lowering the maximum; pod-level density state cannot
+   authorize this transition. The provider pool must expose
    exactly the two intended custom labels and the single
    `github-runner=true:NoSchedule` taint. Each live runner node must carry both
    labels and that taint, with no additional `NoSchedule`/`NoExecute` taint the

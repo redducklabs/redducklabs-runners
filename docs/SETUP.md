@@ -70,7 +70,10 @@ and public-workflow checks without Helm, Kubernetes, or DigitalOcean mutation.
 Ordinary scaling accepts only a pinned deployed chart in the private runner
 group whose Helm values, rendered ASRS, and live ASRS exactly match the current
 pod-level density contract. That complete contract is read back after scaling;
-legacy isolated values are accepted only by rollout-quiesce and rollback.
+legacy-isolated values are accepted only by rollout-quiesce, Node Pool Sizing,
+and rollback. Node Pool Sizing requires the private 2/2 legacy-isolated values,
+manifest, and live ASRS before and immediately after lowering the pool maximum;
+density state cannot authorize that transition.
 
 ### Step 5: Manage Runners
 

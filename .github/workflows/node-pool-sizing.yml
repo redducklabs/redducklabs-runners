@@ -215,7 +215,7 @@ jobs:
           }
 
           verify_isolated_arc() {
-            local releases values asrs
+            local releases values manifest asrs
             releases=$(helm list -n arc-runners -o json)
             jq -e --arg version "${ARC_CHART_VERSION}" '
               [.[] | select(
@@ -229,19 +229,27 @@ jobs:
             }
             values=$(helm get values redducklabs-runners -n arc-runners -o json)
             python3 scripts/validate-runner-isolation-contract.py \
-              --contract density --kind values \
+              --contract legacy-isolated --kind values \
               --min-runners 2 --max-runners 2 --runner-group private \
               <<<"${values}" || {
-              echo "❌ Error: Helm state is not exact private 2/2 pod-level density state"
+              echo "❌ Error: Helm values are not exact private 2/2 legacy-isolated state"
+              return 1
+            }
+            manifest=$(helm get manifest redducklabs-runners -n arc-runners)
+            python3 scripts/validate-runner-isolation-contract.py \
+              --contract legacy-isolated --kind manifest \
+              --min-runners 2 --max-runners 2 --runner-group private \
+              <<<"${manifest}" || {
+              echo "❌ Error: Helm manifest is not exact private 2/2 legacy-isolated state"
               return 1
             }
             asrs=$(kubectl get autoscalingrunnersets.actions.github.com \
               -n arc-runners -o json)
             python3 scripts/validate-runner-isolation-contract.py \
-              --contract density --kind asrs-list \
+              --contract legacy-isolated --kind asrs-list \
               --min-runners 2 --max-runners 2 --runner-group private \
               <<<"${asrs}" || {
-              echo "❌ Error: live AutoscalingRunnerSet is not exact private 2/2 pod-level density state"
+              echo "❌ Error: live AutoscalingRunnerSet is not exact private 2/2 legacy-isolated state"
               return 1
             }
           }

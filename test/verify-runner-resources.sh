@@ -1173,6 +1173,11 @@ assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation to
     local mismatched=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     local script="$FIXTURE_DIR/${label// /_}.sh"
 
+    if [ "$label" = 'Node Pool Sizing' ]; then
+        FIXTURE_FORCE_LEGACY=true
+        export FIXTURE_FORCE_LEGACY
+    fi
+
     : > "$script"
     if ! materialize_workflow_step "$workflow" "$validation_step" "$mismatched" 4 2 2 "$script" \
        || ! materialize_workflow_token "$workflow" "$mutation_token" "$mismatched" 4 2 2 "$script"; then
@@ -1206,6 +1211,9 @@ assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation to
         sed -n '1,12p' "$FIXTURE_DIR/output" >&2
         fail "$label matching expected_sha does not reach the expected $mutation_label boundary"
     fi
+    fi
+    if [ "$label" = 'Node Pool Sizing' ]; then
+        unset FIXTURE_FORCE_LEGACY
     fi
 }
 
@@ -2335,9 +2343,11 @@ assert_node_pool_no_removal_contract() {
     FIXTURE_SECOND_NODE_UID=fixture-node-a-uid
     FIXTURE_SECOND_HELM_GROUP=redducklabs-private-runners
     FIXTURE_SECOND_ASRS_GROUP=redducklabs-private-runners
+    FIXTURE_FORCE_LEGACY=true
     export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
     export FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
     export FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
+    export FIXTURE_FORCE_LEGACY
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
       && grep -Eq '^doctl .*node-pool update .*--max-nodes 2' "$FIXTURE_DIR/mutations"; then
@@ -2345,6 +2355,19 @@ assert_node_pool_no_removal_contract() {
     else
         fail "Node Pool Sizing cannot perform the safe max8 transition"
     fi
+
+    FIXTURE_FORCE_LEGACY=false
+    export FIXTURE_FORCE_LEGACY
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Node Pool Sizing permits density state to authorize the max8 to max2 reduction"
+    elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
+        fail "Node Pool Sizing reaches mutation from density state during the max8 to max2 reduction"
+    else
+        pass "Node Pool Sizing requires quiesced legacy isolation before the max8 to max2 reduction"
+    fi
+    FIXTURE_FORCE_LEGACY=true
+    export FIXTURE_FORCE_LEGACY
 
     local scenario variable value
     while IFS='|' read -r scenario variable value; do
@@ -2401,6 +2424,7 @@ Helm state drift|FIXTURE_SECOND_HELM_GROUP|foreign-runner-group
 live ASRS state drift|FIXTURE_SECOND_ASRS_GROUP|foreign-runner-group
 CASES
     FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count
+    unset FIXTURE_FORCE_LEGACY
     unset FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
     unset FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
 }
@@ -2752,7 +2776,8 @@ assert_complete_isolation_and_pool_contracts() {
         fail "Complete isolation fixture could not materialize Node Pool Sizing"
         return
       }
-    FIXTURE_POOL_MAX=8
+    FIXTURE_POOL_MAX=8 FIXTURE_FORCE_LEGACY=true
+    export FIXTURE_FORCE_LEGACY
     local label_value taint_value taint_effect
     while IFS='|' read -r label_value taint_value taint_effect; do
         FIXTURE_POOL_WORKLOAD_LABEL=$label_value
@@ -2798,6 +2823,7 @@ CASES
         pass "Node Pool Sizing requires the pinned deployed runner chart"
     fi
     unset FIXTURE_SCALE_CHART_VERSION
+    unset FIXTURE_FORCE_LEGACY
 
     local scale_script="$FIXTURE_DIR/scale-incomplete-contract.sh"
     : > "$scale_script"
@@ -3032,6 +3058,8 @@ assert_exact_provider_and_live_node_isolation() {
         return
       }
     local label variable value
+    FIXTURE_FORCE_LEGACY=true
+    export FIXTURE_FORCE_LEGACY
     while IFS='|' read -r label variable value; do
         printf -v "$variable" '%s' "$value"
         export "$variable"
@@ -3052,6 +3080,7 @@ a live node missing workload isolation|FIXTURE_NODE_WORKLOAD_LABEL|missing
 a live node with the wrong runner taint|FIXTURE_NODE_TAINT_VALUE|false
 a live node with an additional blocking taint|FIXTURE_NODE_EXTRA_BLOCKING_TAINT|true
 CASES
+    unset FIXTURE_FORCE_LEGACY
     FIXTURE_POOL_MAX=2
 }
 
