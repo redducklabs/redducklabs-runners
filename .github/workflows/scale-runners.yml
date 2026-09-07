@@ -34,6 +34,10 @@ on:
         default: 'arc-runners'
         type: string
 
+concurrency:
+  group: runner-fleet-mutation
+  cancel-in-progress: false
+
 env:
   # CLUSTER_NAME = DO cluster NAME for `doctl ... kubeconfig save`; CLUSTER_CONTEXT
   # = the generated kubeconfig context (do-<region>-<name>) for `use-context`.
@@ -91,16 +95,22 @@ jobs:
             exit 1
           fi
           
-          # Validate action is one of allowed values
+          # Non-custom actions ignore the optional custom inputs and emit only
+          # their fixed canonical bounds. This prevents a multiline custom
+          # value from creating additional GITHUB_OUTPUT records.
           case "${ACTION}" in
-            status|scale-up|scale-down|scale-max|scale-custom|rollout-quiesce)
-              echo "✅ Valid action: ${ACTION}"
-              ;;
+            status) MIN_RUNNERS=2; MAX_RUNNERS=4 ;;
+            scale-up) MIN_RUNNERS=2; MAX_RUNNERS=4 ;;
+            scale-down) MIN_RUNNERS=0; MAX_RUNNERS=1 ;;
+            scale-max) MIN_RUNNERS=4; MAX_RUNNERS=4 ;;
+            rollout-quiesce) MIN_RUNNERS=2; MAX_RUNNERS=2 ;;
+            scale-custom) ;;
             *)
               echo "❌ Error: Invalid action '${ACTION}'"
               exit 1
               ;;
           esac
+          echo "✅ Valid action: ${ACTION}"
           
           # Validate namespace format (DNS-1123 label)
           if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
@@ -128,9 +138,9 @@ jobs:
               exit 1
             fi
             
-            # Validate reasonable limits
-            if [ "${MIN_RUNNERS}" -lt 0 ] || [ "${MIN_RUNNERS}" -gt 20 ]; then
-              echo "❌ Error: min_runners must be between 0 and 20"
+            # Validate bounds before any value can be emitted or reach Helm.
+            if [ "${MIN_RUNNERS}" -gt 4 ]; then
+              echo "❌ Error: min_runners must be between 0 and 4"
               exit 1
             fi
             
@@ -140,12 +150,21 @@ jobs:
             fi
           fi
           
-          # Set validated outputs
-          echo "action=${ACTION}" >> $GITHUB_OUTPUT
-          echo "expected_sha=${EXPECTED_SHA}" >> $GITHUB_OUTPUT
-          echo "min_runners=${MIN_RUNNERS}" >> $GITHUB_OUTPUT
-          echo "max_runners=${MAX_RUNNERS}" >> $GITHUB_OUTPUT
-          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
+          write_output() {
+            local key=$1 value=$2
+            if ! [[ "${key}" =~ ^[a-z_]+$ ]] \
+               || [[ "${value}" == *$'\r'* || "${value}" == *$'\n'* ]]; then
+              echo "❌ Error: refusing unsafe workflow output ${key}"
+              return 1
+            fi
+            printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_OUTPUT}"
+          }
+
+          write_output action "${ACTION}"
+          write_output expected_sha "${EXPECTED_SHA}"
+          write_output min_runners "${MIN_RUNNERS}"
+          write_output max_runners "${MAX_RUNNERS}"
+          write_output namespace "${NAMESPACE}"
           
           echo "✅ All inputs validated successfully"
           echo "  Action: ${ACTION}"
@@ -320,10 +339,14 @@ jobs:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           validate_isolated_values() {
-            local expected_max=$1
-            jq -e --arg expected_max "${expected_max}" '
+            local expected_max=$1 expected_group=$2 require_automount=$3
+            jq -e --arg expected_max "${expected_max}" \
+              --arg expected_group "${expected_group}" \
+              --argjson require_automount "${require_automount}" '
               .minRunners == 2 and (.maxRunners | tostring) == $expected_max
-              and .runnerGroup == "redducklabs-private-runners"
+              and .runnerGroup == $expected_group
+              and ($require_automount == false
+                   or .template.spec.automountServiceAccountToken == false)
               and ([.template.spec.containers[]? | select(.name=="runner")
                     | .resources.requests.memory] == ["5Gi"])
               and ([.template.spec.initContainers[]? | select(.name=="dind")
@@ -332,7 +355,7 @@ jobs:
           }
 
           validate_isolated_manifest() {
-            python3 - "$1" "$2" <<'PY'
+            python3 - "$1" "$2" "$3" "$4" <<'PY'
           import sys
           import yaml
 
@@ -349,10 +372,14 @@ jobs:
           dinds = [item for item in pod.get("initContainers", [])
                    if item.get("name") == "dind"]
           expected_max = int(sys.argv[2])
+          expected_group = sys.argv[3]
+          require_automount = sys.argv[4] == "true"
           if spec.get("minRunners") != 2 or spec.get("maxRunners") != expected_max:
               raise SystemExit(f"runner bounds are not 2/{expected_max}")
-          if spec.get("runnerGroup") != "redducklabs-private-runners":
-              raise SystemExit("runner group is not private")
+          if spec.get("runnerGroup") != expected_group:
+              raise SystemExit(f"runner group is not {expected_group}")
+          if require_automount and pod.get("automountServiceAccountToken") is not False:
+              raise SystemExit("service-account token automount is not disabled")
           if len(runners) != 1 or len(dinds) != 1:
               raise SystemExit("isolated runner/DinD template is incomplete")
           if runners[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
@@ -373,19 +400,29 @@ jobs:
           fi
 
           PRE_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          PRE_MAX=$(jq -r '.maxRunners' <<<"${PRE_VALUES}")
-          case "${PRE_MAX}" in 8|2) ;; *)
-            echo "❌ Error: pre-quiesce ARC maxRunners must be 8 or 2; found ${PRE_MAX}"
-            exit 1
-            ;;
+          PRE_MAX=$(jq -r '.maxRunners // empty' <<<"${PRE_VALUES}")
+          PRE_GROUP=$(jq -r '.runnerGroup // empty' <<<"${PRE_VALUES}")
+          case "${PRE_MAX}:${PRE_GROUP}" in
+            8:Default)
+              PRE_AUTOMOUNT_REQUIRED=false
+              ;;
+            2:redducklabs-private-runners)
+              PRE_AUTOMOUNT_REQUIRED=true
+              ;;
+            *)
+              echo "❌ Error: pre-quiesce release must be legacy Default 2/8 or private 2/2; found 2/${PRE_MAX} group='${PRE_GROUP}'"
+              exit 1
+              ;;
           esac
-          if ! validate_isolated_values "${PRE_MAX}" <<<"${PRE_VALUES}"; then
-            echo "❌ Error: pre-quiesce release is not the isolated 2/${PRE_MAX}, 5Gi+5Gi private-group template"
+          if ! validate_isolated_values "${PRE_MAX}" "${PRE_GROUP}" \
+            "${PRE_AUTOMOUNT_REQUIRED}" <<<"${PRE_VALUES}"; then
+            echo "❌ Error: pre-quiesce release is not the recognized isolated 2/${PRE_MAX}, 5Gi+5Gi ${PRE_GROUP} template"
             exit 1
           fi
           PRE_MANIFEST="${RUNNER_TEMP}/pre-quiesce-manifest.yaml"
           helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${PRE_MANIFEST}"
-          validate_isolated_manifest "${PRE_MANIFEST}" "${PRE_MAX}"
+          validate_isolated_manifest "${PRE_MANIFEST}" "${PRE_MAX}" \
+            "${PRE_GROUP}" "${PRE_AUTOMOUNT_REQUIRED}"
 
           helm upgrade "${RELEASE_NAME}" \
             oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
@@ -395,6 +432,7 @@ jobs:
             --set minRunners=2 \
             --set maxRunners=2 \
             --set runnerGroup=redducklabs-private-runners \
+            --set template.spec.automountServiceAccountToken=false \
             --wait --timeout 300s
 
           QUIESCED=false
@@ -417,13 +455,30 @@ jobs:
           fi
 
           POST_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! validate_isolated_values 2 <<<"${POST_VALUES}"; then
+          if ! validate_isolated_values 2 redducklabs-private-runners true <<<"${POST_VALUES}"; then
             echo "❌ Error: quiesced release values do not preserve the rollback template"
             exit 1
           fi
           POST_MANIFEST="${RUNNER_TEMP}/post-quiesce-manifest.yaml"
           helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${POST_MANIFEST}"
-          validate_isolated_manifest "${POST_MANIFEST}" 2
+          validate_isolated_manifest "${POST_MANIFEST}" 2 \
+            redducklabs-private-runners true
+          LIVE_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
+            -n "${NAMESPACE}" -o json)
+          if ! jq -e '
+            .items | length == 1
+            and .[0].spec.minRunners == 2
+            and .[0].spec.maxRunners == 2
+            and .[0].spec.runnerGroup == "redducklabs-private-runners"
+            and .[0].spec.template.spec.automountServiceAccountToken == false
+            and ([.[0].spec.template.spec.containers[]? | select(.name=="runner")
+                  | .resources.requests.memory] == ["5Gi"])
+            and ([.[0].spec.template.spec.initContainers[]? | select(.name=="dind")
+                  | .resources.requests.memory] == ["5Gi"])
+          ' <<<"${LIVE_ASRS}" >/dev/null; then
+            echo "❌ Error: live quiesced AutoscalingRunnerSet is not exact private 2/2 isolated state"
+            exit 1
+          fi
           HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
           REVISION=$(jq -r --arg version "${ARC_CHART_VERSION}" '
             [.[] | select(.chart == ("gha-runner-scale-set-" + $version)
@@ -433,6 +488,18 @@ jobs:
             echo "❌ Error: could not identify the validated rollback revision"
             exit 1
           fi
+          REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
+            -n "${NAMESPACE}" -o json)
+          if ! validate_isolated_values 2 redducklabs-private-runners true \
+            <<<"${REVISION_VALUES}"; then
+            echo "❌ Error: rollback revision values are not exact private 2/2 isolated state"
+            exit 1
+          fi
+          REVISION_MANIFEST="${RUNNER_TEMP}/quiesced-revision-manifest.yaml"
+          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
+            -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
+          validate_isolated_manifest "${REVISION_MANIFEST}" 2 \
+            redducklabs-private-runners true
           echo "rollback_revision=${REVISION}" >> "${GITHUB_OUTPUT}"
           {
             echo "## Rollout quiesced"

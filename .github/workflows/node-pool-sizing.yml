@@ -46,6 +46,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: runner-fleet-mutation
+  cancel-in-progress: false
+
 env:
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
   CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
@@ -184,8 +188,10 @@ jobs:
           MAX_NODES: ${{ steps.validate.outputs.max_nodes }}
         run: |
           read_pool() {
-            doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
-              | jq -c --arg p "${POOL_NAME}" '.[] | select(.name==$p)'
+            local cluster_id=$1
+            doctl kubernetes cluster node-pool list "${cluster_id}" -o json \
+              | jq -c --arg p "${POOL_NAME}" \
+                '[.[] | select(.name==$p)] | if length == 1 then .[0] else empty end'
           }
 
           verify_pool() {
@@ -203,8 +209,67 @@ jobs:
             }
           }
 
-          verify_nodes_and_arc() {
-            local nodes pods sets total ready pending desired
+          verify_isolated_arc() {
+            local values asrs
+            values=$(helm get values redducklabs-runners -n arc-runners -o json)
+            jq -e '
+              .minRunners == 2 and .maxRunners == 2
+              and .runnerGroup == "redducklabs-private-runners"
+              and .template.spec.automountServiceAccountToken == false
+              and ([.template.spec.containers[]? | select(.name=="runner")
+                    | .resources.requests.memory] == ["5Gi"])
+              and ([.template.spec.initContainers[]? | select(.name=="dind")
+                    | .resources.requests.memory] == ["5Gi"])
+            ' <<<"${values}" >/dev/null || {
+              echo "❌ Error: Helm state is not exact private 2/2 isolated 5Gi+5Gi state"
+              return 1
+            }
+            asrs=$(kubectl get autoscalingrunnersets.actions.github.com \
+              -n arc-runners -o json)
+            jq -e '
+              .items | length == 1
+              and .[0].spec.minRunners == 2
+              and .[0].spec.maxRunners == 2
+              and .[0].spec.runnerGroup == "redducklabs-private-runners"
+              and .[0].spec.template.spec.automountServiceAccountToken == false
+              and ([.[0].spec.template.spec.containers[]? | select(.name=="runner")
+                    | .resources.requests.memory] == ["5Gi"])
+              and ([.[0].spec.template.spec.initContainers[]? | select(.name=="dind")
+                    | .resources.requests.memory] == ["5Gi"])
+            ' <<<"${asrs}" >/dev/null || {
+              echo "❌ Error: live AutoscalingRunnerSet is not exact private 2/2 isolated 5Gi+5Gi state"
+              return 1
+            }
+          }
+
+          observe_safety_state() {
+            local stage=$1 cluster_json pool_json nodes pods sets total ready pending desired
+            cluster_json=$(doctl kubernetes cluster list -o json)
+            OBSERVED_CLUSTER_ID=$(jq -r --arg n "${CLUSTER_NAME}" \
+              '[.[] | select(.name==$n) | .id] | if length == 1 then .[0] else empty end' \
+              <<<"${cluster_json}")
+            if [ -z "${OBSERVED_CLUSTER_ID}" ]; then
+              echo "❌ Error: ${stage} observation could not uniquely resolve cluster '${CLUSTER_NAME}'"
+              return 1
+            fi
+            pool_json=$(read_pool "${OBSERVED_CLUSTER_ID}")
+            if [ -z "${pool_json}" ]; then
+              echo "❌ Error: ${stage} observation could not resolve pool '${POOL_NAME}'"
+              return 1
+            fi
+            OBSERVED_POOL_MAX=$(jq -r '.max_nodes' <<<"${pool_json}")
+            case "${OBSERVED_POOL_MAX}" in 8|2) ;; *)
+              echo "❌ Error: ${stage} max_nodes must be 8 or 2; found ${OBSERVED_POOL_MAX}"
+              return 1
+              ;;
+            esac
+            verify_pool "${pool_json}" "${OBSERVED_POOL_MAX}" "${stage}"
+            OBSERVED_POOL_ID=$(jq -r '.id // empty' <<<"${pool_json}")
+            if [ -z "${OBSERVED_POOL_ID}" ]; then
+              echo "❌ Error: ${stage} pool identity is missing"
+              return 1
+            fi
+
             nodes=$(kubectl get nodes -l node-type=github-runner -o json)
             total=$(jq '.items | length' <<<"${nodes}")
             ready=$(jq '[.items[] | select(any(.status.conditions[]?;
@@ -213,6 +278,23 @@ jobs:
               echo "❌ Error: exactly two Ready runner nodes are required; found ${ready}/${total}"
               return 1
             }
+            OBSERVED_NODE_IDENTITIES=$(jq -c '
+              [.items[] | {
+                uid: (.metadata.uid // ""),
+                providerID: (.spec.providerID // "")
+              }] | sort_by(.uid, .providerID)
+            ' <<<"${nodes}")
+            if ! jq -e '
+              length == 2
+              and all(.[]; .uid != "" and .providerID != "")
+              and ([.[].uid] | unique | length == 2)
+              and ([.[].providerID] | unique | length == 2)
+            ' <<<"${OBSERVED_NODE_IDENTITIES}" >/dev/null; then
+              echo "❌ Error: ${stage} node UID/providerID identities are missing or ambiguous"
+              return 1
+            fi
+
+            verify_isolated_arc
             pods=$(kubectl get pods -n arc-runners \
               -l actions.github.com/scale-set-name=redducklabs-runners -o json)
             pending=$(jq '[.items[] | select(.status.phase == "Pending")] | length' <<<"${pods}")
@@ -223,28 +305,14 @@ jobs:
               echo "❌ Error: ARC has Pending runners or scale-up demand (pending=${pending}, desired=${desired})"
               return 1
             }
+            echo "${stage} identities: cluster=${OBSERVED_CLUSTER_ID} pool=${OBSERVED_POOL_ID} nodes=${OBSERVED_NODE_IDENTITIES}"
           }
 
-          CLUSTER_ID=$(doctl kubernetes cluster list -o json \
-            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
-          if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
-            echo "❌ Error: cluster '${CLUSTER_NAME}' not found"
-            exit 1
-          fi
-          INITIAL=$(read_pool)
-          if [ -z "${INITIAL}" ]; then
-            echo "❌ Error: node pool '${POOL_NAME}' not found"
-            exit 1
-          fi
-          CURRENT_MAX=$(jq -r '.max_nodes' <<<"${INITIAL}")
-          case "${CURRENT_MAX}" in 8|2) ;; *)
-            echo "❌ Error: current max_nodes must be 8 or 2; found ${CURRENT_MAX}"
-            exit 1
-            ;;
-          esac
-          verify_pool "${INITIAL}" "${CURRENT_MAX}" "initial"
-          verify_nodes_and_arc
-          POOL_ID=$(jq -r '.id' <<<"${INITIAL}")
+          observe_safety_state "initial"
+          CLUSTER_ID=${OBSERVED_CLUSTER_ID}
+          POOL_ID=${OBSERVED_POOL_ID}
+          NODE_IDENTITIES=${OBSERVED_NODE_IDENTITIES}
+          CURRENT_MAX=${OBSERVED_POOL_MAX}
           echo "cur_min=2" >> "${GITHUB_OUTPUT}"
           echo "cur_max=${CURRENT_MAX}" >> "${GITHUB_OUTPUT}"
           echo "cur_size=s-8vcpu-16gb" >> "${GITHUB_OUTPUT}"
@@ -254,20 +322,33 @@ jobs:
             exit 0
           fi
 
-          # Close the observation-to-mutation race. Any node, demand, size,
-          # autoscaling, or bound drift aborts instead of risking node removal.
-          IMMEDIATE=$(read_pool)
-          verify_pool "${IMMEDIATE}" "${CURRENT_MAX}" "immediate pre-mutation"
-          verify_nodes_and_arc
+          # Re-resolve every identity and state boundary immediately before
+          # mutation. Replaced cluster/pool objects or nodes are fatal even if
+          # their display names and capacity happen to match.
+          observe_safety_state "immediate pre-mutation"
+          if [ "${OBSERVED_CLUSTER_ID}" != "${CLUSTER_ID}" ] \
+             || [ "${OBSERVED_POOL_ID}" != "${POOL_ID}" ] \
+             || [ "${OBSERVED_NODE_IDENTITIES}" != "${NODE_IDENTITIES}" ] \
+             || [ "${OBSERVED_POOL_MAX}" != "${CURRENT_MAX}" ]; then
+            echo "❌ Error: cluster, pool, node identity, or max_nodes changed between safety observations"
+            exit 1
+          fi
 
           if [ "${CURRENT_MAX}" = "8" ]; then
             doctl kubernetes cluster node-pool update "${CLUSTER_ID}" "${POOL_ID}" \
               --max-nodes 2
           fi
 
-          FINAL=$(read_pool)
+          FINAL=$(read_pool "${CLUSTER_ID}")
           verify_pool "${FINAL}" "2" "post-update"
-          verify_nodes_and_arc
+          observe_safety_state "post-update"
+          if [ "${OBSERVED_CLUSTER_ID}" != "${CLUSTER_ID}" ] \
+             || [ "${OBSERVED_POOL_ID}" != "${POOL_ID}" ] \
+             || [ "${OBSERVED_NODE_IDENTITIES}" != "${NODE_IDENTITIES}" ] \
+             || [ "${OBSERVED_POOL_MAX}" != "2" ]; then
+            echo "❌ Error: identity or capacity changed during node-pool update"
+            exit 1
+          fi
           echo "✅ Node pool maximum is 2 and no node was removed"
 
       - name: Summary

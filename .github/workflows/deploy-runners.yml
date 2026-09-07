@@ -57,6 +57,10 @@ on:
         default: 'arc-runners'
         type: string
 
+concurrency:
+  group: runner-fleet-mutation
+  cancel-in-progress: false
+
 env:
   # CLUSTER_NAME is the DigitalOcean cluster NAME (what `doctl kubernetes cluster
   # kubeconfig save` expects). CLUSTER_CONTEXT is the kubeconfig CONTEXT name that
@@ -336,17 +340,60 @@ jobs:
         run: |
           echo "🔎 Verifying the existing prepared runner platform..."
           kubectl get namespace "${NAMESPACE}" >/dev/null
-          kubectl get secret do-registry-secret -n "${NAMESPACE}" >/dev/null
-          kubectl get serviceaccount redducklabs-runners-gha-rs-no-permission \
-            -n "${NAMESPACE}" >/dev/null
-
-          CRD=$(kubectl get crd autoscalingrunnersets.actions.github.com -o json)
+          REGISTRY_SECRET=$(kubectl get secret do-registry-secret \
+            -n "${NAMESPACE}" -o json)
           if ! jq -e '
-            .status.conditions | any(.type == "Established" and .status == "True")
-          ' <<<"${CRD}" >/dev/null; then
-            echo "❌ Error: AutoscalingRunnerSet CRD is missing or not Established"
+            .type == "kubernetes.io/dockerconfigjson"
+            and (.data[".dockerconfigjson"] | type == "string" and length > 0)
+          ' <<<"${REGISTRY_SECRET}" >/dev/null; then
+            echo "❌ Error: do-registry-secret has the wrong type or no Docker config"
             exit 1
           fi
+          REGISTRY_CONFIG="${RUNNER_TEMP}/do-registry-config.json"
+          if ! jq -r '.data[".dockerconfigjson"]' <<<"${REGISTRY_SECRET}" \
+            | base64 --decode > "${REGISTRY_CONFIG}" \
+            || ! jq -e '
+              .auths["registry.digitalocean.com"].auth
+              | type == "string" and length > 0
+            ' "${REGISTRY_CONFIG}" >/dev/null; then
+            rm -f "${REGISTRY_CONFIG}"
+            echo "❌ Error: do-registry-secret lacks valid DigitalOcean registry auth"
+            exit 1
+          fi
+          rm -f "${REGISTRY_CONFIG}"
+
+          if ! SERVICE_ACCOUNT=$(kubectl get serviceaccount \
+            redducklabs-runners-gha-rs-no-permission -n "${NAMESPACE}" \
+            --ignore-not-found -o json); then
+            echo "❌ Error: could not validate runner ServiceAccount ownership"
+            exit 1
+          fi
+          if [ -n "${SERVICE_ACCOUNT}" ]; then
+            if ! jq -e '
+              .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
+              and .metadata.annotations["meta.helm.sh/release-name"] == "redducklabs-runners"
+              and .metadata.annotations["meta.helm.sh/release-namespace"] == "arc-runners"
+            ' <<<"${SERVICE_ACCOUNT}" >/dev/null; then
+              echo "❌ Error: existing runner ServiceAccount is not owned by the redducklabs-runners Helm release"
+              exit 1
+            fi
+          fi
+
+          CRDS=(
+            autoscalinglisteners.actions.github.com
+            autoscalingrunnersets.actions.github.com
+            ephemeralrunners.actions.github.com
+            ephemeralrunnersets.actions.github.com
+          )
+          for CRD_NAME in "${CRDS[@]}"; do
+            if ! CRD=$(kubectl get crd "${CRD_NAME}" -o json) \
+              || ! jq -e '
+                .status.conditions | any(.type == "Established" and .status == "True")
+              ' <<<"${CRD}" >/dev/null; then
+              echo "❌ Error: ${CRD_NAME} CRD is missing or not Established"
+              exit 1
+            fi
+          done
 
           CONTROLLER_RELEASES=$(helm list -n arc-systems -o json)
           if ! jq -e --arg version "${ARC_CHART_VERSION}" '
@@ -617,44 +664,6 @@ jobs:
               if "tolerations" not in expected and not admitted["tolerations"]:
                   admitted.pop("tolerations")
 
-              api_access = re.compile(r"kube-api-access-[a-z0-9]+")
-              def api_access_volume(item):
-                  if not api_access.fullmatch(item.get("name") or ""):
-                      return False
-                  projected = item.get("projected")
-                  if not isinstance(projected, dict) or projected.get("defaultMode") != 420:
-                      return False
-                  sources = projected.get("sources")
-                  expected_sources = [
-                      {"serviceAccountToken": {
-                          "expirationSeconds": 3607, "path": "token",
-                      }},
-                      {"configMap": {
-                          "name": "kube-root-ca.crt",
-                          "items": [{"key": "ca.crt", "path": "ca.crt"}],
-                      }},
-                      {"downwardAPI": {"items": [{
-                          "path": "namespace",
-                          "fieldRef": {
-                              "apiVersion": "v1", "fieldPath": "metadata.namespace",
-                          },
-                      }]}},
-                  ]
-                  return set(projected) == {"defaultMode", "sources"} \
-                      and sources == expected_sources \
-                      and set(item) == {"name", "projected"}
-
-              expected_volume_names = {
-                  item.get("name") for item in expected.get("volumes", [])
-              }
-              admitted["volumes"] = [
-                  item for item in admitted.get("volumes", [])
-                  if item.get("name") in expected_volume_names
-                  or not api_access_volume(item)
-              ]
-              if "volumes" not in expected and not admitted["volumes"]:
-                  admitted.pop("volumes")
-
               for field in ("containers", "initContainers"):
                   expected_items = expected.get(field, [])
                   admitted_items = admitted.get(field, [])
@@ -669,21 +678,6 @@ jobs:
                       }
                       for key, value in container_defaults.items():
                           strip_default(admitted_item, expected_item, key, value)
-                      expected_mounts = expected_item.get("volumeMounts", [])
-                      expected_mount_names = {item.get("name") for item in expected_mounts}
-                      admitted_item["volumeMounts"] = [
-                          item for item in admitted_item.get("volumeMounts", [])
-                          if item.get("name") in expected_mount_names
-                          or item != {
-                              "name": item.get("name"),
-                              "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
-                              "readOnly": True,
-                          }
-                          or not api_access.fullmatch(item.get("name") or "")
-                      ]
-                      if "volumeMounts" not in expected_item \
-                         and not admitted_item["volumeMounts"]:
-                          admitted_item.pop("volumeMounts")
               return expected, admitted
 
           expected_asrs_spec = deepcopy(expected_asrs.get("spec", {}))
@@ -739,10 +733,8 @@ jobs:
               if not expected.issubset(actual):
                   raise SystemExit(f"admission changed volume wiring for {container.get('name')}")
               extras = actual - expected
-              for name, path in extras:
-                  if not (re.fullmatch(r"kube-api-access-[a-z0-9]+", name or "")
-                          and path == "/var/run/secrets/kubernetes.io/serviceaccount"):
-                      raise SystemExit(f"admission injected an unexpected mount for {container.get('name')}")
+              if extras:
+                  raise SystemExit(f"admission injected an unexpected mount for {container.get('name')}")
 
           specs = [asrs["spec"]["template"]["spec"], pod["spec"]]
           for spec in specs:
@@ -758,6 +750,8 @@ jobs:
                   raise SystemExit("admission changed the Pod restart policy")
               if spec.get("serviceAccountName") != "redducklabs-runners-gha-rs-no-permission":
                   raise SystemExit("admission changed the no-permission runner service account")
+              if spec.get("automountServiceAccountToken") is not False:
+                  raise SystemExit("runner service-account token automount is not disabled")
               if spec.get("imagePullSecrets") != [{"name": "do-registry-secret"}]:
                   raise SystemExit("admission changed the private registry pull secret")
 
@@ -811,14 +805,25 @@ jobs:
               })
               validate_mounts(externals, {("dind-externals", "/home/runner/tmpDir")})
               volumes = spec.get("volumes", [])
+              if any(
+                  "serviceAccountToken" in source
+                  for volume in volumes
+                  for source in volume.get("projected", {}).get("sources", [])
+              ):
+                  raise SystemExit("admission injected a service-account token volume")
+              if any(
+                  mount.get("mountPath") == "/var/run/secrets/kubernetes.io/serviceaccount"
+                  for container in containers
+                  for mount in container.get("volumeMounts", [])
+              ):
+                  raise SystemExit("admission injected a service-account token mount")
               expected_volumes = {"work", "dind-sock", "dind-externals"}
               for volume in volumes:
                   name = volume.get("name")
                   if name in expected_volumes:
                       if volume.get("emptyDir") != {}:
                           raise SystemExit(f"admission changed emptyDir volume {name}")
-                  elif not (re.fullmatch(r"kube-api-access-[a-z0-9]+", name or "")
-                            and "projected" in volume):
+                  else:
                       raise SystemExit("admission injected an unexpected volume")
               if not expected_volumes.issubset({item.get("name") for item in volumes}):
                   raise SystemExit("admission removed required runner/DinD volumes")

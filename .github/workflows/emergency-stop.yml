@@ -18,6 +18,10 @@ on:
         default: 'Emergency shutdown initiated via GitHub Actions'
         type: string
 
+concurrency:
+  group: runner-fleet-mutation
+  cancel-in-progress: false
+
 env:
   # CLUSTER_NAME = DO cluster NAME for `doctl ... kubeconfig save`; CLUSTER_CONTEXT
   # = the generated kubeconfig context (do-<region>-<name>) for `use-context`.
@@ -43,13 +47,17 @@ jobs:
     steps:
       - name: Validate confirmation and inputs
         id: validate
+        env:
+          INPUT_CONFIRM: ${{ inputs.confirm }}
+          INPUT_NAMESPACE: ${{ inputs.namespace }}
+          INPUT_REASON: ${{ inputs.reason }}
         run: |
           echo "🔍 Validating emergency stop inputs..."
           
           # Get inputs
-          CONFIRM="${{ github.event.inputs.confirm }}"
-          NAMESPACE="${{ github.event.inputs.namespace }}"
-          REASON="${{ github.event.inputs.reason }}"
+          CONFIRM="${INPUT_CONFIRM}"
+          NAMESPACE="${INPUT_NAMESPACE}"
+          REASON="${INPUT_REASON}"
           
           # Validate confirmation text
           if [ "${CONFIRM}" != "STOP-RUNNERS" ]; then
@@ -70,6 +78,10 @@ jobs:
             echo "❌ Error: reason cannot be empty"
             exit 1
           fi
+          if [[ "${REASON}" == *$'\r'* || "${REASON}" == *$'\n'* ]]; then
+            echo "❌ Error: reason must be a single line"
+            exit 1
+          fi
           
           if [ ${#REASON} -gt 200 ]; then
             echo "❌ Error: reason must be 200 characters or less"
@@ -77,11 +89,11 @@ jobs:
           fi
           
           # Sanitize reason (remove potentially dangerous characters)
-          CLEAN_REASON=$(echo "${REASON}" | tr -cd '[:alnum:][:space:][:punct:]' | head -c 200)
+          CLEAN_REASON=$(printf '%s' "${REASON}" | tr -cd '[:alnum:][:space:][:punct:]' | head -c 200)
           
           # Set validated outputs
-          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
-          echo "reason=${CLEAN_REASON}" >> $GITHUB_OUTPUT
+          printf 'namespace=%s\n' "${NAMESPACE}" >> "${GITHUB_OUTPUT}"
+          printf 'reason=%s\n' "${CLEAN_REASON}" >> "${GITHUB_OUTPUT}"
           
           echo "⚠️ EMERGENCY STOP CONFIRMED"
           echo "  Namespace: ${NAMESPACE}"

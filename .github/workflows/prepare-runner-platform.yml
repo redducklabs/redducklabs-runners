@@ -13,6 +13,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: runner-fleet-mutation
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -87,10 +91,22 @@ jobs:
         run: |
           kubectl create namespace arc-systems --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace arc-runners --dry-run=client -o yaml | kubectl apply -f -
-          doctl registry kubernetes-manifest | kubectl apply -n arc-runners -f -
-          kubectl create serviceaccount redducklabs-runners-gha-rs-no-permission \
-            --namespace arc-runners --dry-run=client -o json \
-            | jq '.automountServiceAccountToken = false' \
+          umask 077
+          REGISTRY_CONFIG=$(mktemp)
+          trap 'rm -f "${REGISTRY_CONFIG}"' EXIT
+          doctl registry docker-config > "${REGISTRY_CONFIG}"
+          if ! jq -e '
+            .auths["registry.digitalocean.com"].auth
+            | type == "string" and length > 0
+          ' "${REGISTRY_CONFIG}" >/dev/null; then
+            echo "❌ Error: DigitalOcean registry credentials are missing or invalid"
+            exit 1
+          fi
+          kubectl create secret generic do-registry-secret \
+            --namespace arc-runners \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=.dockerconfigjson="${REGISTRY_CONFIG}" \
+            --dry-run=client -o yaml \
             | kubectl apply -f -
 
       - name: Reconcile pinned ARC CRDs

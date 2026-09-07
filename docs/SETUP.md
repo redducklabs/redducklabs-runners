@@ -26,12 +26,17 @@ scale, or roll back the runner fleet.
 For initial setup, or a deliberate controller/CRD reconciliation, select
 **"Prepare Runner Platform"**, provide the exact reviewed SHA, and confirm the
 mutation. This separate workflow owns the `arc-systems`/`arc-runners`
-namespaces, registry pull secret, no-permission service account, pinned ARC
-CRDs, and pinned ARC controller.
+namespaces, an explicitly named `do-registry-secret`, all four pinned ARC CRDs,
+and the pinned ARC controller. The scale-set Helm chart owns
+`redducklabs-runners-gha-rs-no-permission`; platform preparation must not create
+that ServiceAccount.
 
 Normal deploy and rollback runs never create or upgrade these platform
-prerequisites. They fail closed when the prepared platform is missing, stale,
-or not Ready.
+prerequisites. Deploy validates the registry secret type, Docker config, and
+non-empty `registry.digitalocean.com` auth without logging credential data. A
+pre-existing no-permission ServiceAccount is accepted only with exact Helm
+ownership for release `redducklabs-runners` in `arc-runners`. Missing, stale,
+foreign-owned, or malformed prerequisites fail closed before Helm.
 
 ### Step 3: Deploy Runners
 
@@ -115,6 +120,9 @@ template:
   defines a competing CPU or memory budget.
 - **runner group**: `redducklabs-private-runners`, reconciled by CI to selected
   private repositories only. Public repositories must not select this label.
+- **Kubernetes API token**: runner Pods set
+  `automountServiceAccountToken: false`; admission must not inject an API token
+  volume or mount.
 - **Image**: Custom runner image with pre-installed tools.
 - **Pull Secrets**: For accessing private registries.
 
@@ -270,6 +278,8 @@ closed on a direct or dynamic self-hosted runner selector.
 
 - [ ] `RUNNER_TOKEN` and `DO_TOKEN` repository secrets are configured
 - [ ] `prepare-trust-boundary` completed with explicit co-tenancy acceptance
+- [ ] Prepare Runner Platform produced the typed `do-registry-secret`, all four
+  Established ARC CRDs, and the Ready pinned controller
 - [ ] Node Pool Sizing confirms `min_nodes=max_nodes=count=2`
 - [ ] Deploy preflight and deployment completed from the same `expected_sha`
 - [ ] Runner Status reports the expected four-runner/two-node contract

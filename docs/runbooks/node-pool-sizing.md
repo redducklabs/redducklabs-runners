@@ -58,7 +58,10 @@ from a workstation. The local `scripts/scale-runners.sh` helper accepts only
    privileged co-tenancy acceptance. It reconciles and reads back the private
    runner group without Helm, Kubernetes, or DigitalOcean mutation.
 2. Run Scale Runners and Node Pool Sizing from that same SHA. Node Pool Sizing
-   accepts only 2/2 and verifies two Ready runner nodes.
+   accepts only 2/2. Before lowering `max_nodes`, it performs two complete
+   observations of the pool, exact Helm and live ASRS 2/2 private isolated
+   state, queue demand, and two Ready nodes. Cluster ID, pool ID, and sorted
+   node UID/providerID pairs must remain identical between observations.
 3. Run Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of
    the rendered scale set and representative Pod before Helm mutation, and
    records the post-quiesce pre-density Helm revision as the rollback target.
@@ -71,6 +74,10 @@ public access disabled, and exactly `aurolegal.ai`, `autoduck`, `manager`,
 `platform-observability`, `redducklabs`, `redducklaw`, `therapy-link`,
 `zipbot-internal`, and `zipbot-v2`. CI scans all public organization workflows;
 any direct or unresolved dynamic use of `redducklabs-runners` fails closed.
+GitHub's exact managed path `dynamic/agents/copilot-pull-request-reviewer` is
+the only workflow entry skipped without a contents read; every other
+non-repository path fails closed. Fleet and prerequisite mutation workflows
+share the non-cancelling `runner-fleet-mutation` concurrency group.
 
 ## Deterministic acceptance and end-of-feature audit
 

@@ -128,6 +128,17 @@ while IFS=$'\t' read -r repo_name default_branch; do
 
     while IFS= read -r workflow_path; do
         [ -n "$workflow_path" ] || continue
+        if [ "$workflow_path" = "dynamic/agents/copilot-pull-request-reviewer" ]; then
+            echo "Skipping GitHub-managed Copilot pull-request reviewer workflow for ${repo_name}"
+            continue
+        fi
+        case "$workflow_path" in
+            .github/workflows/*) ;;
+            *)
+                echo "ERROR: unsupported workflow path ${repo_name}:${workflow_path}; failing closed" >&2
+                exit 1
+                ;;
+        esac
         workflow_file=$(mktemp)
         if ! gh api -H 'Accept: application/vnd.github.raw+json' \
             "repos/${ORG}/${repo_name}/contents/${workflow_path}?ref=${default_branch}" >"$workflow_file"; then

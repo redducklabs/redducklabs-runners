@@ -46,6 +46,9 @@ runnerGroup: "YOUR-RUNNER-GROUP"
 # Runner template configuration
 template:
   spec:
+    # Runner jobs do not need Kubernetes API credentials.
+    automountServiceAccountToken: false
+
     # A shared pod reservation covers both runner and dind. Keep container
     # resource blocks absent so the scheduler applies this budget as a unit.
     resources:

@@ -51,8 +51,11 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
 2. Supply the exact reviewed commit SHA and confirm the platform mutation
 3. Run this workflow for initial setup or a deliberate ARC controller/CRD reconciliation
 
-The normal deployment workflow requires the namespace, registry pull secret,
-service account, pinned ARC CRDs, and Ready pinned controller to already exist.
+The normal deployment workflow requires the namespace, an explicitly named
+`kubernetes.io/dockerconfigjson` pull secret with DigitalOcean registry auth,
+all four pinned ARC CRDs, and the Ready pinned controller. The scale-set chart
+owns its no-permission ServiceAccount; deploy accepts a pre-existing object
+only when its Helm release and namespace ownership are exact.
 
 ### 3. Deploy Runners via GitHub Actions
 1. Go to the **Actions** tab in your repository
@@ -305,6 +308,9 @@ read-only public-workflow checks and runner-group reconciliation without Helm,
 Kubernetes, or DigitalOcean mutation. A deployment or rollback uses the same
 recorded SHA. Rollback uses the recorded post-quiesce Helm revision and restores
 the isolated two-runner template while retaining the private runner group.
+All workflows that can mutate fleet capacity or its prerequisites share the
+non-cancelling `runner-fleet-mutation` concurrency group, so their mutations do
+not overlap.
 
 ### Monitoring via GitHub Actions
 

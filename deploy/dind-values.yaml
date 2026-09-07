@@ -52,6 +52,10 @@ runnerGroup: "redducklabs-private-runners"
 # Runner template configuration
 template:
   spec:
+    # Jobs do not need Kubernetes API credentials. Keep the chart-created
+    # no-permission ServiceAccount, but do not project its token into runners.
+    automountServiceAccountToken: false
+
     # Pin runners to the dedicated github-runners-pool-16g so they do not
     # co-locate with production workloads (postgres, backend) on worker-pool.
     # That pool is labeled node-type=github-runner and tainted
