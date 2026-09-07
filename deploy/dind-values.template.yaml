@@ -18,6 +18,7 @@ maxRunners: 4
 
 # Runner scale set name (used in workflows as: runs-on: your-runner-name)
 runnerScaleSetName: "YOUR-RUNNER-NAME"
+runnerGroup: "YOUR-RUNNER-GROUP"
 
 # NOTE: containerMode.type is deliberately NOT set to "dind".
 #
@@ -45,6 +46,15 @@ runnerScaleSetName: "YOUR-RUNNER-NAME"
 # Runner template configuration
 template:
   spec:
+    # A shared pod reservation covers both runner and dind. Keep container
+    # resource blocks absent so the scheduler applies this budget as a unit.
+    resources:
+      requests:
+        cpu: "3"
+        memory: "5Gi"
+      limits:
+        memory: "6Gi"
+
     # Pull secret for private registry (if using custom image)
     # Uncomment and configure if using private registry
     # imagePullSecrets:
@@ -85,14 +95,6 @@ template:
         initialDelaySeconds: 0
         failureThreshold: 24
         periodSeconds: 5
-      # Memory for everything run INSIDE Docker (docker build, compose,
-      # testcontainers). Without this the daemon is unreserved and unbounded.
-      resources:
-        requests:
-          cpu: "500m"
-          memory: "2Gi"
-        limits:
-          memory: "4Gi"
       volumeMounts:
       - name: work
         mountPath: /home/runner/_work
@@ -121,18 +123,8 @@ template:
       - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
         value: "120"
 
-      # Memory for work run DIRECTLY on the runner (npm, jest, pytest, go build)
-      # - as opposed to work run inside Docker, which is charged to dind above.
-      #
-      # Sizing rule: (runner requests + dind requests) x pods-per-node must fit
-      # inside node allocatable, minus what system DaemonSets take. Requests
-      # decide packing density; limits decide what a job can actually use.
-      resources:
-        limits:
-          memory: "4Gi"
-        requests:
-          cpu: "500m"
-          memory: "1Gi"
+      # Resource controls belong on template.spec.resources above, shared with
+      # the dind sidecar.
 
       volumeMounts:
       - name: work

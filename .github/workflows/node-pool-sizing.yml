@@ -7,11 +7,11 @@ name: Node Pool Sizing
 # hand in the DigitalOcean console. That made half the runner capacity design
 # unreproducible. This workflow makes the bounds a reviewed, repeatable change.
 #
-# The runner scale set places exactly ONE runner pod per node (see the resource
-# sizing note in deploy/dind-values.yaml), so the pool bounds and the scale set
-# bounds must agree:
+# The runner scale set places exactly TWO runner pods per node (see the resource
+# sizing note in deploy/dind-values.yaml). The production pool is therefore a
+# fixed two-node ceiling for the scale set's four-runner maximum.
 #
-#     min_nodes >= minRunners      and      max_nodes >= maxRunners
+#     max_nodes = ceil(maxRunners / 2) = 2
 #
 # Those assertions are enforced below against deploy/dind-values.yaml, so the
 # committed values file stays the source of truth.
@@ -29,7 +29,7 @@ on:
       max_nodes:
         description: 'Maximum nodes in the runner pool (cost ceiling)'
         required: true
-        default: '8'
+        default: '2'
         type: string
       pool_name:
         description: 'Node pool name'
@@ -41,6 +41,10 @@ on:
         required: false
         default: false
         type: boolean
+      expected_sha:
+        description: 'Exact commit SHA to apply'
+        required: true
+        type: string
 
 env:
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
@@ -71,6 +75,17 @@ jobs:
           MIN_NODES="${{ github.event.inputs.min_nodes }}"
           MAX_NODES="${{ github.event.inputs.max_nodes }}"
           POOL_NAME="${{ github.event.inputs.pool_name }}"
+          EXPECTED_SHA="${{ github.event.inputs.expected_sha }}"
+
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "❌ Error: expected_sha must be a 40-character commit SHA"
+            exit 1
+          fi
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
 
           if ! [[ "${MIN_NODES}" =~ ^[0-9]+$ ]]; then
             echo "❌ Error: min_nodes must be a number"
@@ -106,20 +121,11 @@ jobs:
           echo "  deploy/dind-values.yaml: minRunners=${MIN_RUNNERS} maxRunners=${MAX_RUNNERS}"
           echo "  requested pool bounds:   min_nodes=${MIN_NODES} max_nodes=${MAX_NODES}"
 
-          # One runner pod per node: memory requests (runner 5Gi + dind 5Gi)
-          # exceed half of node allocatable, so two pods cannot share a node.
-          if [ "${MAX_NODES}" -lt "${MAX_RUNNERS}" ]; then
-            echo "❌ Error: max_nodes (${MAX_NODES}) < maxRunners (${MAX_RUNNERS})"
-            echo "   One runner pod is scheduled per node, so ${MAX_RUNNERS} concurrent"
-            echo "   runners require at least ${MAX_RUNNERS} nodes. Raise max_nodes or"
-            echo "   lower maxRunners in deploy/dind-values.yaml first."
-            exit 1
-          fi
-          if [ "${MIN_NODES}" -lt "${MIN_RUNNERS}" ]; then
-            echo "❌ Error: min_nodes (${MIN_NODES}) < minRunners (${MIN_RUNNERS})"
-            echo "   ${MIN_RUNNERS} warm runners require at least ${MIN_RUNNERS} warm nodes,"
-            echo "   otherwise idle runners sit Pending and jobs queue behind node"
-            echo "   provisioning. Raise min_nodes or lower minRunners."
+          PODS_PER_NODE=2
+          REQUIRED_MAX_NODES=$(( (MAX_RUNNERS + PODS_PER_NODE - 1) / PODS_PER_NODE ))
+          if [ "${MIN_NODES}" != "2" ] || [ "${MAX_NODES}" != "${REQUIRED_MAX_NODES}" ] || [ "${REQUIRED_MAX_NODES}" != "2" ]; then
+            echo "❌ Error: runner pool bounds must be exactly min_nodes=2 max_nodes=2"
+            echo "   ${MAX_RUNNERS} runners at ${PODS_PER_NODE} pods per node require ${REQUIRED_MAX_NODES} nodes."
             exit 1
           fi
 

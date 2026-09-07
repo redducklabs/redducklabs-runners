@@ -17,15 +17,16 @@ on:
       max_runners:
         description: 'Maximum number of runners'
         required: false
-        default: '8'
+        default: '4'
         type: choice
         options:
           - '1'
           - '2'
           - '4'
-          - '6'
-          - '8'
-          - '10'
+      expected_sha:
+        description: 'Exact commit SHA to deploy'
+        required: true
+        type: string
       runner_image:
         description: 'Runner image to deploy'
         required: false
@@ -73,6 +74,9 @@ jobs:
       namespace: ${{ steps.validate.outputs.namespace }}
     
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Validate and sanitize inputs
         id: validate
         run: |
@@ -83,6 +87,17 @@ jobs:
           MAX_RUNNERS="${{ github.event.inputs.max_runners }}"
           NAMESPACE="${{ github.event.inputs.namespace }}"
           RUNNER_IMAGE="${{ github.event.inputs.runner_image }}"
+          EXPECTED_SHA="${{ github.event.inputs.expected_sha }}"
+
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "❌ Error: expected_sha must be a 40-character commit SHA"
+            exit 1
+          fi
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
           
           # Validate min_runners is numeric
           if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
@@ -99,6 +114,11 @@ jobs:
           # Validate min <= max
           if [ "${MIN_RUNNERS}" -gt "${MAX_RUNNERS}" ]; then
             echo "❌ Error: min_runners (${MIN_RUNNERS}) cannot be greater than max_runners (${MAX_RUNNERS})"
+            exit 1
+          fi
+
+          if [ "${MAX_RUNNERS}" -gt 4 ]; then
+            echo "❌ Error: max_runners must not exceed the fixed capacity ceiling of 4"
             exit 1
           fi
           
@@ -216,56 +236,48 @@ jobs:
           done
       
       - name: Check node pool capacity
-        continue-on-error: true
         run: |
           echo "📐 Checking node pool capacity against requested runner count..."
           MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
           MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
           POOL_NAME="github-runners-pool-16g"
 
-          # One runner pod is scheduled per node: the pod requests 10Gi of
-          # memory (runner 5Gi + dind 5Gi) against ~13.32Gi of node allocatable,
-          # so two pods cannot share a node. Concurrency is therefore capped by
-          # max_nodes as well as by maxRunners.
+          PODS_PER_NODE=2
+          REQUIRED_POOL_MIN=2
+          REQUIRED_POOL_MAX=2
           CLUSTER_ID=$(doctl kubernetes cluster list -o json 2>/dev/null \
             | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
 
           if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
-            echo "⚠️ Could not resolve cluster '${CLUSTER_NAME}' - skipping capacity check"
-            exit 0
+            echo "❌ Error: could not resolve cluster '${CLUSTER_NAME}' for capacity validation"
+            exit 1
           fi
 
           POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json 2>/dev/null \
             | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
 
           if [ -z "${POOL_JSON}" ]; then
-            echo "⚠️ Node pool '${POOL_NAME}' not found - skipping capacity check"
-            exit 0
+            echo "❌ Error: node pool '${POOL_NAME}' not found"
+            exit 1
           fi
 
           POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
           POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
 
+          REQUIRED_NODES=$(( (MAX_RUNNERS + PODS_PER_NODE - 1) / PODS_PER_NODE ))
           echo "  Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX}"
           echo "  Requested: minRunners=${MIN_RUNNERS} maxRunners=${MAX_RUNNERS}"
+          echo "  Capacity: ${PODS_PER_NODE} pods/node; maxRunners requires ${REQUIRED_NODES} nodes"
 
-          if [ "${MAX_RUNNERS}" -gt "${POOL_MAX}" ]; then
-            echo "⚠️ WARNING: maxRunners (${MAX_RUNNERS}) exceeds pool max_nodes (${POOL_MAX})."
-            echo "   Runners above ${POOL_MAX} will stay Pending indefinitely."
-            echo "   Resize the pool with the 'Node Pool Sizing' workflow."
-            {
-              echo "### ⚠️ Capacity warning"
-              echo ""
-              echo "\`maxRunners=${MAX_RUNNERS}\` exceeds node pool \`max_nodes=${POOL_MAX}\`."
-              echo "One runner pod runs per node, so runners above ${POOL_MAX} will stay Pending."
-              echo "Fix with the **Node Pool Sizing** workflow."
-            } >> $GITHUB_STEP_SUMMARY
-          elif [ "${MIN_RUNNERS}" -gt "${POOL_MIN}" ]; then
-            echo "⚠️ WARNING: minRunners (${MIN_RUNNERS}) exceeds pool min_nodes (${POOL_MIN})."
-            echo "   Warm runners will wait on node provisioning until the pool scales up."
-          else
-            echo "✅ Node pool capacity is sufficient"
+          if [ "${POOL_MIN}" != "${REQUIRED_POOL_MIN}" ] || [ "${POOL_MAX}" != "${REQUIRED_POOL_MAX}" ]; then
+            echo "❌ Error: runner pool bounds must be fixed at ${REQUIRED_POOL_MIN}/${REQUIRED_POOL_MAX}; found ${POOL_MIN}/${POOL_MAX}"
+            exit 1
           fi
+          if [ "${REQUIRED_NODES}" -gt "${POOL_MAX}" ]; then
+            echo "❌ Error: maxRunners (${MAX_RUNNERS}) exceeds ${POOL_MAX} nodes at ${PODS_PER_NODE} pods per node"
+            exit 1
+          fi
+          echo "✅ Node pool capacity matches the fixed two-node ceiling"
 
       - name: Create namespace if not exists
         run: |
@@ -372,6 +384,7 @@ jobs:
 
       - name: Install or upgrade ARC controller
         run: |
+          ARC_CHART_VERSION="${ARC_CHART_VERSION:-0.14.2}"
           echo "📦 Installing/upgrading Actions Runner Controller to ${ARC_CHART_VERSION}..."
 
           # `helm upgrade --install` (not bare `helm install` behind an

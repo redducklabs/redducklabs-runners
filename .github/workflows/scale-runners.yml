@@ -23,6 +23,10 @@ on:
         required: false
         default: '4'
         type: string
+      expected_sha:
+        description: 'Exact commit SHA to scale'
+        required: true
+        type: string
       namespace:
         description: 'Kubernetes namespace'
         required: false
@@ -53,6 +57,9 @@ jobs:
       namespace: ${{ steps.validate.outputs.namespace }}
     
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Validate and sanitize inputs
         id: validate
         run: |
@@ -63,6 +70,17 @@ jobs:
           MIN_RUNNERS="${{ github.event.inputs.min_runners }}"
           MAX_RUNNERS="${{ github.event.inputs.max_runners }}"
           NAMESPACE="${{ github.event.inputs.namespace }}"
+          EXPECTED_SHA="${{ github.event.inputs.expected_sha }}"
+
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "❌ Error: expected_sha must be a 40-character commit SHA"
+            exit 1
+          fi
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
           
           # Validate action is one of allowed values
           case "${ACTION}" in
@@ -107,8 +125,8 @@ jobs:
               exit 1
             fi
             
-            if [ "${MAX_RUNNERS}" -lt 1 ] || [ "${MAX_RUNNERS}" -gt 50 ]; then
-              echo "❌ Error: max_runners must be between 1 and 50"
+            if [ "${MAX_RUNNERS}" -lt 1 ] || [ "${MAX_RUNNERS}" -gt 4 ]; then
+              echo "❌ Error: max_runners must be between 1 and 4"
               exit 1
             fi
           fi
@@ -259,11 +277,11 @@ jobs:
               --namespace "${NAMESPACE}" \
               --reuse-values \
               --set minRunners=2 \
-              --set maxRunners=8 \
+              --set maxRunners=4 \
               --wait \
               --timeout 180s; then
               
-              echo "✅ Scaled to: Min=2, Max=8"
+              echo "✅ Scaled to: Min=2, Max=4"
               break
             elif [ "${attempt}" = "3" ]; then
               echo "❌ Error: Failed to scale up runners"
@@ -323,11 +341,11 @@ jobs:
               --namespace "${NAMESPACE}" \
               --reuse-values \
               --set minRunners=4 \
-              --set maxRunners=8 \
+              --set maxRunners=4 \
               --wait \
               --timeout 180s; then
               
-              echo "✅ Scaled to: Min=4, Max=8"
+              echo "✅ Scaled to: Min=4, Max=4"
               break
             elif [ "${attempt}" = "3" ]; then
               echo "❌ Error: Failed to scale to maximum"

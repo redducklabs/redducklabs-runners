@@ -1,0 +1,9 @@
+aurolegal.ai
+autoduck
+manager
+platform-observability
+redducklabs
+redducklaw
+therapy-link
+zipbot-internal
+zipbot-v2

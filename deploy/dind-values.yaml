@@ -11,15 +11,16 @@ githubConfigSecret:
   github_token: ""  # SET VIA ENVIRONMENT VARIABLE
 
 # Runner scaling configuration.
-# One runner pod per node (see the resource note below), so maxRunners must not
-# exceed the node pool's max_nodes and minRunners must not exceed min_nodes.
+# Two runner pods fit on each dedicated node. With the fixed two-node pool
+# ceiling, maxRunners must remain four.
 # Pool bounds are applied by .github/workflows/node-pool-sizing.yml; see
 # docs/runbooks/node-pool-sizing.md before changing either number.
 minRunners: 2
-maxRunners: 8
+maxRunners: 4
 
 # Runner scale set name (used in workflows as: runs-on: redducklabs-runners)
 runnerScaleSetName: "redducklabs-runners"
+runnerGroup: "redducklabs-private-runners"
 
 # NOTE: containerMode.type is deliberately NOT set to "dind".
 #
@@ -64,6 +65,15 @@ template:
       value: "true"
       effect: NoSchedule
 
+    # ARC applies this shared reservation to the whole pod, covering both the
+    # runner and native dind sidecar without competing container requests.
+    resources:
+      requests:
+        cpu: "3"
+        memory: "5Gi"
+      limits:
+        memory: "6Gi"
+
     # Pull secret for private registry
     imagePullSecrets:
     - name: do-registry-secret
@@ -105,15 +115,6 @@ template:
         initialDelaySeconds: 0
         failureThreshold: 24
         periodSeconds: 5
-      # Memory reservation for the Docker daemon. THIS IS THE FIX: everything a
-      # workflow runs inside Docker (docker build, compose, testcontainers) is
-      # charged here, not to the runner container. Previously this was 0/0.
-      resources:
-        requests:
-          cpu: "1"
-          memory: "5Gi"
-        limits:
-          memory: "10Gi"
       volumeMounts:
       - name: work
         mountPath: /home/runner/_work
@@ -142,35 +143,9 @@ template:
       - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
         value: "120"
 
-      # Resource limits.
-      #
-      # Sizing rationale (github-runners-pool-16g, s-8vcpu-16gb):
-      #   node allocatable       13.32Gi / 7880m cpu
-      #   less system pods       ~0.68Gi (cilium, kube-proxy, csi, node-agent)
-      #   available to the pod   ~12.64Gi
-      #
-      # runner 5Gi + dind 5Gi = 10Gi of memory REQUESTS per pod. Two pods would
-      # need 20Gi against 13.32Gi allocatable, so the scheduler places exactly
-      # ONE runner pod per node and the cluster-autoscaler adds a node per
-      # additional concurrent job. Requests are deliberately below the ~12.64Gi
-      # budget so system DaemonSets keep room; the LIMITS are what a job can
-      # actually consume.
-      #
-      # No CPU limit: with one pod per node there is nothing to protect the node
-      # from, and the previous 3-CPU limit throttled builds to 3 of 8 cores.
-      #
-      # Memory limits are intentionally overcommitted (10Gi + 10Gi against a
-      # ~12.64Gi node) so a runner-heavy job can use ~10Gi on the runner while
-      # dockerd idles, and a Docker-heavy job can do the reverse. With one pod
-      # per node the only workload at risk from that overcommit is the job
-      # itself. An OOM now names the container that overran, which is how we
-      # attribute failures: `runner` = the job process, `dind` = a Docker build.
-      resources:
-        requests:
-          cpu: "2"
-          memory: "5Gi"
-        limits:
-          memory: "10Gi"
+      # The pod-level budget above is intentionally shared by the runner and
+      # dind sidecar. Do not add container-level resources here: they override
+      # the packing contract verified by test/verify-runner-resources.sh.
 
       # Runner container securityContext.
       # allowPrivilegeEscalation MUST be true and the default capability set
