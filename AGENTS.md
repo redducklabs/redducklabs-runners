@@ -50,3 +50,7 @@ Codex-specific adapter rules:
   explicit controller service-account values. Use the full `helm template`
   invocation from `test/verify-runner-resources.sh`; omitting those values makes
   the chart attempt live controller discovery and fail before kubeconform runs.
+- In Windows validation sessions, run the installed `shellcheck.exe` from
+  PowerShell with an explicit array of script paths. A WSL `bash -lc` session
+  does not inherit the Windows executable lookup and reports
+  `shellcheck: command not found`; use WSL only for `bash -n` syntax checks.
