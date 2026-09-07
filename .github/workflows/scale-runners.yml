@@ -40,6 +40,7 @@ env:
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
   CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
   RELEASE_NAME: ${{ vars.RELEASE_NAME || 'redducklabs-runners' }}
+  ARC_CHART_VERSION: '0.14.2'
 
 # Use minimal permissions
 permissions:
@@ -243,6 +244,43 @@ jobs:
           POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
           echo "pod_count=${POD_COUNT}" >> $GITHUB_OUTPUT
           echo "  Active pods: ${POD_COUNT}"
+
+      - name: Check runner pool capacity
+        if: needs.validate-inputs.outputs.action != 'status'
+        run: |
+          echo "📐 Validating fixed runner-pool capacity before scaling..."
+          POOL_NAME="github-runners-pool-16g"
+
+          CLUSTER_ID=$(doctl kubernetes cluster list -o json \
+            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
+          if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
+            echo "❌ Error: cluster '${CLUSTER_NAME}' was not found"
+            exit 1
+          fi
+
+          POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
+            | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
+          if [ -z "${POOL_JSON}" ]; then
+            echo "❌ Error: runner pool '${POOL_NAME}' was not found"
+            exit 1
+          fi
+
+          POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
+          POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
+          POOL_COUNT=$(echo "${POOL_JSON}" | jq -r '.count')
+          if [ "${POOL_MIN}" != "2" ] || [ "${POOL_MAX}" != "2" ] || [ "${POOL_COUNT}" != "2" ]; then
+            echo "❌ Error: runner pool must be min_nodes=2, max_nodes=2, count=2; found ${POOL_MIN}/${POOL_MAX}/${POOL_COUNT}"
+            exit 1
+          fi
+
+          READY_NODES=$(kubectl get nodes -l node-type=github-runner -o json \
+            | jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length')
+          if [ "${READY_NODES}" != "2" ]; then
+            echo "❌ Error: runner pool requires two Ready nodes; found ${READY_NODES}"
+            exit 1
+          fi
+
+          echo "✅ Runner pool capacity is fixed at two Ready nodes"
       
       - name: Display status
         if: needs.validate-inputs.outputs.action == 'status'
@@ -276,6 +314,7 @@ jobs:
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
               --reuse-values \
+              --version "${ARC_CHART_VERSION}" \
               --set minRunners=2 \
               --set maxRunners=4 \
               --wait \
@@ -293,7 +332,7 @@ jobs:
           done
           
           echo "## ✅ Scaled Up" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=2, Max=8**" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=2, Max=4**" >> $GITHUB_STEP_SUMMARY
       
       - name: Scale down (minimal)
         if: needs.validate-inputs.outputs.action == 'scale-down'
@@ -308,6 +347,7 @@ jobs:
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
               --reuse-values \
+              --version "${ARC_CHART_VERSION}" \
               --set minRunners=0 \
               --set maxRunners=1 \
               --wait \
@@ -340,6 +380,7 @@ jobs:
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
               --reuse-values \
+              --version "${ARC_CHART_VERSION}" \
               --set minRunners=4 \
               --set maxRunners=4 \
               --wait \
@@ -357,7 +398,7 @@ jobs:
           done
           
           echo "## ✅ Scaled to Maximum" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=4, Max=8** (maximum)" >> $GITHUB_STEP_SUMMARY
+          echo "Runners scaled to: **Min=4, Max=4** (maximum)" >> $GITHUB_STEP_SUMMARY
       
       - name: Custom scaling
         if: needs.validate-inputs.outputs.action == 'scale-custom'
@@ -374,6 +415,7 @@ jobs:
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
               --reuse-values \
+              --version "${ARC_CHART_VERSION}" \
               --set minRunners="${MIN_RUNNERS}" \
               --set maxRunners="${MAX_RUNNERS}" \
               --wait \
@@ -419,7 +461,7 @@ jobs:
             # Verify scaling worked as expected
             case "${{ needs.validate-inputs.outputs.action }}" in
               scale-up)
-                if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "8" ]; then
+                if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "4" ]; then
                   echo "✅ Scale up verified"
                 else
                   echo "⚠️ Scale up may not have applied correctly"
@@ -433,7 +475,7 @@ jobs:
                 fi
                 ;;
               scale-max)
-                if [ "${NEW_MIN}" = "4" ] && [ "${NEW_MAX}" = "8" ]; then
+                if [ "${NEW_MIN}" = "4" ] && [ "${NEW_MAX}" = "4" ]; then
                   echo "✅ Scale to maximum verified"
                 else
                   echo "⚠️ Scale to maximum may not have applied correctly"

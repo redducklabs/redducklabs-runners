@@ -70,7 +70,8 @@ get_status() {
     
     # Get current scaling values
     echo "Current Scaling:"
-    local current_config=$(kubectl get autoscalingrunnersets -n "$NAMESPACE" "$RELEASE_NAME" -o json 2>/dev/null | jq '.spec | {minRunners: .minRunners, maxRunners: .maxRunners}' 2>/dev/null || echo "{}")
+    local current_config
+    current_config=$(kubectl get autoscalingrunnersets -n "$NAMESPACE" "$RELEASE_NAME" -o json 2>/dev/null | jq '.spec | {minRunners: .minRunners, maxRunners: .maxRunners}' 2>/dev/null || echo "{}")
     if [ "$current_config" != "{}" ]; then
         echo "$current_config" | jq .
     else

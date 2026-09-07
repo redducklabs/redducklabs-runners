@@ -275,6 +275,9 @@ info "Checking offline deploy, scale, capacity, and revision guards..."
 FIXTURE_DIR=$(mktemp -d)
 trap 'rm -rf "$FIXTURE_DIR"' EXIT
 FIXTURE_ACTUAL_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FIXTURE_POOL_MIN=2
+FIXTURE_POOL_MAX=2
+FIXTURE_POOL_COUNT=2
 
 materialize_workflow_step() {  # workflow, exact step name, expected SHA, max runners, min nodes, max nodes, output file
     python - "$1" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY'
@@ -391,9 +394,11 @@ run_fixture() {  # script, mutation log, output log
         export CLUSTER_NAME=redducklabs-cluster
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
         export RELEASE_NAME=redducklabs-runners
+        export ARC_CHART_VERSION=0.14.2
         export FIXTURE_ACTUAL_SHA
         export FIXTURE_MUTATION_LOG="$mutation_log"
         export FIXTURE_SHA_READ_LOG="$FIXTURE_DIR/sha-reads"
+        export FIXTURE_POOL_MIN FIXTURE_POOL_MAX FIXTURE_POOL_COUNT
         git() {
             if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
                 printf 'git %s\n' "$*" >> "$FIXTURE_SHA_READ_LOG"
@@ -415,13 +420,14 @@ run_fixture() {  # script, mutation log, output log
             case " $* " in
                 *" node-pool update "*) echo "doctl $*" >> "$FIXTURE_MUTATION_LOG" ; return 0 ;;
                 *" cluster list "*) echo '[{"name":"redducklabs-cluster","id":"fixture-cluster"}]' ; return 0 ;;
-                *" node-pool list "*) echo '[{"id":"fixture-pool","name":"github-runners-pool-16g","min_nodes":2,"max_nodes":1,"count":1,"size":"s-8vcpu-16gb","auto_scale":true,"labels":{"node-type":"github-runner"},"taints":[{"key":"github-runner"}]}]' ; return 0 ;;
+                *" node-pool list "*) printf '[{"id":"fixture-pool","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"s-8vcpu-16gb","auto_scale":true,"labels":{"node-type":"github-runner"},"taints":[{"key":"github-runner"}]}]\n' "$FIXTURE_POOL_MIN" "$FIXTURE_POOL_MAX" "$FIXTURE_POOL_COUNT" ; return 0 ;;
             esac
             return 0
         }
         kubectl() {
             case " $* " in
                 *" apply "*|*" create "*|*" delete "*|*" patch "*) echo "kubectl $*" >> "$FIXTURE_MUTATION_LOG" ;;
+                *" get nodes "*) echo '{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' ; return 0 ;;
             esac
             return 0
         }
@@ -486,6 +492,9 @@ assert_node_pool_bounds() {
 }
 
 assert_live_capacity_drift_fails() {
+    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT
+    FIXTURE_POOL_MAX=1
+    FIXTURE_POOL_COUNT=1
     : > "$FIXTURE_DIR/mutations"
     if run_named_step .github/workflows/deploy-runners.yml 'Check node pool capacity' "$FIXTURE_ACTUAL_SHA" 4 2 2; then
         fail "Deploy accepts live runner-pool drift (fixture reports min=2, max=1, count=1)"
@@ -493,6 +502,84 @@ assert_live_capacity_drift_fails() {
         fail "Deploy reached a mutation after live capacity drift"
     else
         pass "Deploy rejects live runner-pool capacity drift before mutation"
+    fi
+    FIXTURE_POOL_MAX=$original_max
+    FIXTURE_POOL_COUNT=$original_count
+}
+
+assert_scale_capacity_gate() {
+    local workflow=.github/workflows/scale-runners.yml
+    local validation_step='Validate and sanitize inputs'
+    local capacity_step='Check runner pool capacity'
+    local script="$FIXTURE_DIR/scale-capacity-gate.sh"
+    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT
+
+    : > "$script"
+    if ! materialize_workflow_step "$workflow" "$validation_step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
+       || ! materialize_workflow_step "$workflow" "$capacity_step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
+       || ! materialize_workflow_token "$workflow" 'helm upgrade' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+        fail "Scale Runners has no executable capacity gate before Helm"
+        return
+    fi
+
+    FIXTURE_POOL_MAX=1
+    FIXTURE_POOL_COUNT=1
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Scale Runners accepts live runner-pool drift before Helm"
+    elif [ -s "$FIXTURE_DIR/mutations" ]; then
+        fail "Scale Runners reached Helm after live runner-pool drift"
+    else
+        pass "Scale Runners rejects live runner-pool drift before Helm"
+    fi
+
+    FIXTURE_POOL_MAX=$original_max
+    FIXTURE_POOL_COUNT=$original_count
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+       && grep -Eq '^helm upgrade .*gha-runner-scale-set' "$FIXTURE_DIR/mutations"; then
+        pass "Scale Runners reaches Helm only after a healthy fixed-capacity check"
+    else
+        fail "Scale Runners does not reach Helm after a healthy fixed-capacity check"
+    fi
+}
+
+assert_scale_workflow_static_contract() {
+    if python - <<'PY'
+import yaml
+
+with open('.github/workflows/scale-runners.yml', encoding='utf-8') as source:
+    workflow = yaml.safe_load(source)
+
+env = workflow.get('env') or {}
+if env.get('ARC_CHART_VERSION') != '0.14.2':
+    raise SystemExit('ARC_CHART_VERSION must be pinned to 0.14.2')
+
+capacity_steps = [
+    step for job in (workflow.get('jobs') or {}).values()
+    for step in (job.get('steps') or [])
+    if step.get('name') == 'Check runner pool capacity'
+]
+if len(capacity_steps) != 1 or capacity_steps[0].get('if') != "needs.validate-inputs.outputs.action != 'status'":
+    raise SystemExit('capacity gate must skip the status-only action')
+
+scale_steps = workflow['jobs']['scale']['steps']
+capacity_index = next(index for index, step in enumerate(scale_steps) if step.get('name') == 'Check runner pool capacity')
+helm_steps = [step for step in scale_steps if 'helm upgrade ' in step.get('run', '')]
+helm_indices = [index for index, step in enumerate(scale_steps) if 'helm upgrade ' in step.get('run', '')]
+if len(helm_steps) != 4 or any('--version "${ARC_CHART_VERSION}"' not in step['run'] for step in helm_steps):
+    raise SystemExit('every Scale Helm upgrade must use ARC_CHART_VERSION')
+if any(capacity_index >= index for index in helm_indices):
+    raise SystemExit('capacity gate must run before every Scale Helm upgrade')
+
+with open('.github/workflows/scale-runners.yml', encoding='utf-8') as source:
+    if 'Max=8' in source.read():
+        raise SystemExit('Scale operator output still advertises Max=8')
+PY
+    then
+        pass "Scale workflow pins every Helm mutation and keeps status independent"
+    else
+        fail "Scale workflow chart pin, capacity gate, or operator-output contract is incomplete"
     fi
 }
 
@@ -540,6 +627,8 @@ assert_rejects_oversized_max 'Scale Runners' .github/workflows/scale-runners.yml
 assert_rejects_oversized_max 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs'
 assert_node_pool_bounds
 assert_live_capacity_drift_fails
+assert_scale_capacity_gate
+assert_scale_workflow_static_contract
 
 assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' 'helm upgrade' Helm '^helm upgrade .*gha-runner-scale-set'
 assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizing.yml 'Validate inputs against deploy/dind-values.yaml' 'node-pool update' doctl '^doctl kubernetes cluster node-pool update '
