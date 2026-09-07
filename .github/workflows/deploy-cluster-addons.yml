@@ -25,6 +25,10 @@ on:
         default: '3.14.0'
         type: string
 
+concurrency:
+  group: runner-fleet-mutation
+  cancel-in-progress: false
+
 env:
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
   CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}

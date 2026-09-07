@@ -337,8 +337,9 @@ jobs:
           if [ "${OOM_COUNT}" -gt 0 ]; then
             echo "${OOM_DETAIL}"
             echo ""
-            echo "  → container 'runner' = the job process itself (raise the runner limit)"
-            echo "  → container 'dind'   = a Docker build (raise the dind limit)"
+            echo "  The killed container identifies where the kernel enforced the"
+            echo "  shared pod limit; it does not identify which container consumed"
+            echo "  most of the aggregate budget. Review pod and both container metrics."
             echo "  See docs/runbooks/node-pool-sizing.md"
           fi
           echo "Evicted pods: ${EVICTED}"
@@ -352,9 +353,8 @@ jobs:
           echo "evicted_count=${EVICTED}" >> $GITHUB_OUTPUT
 
           # --- Capacity drift ------------------------------------------------
-          # One runner pod per node, so max_nodes must be >= maxRunners or the
-          # extra runners can never be scheduled. This catches the case where
-          # maxRunners was raised without resizing the pool.
+          # The production cap is four runners packed two per node on a fixed
+          # two-node pool. Report any drift from that coupled configuration.
           echo ""
           MAX_RUNNERS="${{ steps.config.outputs.max_runners }}"
           CLUSTER_ID=$(doctl kubernetes cluster list -o json 2>/dev/null \
@@ -370,28 +370,126 @@ jobs:
             echo "Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX} current=${POOL_COUNT}"
             echo "Scale set: maxRunners=${MAX_RUNNERS}"
 
-            if [[ "${POOL_MAX}" =~ ^[0-9]+$ ]] && [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]] \
-               && [ "${POOL_MAX}" -lt "${MAX_RUNNERS}" ]; then
-              echo "⚠️ CAPACITY DRIFT: max_nodes (${POOL_MAX}) < maxRunners (${MAX_RUNNERS})."
-              echo "   One runner pod is scheduled per node, so runners above"
-              echo "   ${POOL_MAX} will sit Pending forever."
-              echo "   Fix with the 'Node Pool Sizing' workflow."
+            if [ "${POOL_MIN}" != "2" ] || [ "${POOL_MAX}" != "2" ] \
+               || [ "${POOL_COUNT}" != "2" ] || [ "${MAX_RUNNERS}" != "4" ]; then
+              echo "⚠️ CAPACITY DRIFT: expected pool min/max/current=2/2/2 and maxRunners=4."
+              echo "   Run the repository validation and CI rollout gates before mutation."
             else
-              echo "✅ Node pool capacity is consistent with maxRunners"
+              echo "✅ Node pool and scale set retain the fixed two-node/four-runner cap"
             fi
           else
             echo "⚠️ Could not resolve cluster '${CLUSTER_NAME}' to check pool capacity"
           fi
 
+      - name: Report autoscaler diagnostics
+        continue-on-error: true
+        run: |
+          # This ConfigMap is provider-managed diagnostic text, not a stable API.
+          # Read only data.status and never print the raw value. The parser emits
+          # an allow-listed subset or a generic unavailable message.
+          if ! RAW_STATUS=$(kubectl get configmap cluster-autoscaler-status \
+              -n kube-system -o jsonpath='{.data.status}' 2>/dev/null) \
+             || [ -z "${RAW_STATUS}" ]; then
+            DIAGNOSTICS='Autoscaler diagnostics unavailable'
+          elif ! DIAGNOSTICS=$(AUTOSCALER_STATUS="${RAW_STATUS}" python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          raw = os.environ.get("AUTOSCALER_STATUS", "")
+          allowed_statuses = {"Healthy", "NoCandidates", "NoActivity", "Backoff"}
+          sections = {"health": [], "scaleUp": []}
+          current = None
+
+          for source_line in raw.splitlines():
+              stripped = source_line.strip()
+              if stripped == "health:":
+                  current = "health"
+                  continue
+              if stripped == "scaleUp:":
+                  current = "scaleUp"
+                  continue
+              if current is None or ":" not in stripped:
+                  continue
+              key, value = (part.strip() for part in stripped.split(":", 1))
+              if key == "status":
+                  if value not in allowed_statuses:
+                      raise SystemExit(1)
+                  sections[current].append(("status", value))
+              elif current == "scaleUp" and key == "errorCode":
+                  if value != "cloudProviderError":
+                      raise SystemExit(1)
+                  sections[current].append(("errorCode", value))
+              elif current == "scaleUp" and key == "errorMessage":
+                  if not re.search(
+                      r"capacity|quota|maximum|max nodes|cannot scale|unavailable|422",
+                      value,
+                      re.IGNORECASE,
+                  ):
+                      raise SystemExit(1)
+                  value = re.sub(r"https?://\S+", "[REDACTED_URL]", value)
+                  value = re.sub(
+                      r"(?i)\b(request(?:[-_ ]?id)?)[=: ]+[^\s;,]+",
+                      r"\1=[REDACTED_REQUEST]",
+                      value,
+                  )
+                  value = re.sub(
+                      r"(?i)\b(pool(?:[-_ ]?id)?)[=: ]+[^\s;,]+",
+                      r"\1 [REDACTED_POOL]",
+                      value,
+                  )
+                  value = re.sub(
+                      r"(?i)\b(cluster(?:[-_ ]?id)?)[=: ]+[^\s;,]+",
+                      r"\1 [REDACTED_CLUSTER]",
+                      value,
+                  )
+                  value = re.sub(
+                      r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b",
+                      "[REDACTED_ID]",
+                      value,
+                      flags=re.IGNORECASE,
+                  )
+                  sections[current].append(("errorMessage", value))
+
+          if not sections["health"] or not sections["scaleUp"]:
+              raise SystemExit(1)
+          scale_values = dict(sections["scaleUp"])
+          if "errorMessage" in scale_values and (
+              scale_values.get("status") != "Backoff"
+              or scale_values.get("errorCode") != "cloudProviderError"
+          ):
+              raise SystemExit(1)
+
+          for section in ("health", "scaleUp"):
+              for key, value in sections[section]:
+                  print(f"{section}.{key}: {value}")
+          PY
+          ); then
+            DIAGNOSTICS='Autoscaler diagnostics unavailable'
+          fi
+
+          echo "Autoscaler diagnostics:"
+          printf '%s\n' "${DIAGNOSTICS}"
+          {
+            echo "## Cluster Autoscaler Diagnostics"
+            echo ""
+            echo '```text'
+            printf '%s\n' "${DIAGNOSTICS}"
+            echo '```'
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Check GitHub registration
         if: steps.deployment.outputs.deployed == 'true'
         id: github
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
           echo "🔗 Checking GitHub registration..."
           
           # Check if token is available
-          if [ -z "${{ secrets.RUNNER_TOKEN }}" ]; then
+          if [ -z "${GH_TOKEN}" ]; then
             echo "⚠️ RUNNER_TOKEN not configured - skipping GitHub registration check"
             echo "github_total=N/A" >> $GITHUB_OUTPUT
             echo "github_online=N/A" >> $GITHUB_OUTPUT
@@ -413,15 +511,15 @@ jobs:
           
           # Check runners via API with retry logic
           for attempt in 1 2 3; do
-            RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.RUNNER_TOKEN }}" \
-              "https://api.github.com/orgs/${ORG}/actions/runners" 2>/dev/null)
+            RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null)
             
             if [ $? -eq 0 ] && [ "${RESPONSE}" != "" ]; then
               # Check if response is valid JSON
               if echo "${RESPONSE}" | jq . >/dev/null 2>&1; then
-                TOTAL_RUNNERS=$(echo "${RESPONSE}" | jq '.total_count // 0')
-                ONLINE_RUNNERS=$(echo "${RESPONSE}" | jq '[.runners[]? | select(.status=="online")] | length')
-                OFFLINE_RUNNERS=$(echo "${RESPONSE}" | jq '[.runners[]? | select(.status=="offline")] | length')
+                RUNNERS=$(echo "${RESPONSE}" | jq -c '[.[]?.runners[]?]')
+                TOTAL_RUNNERS=$(echo "${RUNNERS}" | jq 'length')
+                ONLINE_RUNNERS=$(echo "${RUNNERS}" | jq '[.[] | select(.status=="online")] | length')
+                OFFLINE_RUNNERS=$(echo "${RUNNERS}" | jq '[.[] | select(.status=="offline")] | length')
                 
                 # Validate numeric values
                 for value in TOTAL_RUNNERS ONLINE_RUNNERS OFFLINE_RUNNERS; do

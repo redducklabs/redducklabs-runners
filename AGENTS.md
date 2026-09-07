@@ -34,3 +34,26 @@ Codex-specific adapter rules:
 - MCP servers are configured in Codex user config, not in this repository. If a
   Claude MCP config is added later, keep it for Claude and register equivalent
   servers separately with `codex mcp add` / `codex mcp login`.
+
+## Tooling Warnings
+
+- The bundled Superpowers shell scripts may have CRLF line endings under
+  Windows/WSL. If Bash reports `set: pipefail\r: invalid option name`, copy the
+  complete `scripts/` directory into the plan's ignored SDD workspace, run
+  `sed -i 's/\r$//'` on the copies, and invoke the copied script. Streaming one
+  script to `bash -s` breaks scripts that locate sibling helpers via `$0`.
+- Collaboration subagent calls require the complete declared JSON schema. If a
+  call fails argument parsing, resend it with valid `task_name`, `fork_turns`,
+  `model`, `reasoning_effort`, and `message` fields; parsing failures do not
+  create an agent or change repository state.
+- Offline ARC scale-set rendering requires placeholder GitHub credentials and
+  explicit controller service-account values. Use the full `helm template`
+  invocation from `test/verify-runner-resources.sh`; omitting those values makes
+  the chart attempt live controller discovery and fail before kubeconform runs.
+- On Windows, run Helm OCI chart renders sequentially. Concurrent renders of
+  the same chart version can contend on Helm's shared archive cache and fail an
+  otherwise valid render with an `Access is denied` temporary-file rename.
+- In Windows validation sessions, run the installed `shellcheck.exe` from
+  PowerShell with an explicit array of script paths. A WSL `bash -lc` session
+  does not inherit the Windows executable lookup and reports
+  `shellcheck: command not found`; use WSL only for `bash -n` syntax checks.

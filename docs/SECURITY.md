@@ -1,5 +1,7 @@
 # Security Guide - Red Duck Labs GitHub Actions Runners
 
+**Last Updated:** September 7, 2026
+
 This document outlines security best practices and guidelines for the Red Duck Labs GitHub Actions self-hosted runners.
 
 ## 🔒 Core Security Principles
@@ -51,56 +53,26 @@ githubConfigSecret:
 ### Container Registry Security
 
 **DigitalOcean Registry:**
-- Use dedicated registry tokens, not personal tokens
-- Configure pull secrets for private images
-- Regular credential rotation
-
-```bash
-# Create registry pull secret
-kubectl create secret docker-registry do-registry-secret \
-  --docker-server=registry.digitalocean.com \
-  --docker-username=$DO_REGISTRY_TOKEN \
-  --docker-password=$DO_REGISTRY_TOKEN \
-  --namespace=arc-runners
-```
+- Prepare registry access only through the **Prepare Runner Platform** workflow.
+- The workflow obtains read-only Docker configuration without printing it and
+  creates `do-registry-secret` explicitly in `arc-runners`.
+- Deployment requires type `kubernetes.io/dockerconfigjson`, valid
+  `.dockerconfigjson`, and non-empty auth for `registry.digitalocean.com`.
+- Rotate the repository `DO_TOKEN`, then rerun the reviewed preparation
+  workflow from its exact commit SHA.
 
 ### Kubernetes RBAC
 
-**Service Account Configuration:**
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: runner-sa
-  namespace: arc-runners
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: runner-role
-  namespace: arc-runners
-rules:
-- apiGroups: [""]
-  resources: ["pods", "secrets"]
-  verbs: ["get", "list"]
-- apiGroups: [""]
-  resources: ["pods/exec"]
-  verbs: ["create"]  # Required for debugging only
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: runner-binding
-  namespace: arc-runners
-subjects:
-- kind: ServiceAccount
-  name: runner-sa
-  namespace: arc-runners
-roleRef:
-  kind: Role
-  name: runner-role
-  apiGroup: rbac.authorization.k8s.io
-```
+The scale-set chart owns
+`redducklabs-runners-gha-rs-no-permission`. Platform preparation does not create
+or adopt it. If the object already exists before deploy, its Helm release and
+namespace annotations must identify `redducklabs-runners` in `arc-runners`,
+and its managed-by label must be `Helm`. Runner Pods set
+`automountServiceAccountToken: false`; server-side admission validation rejects
+an injected service-account token volume or mount. For a first install, the
+pinned scale-set chart is bootstrapped at zero runners to create this
+ServiceAccount under Helm ownership; the target Pod is then server-dry-run
+before runner capacity is enabled.
 
 ## 🌐 Network Security
 
@@ -293,16 +265,9 @@ grep "arc-runners" /var/log/kubernetes/audit.log
 # Update GitHub token
 export NEW_GITHUB_TOKEN=ghp_new_token
 
-# Update registry credentials
-kubectl delete secret do-registry-secret -n arc-runners
-kubectl create secret docker-registry do-registry-secret \
-  --docker-server=registry.digitalocean.com \
-  --docker-username=$NEW_DO_TOKEN \
-  --docker-password=$NEW_DO_TOKEN \
-  --namespace=arc-runners
-
-# Redeploy with new credentials
-cd deploy && ./deploy.sh
+# Update the repository DO_TOKEN secret, then run Prepare Runner Platform from
+# the reviewed SHA to reconcile registry access. Deploy runners through the
+# GitHub Actions deployment workflow from that same reviewed SHA.
 ```
 
 ### Common Security Incidents

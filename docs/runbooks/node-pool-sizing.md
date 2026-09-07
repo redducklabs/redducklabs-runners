@@ -1,7 +1,7 @@
 # Runbook: Runner Node Pool Sizing
 
-How to change how many GitHub Actions runners can run concurrently, and how much
-memory each one gets.
+Reviewed target operating contract for the GitHub Actions runner pool. It is
+pending CI deployment and external live acceptance.
 
 - **Cluster:** `redducklabs-cluster` (context `do-sfo3-redducklabs-cluster`, region sfo3)
 - **Pool:** `github-runners-pool-16g`
@@ -9,177 +9,121 @@ memory each one gets.
 - **Pool labels/taints:** `node-type=github-runner`, `workload-type=ci-cd`,
   taint `github-runner=true:NoSchedule`
 
-## The invariant: one runner pod per node
+## Reviewed target invariant: two runner pods per node
 
-This is the single most important thing to understand before changing anything.
+The August one-pod-per-node design is superseded. In the reviewed target, the
+runner and privileged DinD sidecar share a pod-level request of **3 CPU / 5 GiB
+memory** and a shared **6 GiB memory limit**. Neither container defines a
+competing CPU or memory budget.
 
-The runner pod requests `5Gi` (runner container) + `5Gi` (dind sidecar) = **10Gi
-of memory requests**. Node allocatable is **13.32Gi**. Two pods would need 20Gi,
-so the scheduler can only ever fit **one runner pod per node**, and the
-cluster-autoscaler adds a node for each additional concurrent job.
+On a measured node with 13.32 GiB and 7880m allocatable, two target pods reserve
+10 GiB and 6 CPU. A third pod does not fit. Two $96 nodes would provide four
+self-hosted jobs with a fixed **$192 monthly cap**.
 
-That is deliberate. It is what stops one job's `docker build` from starving a
-neighbouring job's, which was the cause of the intermittent out-of-memory
-failures this design replaced.
-
-It means the pool bounds and the scale set bounds are coupled:
+The reviewed pool and scale-set target is:
 
 ```
-min_nodes >= minRunners        max_nodes >= maxRunners
+minRunners=2  maxRunners=4
+min_nodes=2   max_nodes=2   count=2
 ```
 
-`deploy/dind-values.yaml` is the source of truth for `minRunners`/`maxRunners`.
-The sizing workflow refuses to apply bounds that violate the invariant.
+`deploy/dind-values.yaml` is the source of truth. The CI workflows reject
+larger runner bounds, node-pool values other than 2/2, and live-capacity drift.
 
-## Current configuration
+## Reviewed target configuration
 
 | Setting | Value | Where it lives |
 |---|---|---|
 | `minRunners` | 2 | `deploy/dind-values.yaml` |
-| `maxRunners` | 8 | `deploy/dind-values.yaml` |
+| `maxRunners` | 4 | `deploy/dind-values.yaml` |
 | `min_nodes` | 2 | node pool (applied by the workflow below) |
-| `max_nodes` | 8 | node pool (applied by the workflow below) |
-| Per job | ~12.5Gi usable, 8 vCPU | `deploy/dind-values.yaml` resources |
+| `max_nodes` | 2 | node pool (applied by the workflow below) |
+| Per pod | 3 CPU / 5 GiB request; 6 GiB shared memory limit | `deploy/dind-values.yaml` |
 
-**Cost floor: $192/month** (2 nodes always running).
-**Cost ceiling: $768/month** (8 nodes, only while 8 jobs run concurrently).
+**Target cost floor and ceiling: $192/month** (two fixed nodes).
 
-## Changing concurrency
+The recorded GitHub-hosted comparison is 3,000 Team-plan included private
+minutes plus $0.006 per standard Linux private minute. $192 equals 35,000
+private hosted minutes per month. The `admin:org` credential could not retrieve
+organization billing totals, so this does not measure actual usage. Standard
+GitHub-hosted minutes for public repositories are free.
 
-Concurrency is capped by `maxRunners` *and* by `max_nodes`. Raising one without
-the other does nothing useful — the extra runners just sit `Pending`.
+## CI-only change and rollback path
 
-### 1. Change the scale set bounds
+Do not resize the runner pool, alter runner bounds, or change the memory budget
+from a workstation. The local `scripts/scale-runners.sh` helper accepts only
+`status`. CI uses the reviewed commit's `expected_sha` for all mutation paths:
 
-Edit `deploy/dind-values.yaml`:
+1. Run Deploy GitHub Runners with `operation=prepare-trust-boundary` and explicit
+   privileged co-tenancy acceptance. It reconciles and reads back the private
+   runner group without Helm, Kubernetes, or DigitalOcean mutation.
+2. Run Scale Runners and Node Pool Sizing from that same SHA. Node Pool Sizing
+   accepts only 2/2. Before lowering `max_nodes`, it performs two complete
+   observations of the pool, exact Helm values and manifest plus live ASRS in
+   the private 2/2 legacy-isolated state produced by rollout-quiesce, queue
+   demand, and two Ready nodes. It verifies that same legacy-isolated state
+   immediately after lowering the maximum; pod-level density state cannot
+   authorize this transition. The provider pool must expose
+   exactly the two intended custom labels and the single
+   `github-runner=true:NoSchedule` taint. Each live runner node must carry both
+   labels and that taint, with no additional `NoSchedule`/`NoExecute` taint the
+   runner does not tolerate. Cluster ID, pool ID, and sorted node
+   UID/providerID pairs must remain identical between observations.
+3. Run Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of
+   the rendered scale set and representative Pod before Helm mutation, and
+   records the post-quiesce pre-density Helm revision as the rollback target.
+4. Use Deploy GitHub Runners with `operation=rollback`, that recorded revision,
+   and the same SHA to restore the isolated 2/2 runner template. CI reads back
+   the runner group and public-workflow scan after rollback.
 
-```yaml
-minRunners: 2
-maxRunners: 8
-```
+The trust boundary is `redducklabs-private-runners`, `visibility=selected`,
+public access disabled, and exactly `aurolegal.ai`, `autoduck`, `manager`,
+`platform-observability`, `redducklabs`, `redducklaw`, `therapy-link`,
+`zipbot-internal`, and `zipbot-v2`. CI scans all public organization workflows;
+any direct or unresolved dynamic use of `redducklabs-runners` fails closed.
+GitHub's exact managed path `dynamic/agents/copilot-pull-request-reviewer` is
+the only workflow entry skipped without a contents read; every other
+non-repository path fails closed. Fleet and prerequisite mutation workflows
+share the non-cancelling `runner-fleet-mutation` concurrency group.
 
-Commit and open a PR. Then deploy via the **Deploy GitHub Runners** workflow
-(`.github/workflows/deploy-runners.yml`), setting `min_runners`/`max_runners` to
-the same numbers.
+## Deterministic acceptance and end-of-feature audit
 
-### 2. Change the pool bounds
+Acceptance begins only after trust preparation and the fixed-capacity deployment
+complete from the same reviewed SHA. The private
+`redducklabs/aurolegal.ai` workflow is dispatched from a unique annotated tag
+whose target is the reviewed workflow SHA, accepts that SHA as
+`expected_workflow_sha`, and proves four overlapping jobs on four distinct
+ephemeral runners with 2+2 placement across the two existing nodes. The
+migrated toolkit workflow is dispatched from its reviewed tag and SHA, checks
+out source `f042c7192797e59b9c10ab034a4d4c2bbcaee1ca`, and runs its four-version
+matrix on GitHub-hosted runners. The controller verifies each run's `headSha`;
+the toolkit workload must not use ARC.
 
-Run the **Node Pool Sizing** workflow
-(`.github/workflows/node-pool-sizing.yml`):
+The end-of-feature audit records the user’s explicit privileged co-tenancy
+acceptance; runner group name, selected/private-only policy, and exact
+repository list; public-workflow scan results; reviewed and dispatched SHAs;
+the rollback Helm revision; four-runner overlap and 2+2 placement; actual
+PodSpecs; workload results; node count; OOM, restart, eviction, and scheduling
+events from deployment through completion.
 
-```
-Actions -> Node Pool Sizing -> Run workflow
-  min_nodes: 2
-  max_nodes: 8
-  pool_name: github-runners-pool-16g
-  apply:     (leave unchecked for a dry run first)
-```
+## Diagnostics and shared-budget OOM investigation
 
-Run it once with `apply` unchecked to see the before/after, then again with
-`apply` checked. The workflow validates the inputs against
-`deploy/dind-values.yaml`, applies the change, and then verifies that
-autoscaling is still enabled and that the pool's labels and taints survived.
+Run **Runner Status** first. It reports pod and container metrics, restarts,
+OOM kills, evictions, node headroom, fixed-capacity drift, and provider-capacity
+diagnostics. Its provider data is an allow-listed, redacted subset of the DOKS
+autoscaler ConfigMap: `Healthy`, `NoCandidates`, `NoActivity`, or `Backoff`,
+with a capacity-related `cloudProviderError` only. Missing or changed provider
+text produces `Autoscaler diagnostics unavailable` and does not bypass the hard
+capacity gates.
 
-### Fallback: apply by hand
+An `OOMKilled` result identifies the killed process, not the component that
+used most of the shared 6 GiB budget. Attribute an incident only after reviewing
+aggregate pod use, both containers' use and restarts, headroom, and events.
 
-Only if the workflow is unavailable. Read the DigitalOcean guidance in the
-project instructions before mutating production by hand.
+## Security trade-off
 
-```bash
-CLUSTER_ID=$(doctl kubernetes cluster list -o json \
-  | jq -r '.[] | select(.name=="redducklabs-cluster") | .id')
-
-POOL_ID=$(doctl kubernetes cluster node-pool list "$CLUSTER_ID" -o json \
-  | jq -r '.[] | select(.name=="github-runners-pool-16g") | .id')
-
-# --auto-scale MUST be passed. Omitting it can clear autoscaling and pin the
-# pool to a fixed node count.
-doctl kubernetes cluster node-pool update "$CLUSTER_ID" "$POOL_ID" \
-  --auto-scale --min-nodes 2 --max-nodes 8
-
-# Verify, including that labels and taints survived
-doctl kubernetes cluster node-pool list "$CLUSTER_ID" -o json \
-  | jq '.[] | select(.name=="github-runners-pool-16g")
-        | {auto_scale, min_nodes, max_nodes, count, labels, taints}'
-```
-
-If the label `node-type=github-runner` or the taint `github-runner=true:NoSchedule`
-is missing after an update, **fix it immediately** — without them, runner pods
-cannot schedule onto the pool, and production workloads can schedule onto it.
-
-## Changing memory per job
-
-Per-job memory is set by the `resources` blocks in `deploy/dind-values.yaml`:
-
-- `runner` container — memory for work run **directly** on the runner
-  (npm, jest, webpack, pytest, go build).
-- `dind` sidecar — memory for everything run **inside Docker**
-  (`docker build`, compose, testcontainers).
-
-Both are capped at `10Gi` with `5Gi` requested. The requests are what force one
-pod per node; the limits are what a job can actually consume.
-
-**Before raising a limit**, check which container is actually running out — see
-"Diagnosing an OOM" below. Raising the wrong one changes nothing.
-
-**Before raising the requests**, note the budget: node allocatable is 13.32Gi and
-system DaemonSets take ~0.68Gi, leaving **~12.64Gi**. Total requests must stay
-comfortably under that or pods stop scheduling entirely.
-
-To go beyond ~12.5Gi per job you need a bigger node size, which is a pool
-replacement, not a resize. `m-8vcpu-64gb` ($336/mo) is the cheapest memory on
-DigitalOcean at $5.25/GB.
-
-## Diagnosing an OOM
-
-Both containers now have explicit memory limits, so **an OOM names the container
-that overran**:
-
-- `runner` OOMKilled → the job process itself. Raise the `runner` limit, or
-  lower the job's own concurrency (e.g. Jest `--maxWorkers`).
-- `dind` OOMKilled → a Docker build. Raise the `dind` limit.
-
-```bash
-kubectl config use-context do-sfo3-redducklabs-cluster
-
-# Live memory use per container
-kubectl top pods -n arc-runners --containers
-
-# Node headroom
-kubectl top nodes
-
-# OOM kills and evictions (runner pods are ephemeral, so check promptly)
-kubectl get events -n arc-runners --sort-by=.lastTimestamp \
-  | grep -Ei 'oom|evict'
-```
-
-The scheduled **Runner Status** workflow also reports OOMKilled and evicted
-runners plus node memory headroom on every run.
-
-`kubectl top` depends on metrics-server, which is deployed by the
-**Deploy Cluster Addons** workflow (`.github/workflows/deploy-cluster-addons.yml`).
-
-## Trade-offs when tuning
-
-| Change | Effect | Cost |
-|---|---|---|
-| Raise `max_nodes` + `maxRunners` | More concurrent jobs | Ceiling only; you pay per node actually running |
-| Raise `min_nodes` + `minRunners` | Less queueing — jobs start without waiting for a node | **Floor**; billed continuously |
-| Raise container limits | More memory per job | Free until it forces a bigger node size |
-| Bigger node size | More memory per job | Pool replacement; per-node price change |
-
-The latency trade-off is worth stating plainly: at one pod per node, **any job
-beyond the warm pool waits for DigitalOcean to provision a node and pull the
-~1.34GB runner image.** `minRunners`/`min_nodes` is the dial that buys that
-latency away with money. Raise it if queueing hurts more than the bill.
-
-## Rollback
-
-Re-run the **Node Pool Sizing** workflow with the previous bounds. The pool is
-autoscaled, so lowering `max_nodes` does not destroy running jobs — the
-autoscaler drains surplus nodes as jobs finish. Lowering `min_nodes` takes
-effect once nodes go idle.
-
-If you need to stop everything, use the **Emergency Stop** workflow rather than
-resizing the pool to zero; DigitalOcean autoscaling pools cannot scale below one
-node.
+Two jobs share each runner node while each pod includes privileged DinD. That
+restores cross-job co-tenancy and its larger kernel-level blast radius. The
+explicit user acceptance, selected-repository trust boundary, public-workflow
+scan, and CI-only rollout records are required controls; see
+[`docs/security/vulnerability-dismissals.md`](../security/vulnerability-dismissals.md).
