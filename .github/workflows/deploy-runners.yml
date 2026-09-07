@@ -47,7 +47,7 @@ on:
         required: true
         type: string
       runner_image:
-        description: 'Runner image to deploy'
+        description: 'Fixed canonical runner image; noncanonical values are rejected'
         required: false
         default: 'registry.digitalocean.com/redducklabs/github-runner:latest'
         type: string
@@ -74,6 +74,7 @@ env:
   RUNNER_SCALE_SET_NAME: ${{ vars.RUNNER_SCALE_SET_NAME || 'redducklabs-runners' }}
   REGISTRY: ${{ vars.REGISTRY || 'registry.digitalocean.com' }}
   REPOSITORY: ${{ vars.REPOSITORY || 'redducklabs/github-runner' }}
+  CANONICAL_RUNNER_IMAGE: 'registry.digitalocean.com/redducklabs/github-runner:latest'
   # Single pin for BOTH ARC charts. The controller chart
   # (gha-runner-scale-set-controller) and the scale set chart
   # (gha-runner-scale-set) are released together and are expected to run at the
@@ -209,9 +210,10 @@ jobs:
             exit 1
           fi
           
-          # Validate runner image format
-          if ! [[ "${RUNNER_IMAGE}" =~ ^[a-z0-9._/-]+:[a-z0-9._-]+$ ]]; then
-            echo "❌ Error: runner_image must be a valid container image reference"
+          # Scale Runners validates the fixed density contract against this
+          # exact image, so deployment must reject alternatives before mutation.
+          if [ "${RUNNER_IMAGE}" != "${CANONICAL_RUNNER_IMAGE}" ]; then
+            echo "❌ Error: runner_image must be the fixed canonical image ${CANONICAL_RUNNER_IMAGE}"
             exit 1
           fi
           

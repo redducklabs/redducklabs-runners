@@ -39,6 +39,9 @@ if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
     exit 1
 fi
 
+REPO_ROOT=$(git rev-parse --show-toplevel)
+TRUSTED_REPOSITORIES_FILE="${REPO_ROOT}/deploy/trusted-runner-repositories.txt"
+
 for tool in gh jq python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool is unavailable: ${tool}" >&2
@@ -46,21 +49,43 @@ for tool in gh jq python3; do
     fi
 done
 
-# Committed identities for the private repositories allowed to schedule the
-# privileged runner group. IDs, names, owner, and visibility are all checked
-# live before any runner-group mutation so a rename, transfer, deletion, or
-# visibility change fails closed.
-TRUSTED_REPOSITORIES=(
-    '776507734:zipbot-internal'
-    '1006277397:therapy-link'
-    '1018231298:redducklabs'
-    '1025075333:autoduck'
-    '1033531555:platform-observability'
-    '1037651737:zipbot-v2'
-    '1154788719:redducklaw'
-    '1193238112:aurolegal.ai'
-    '1351028230:manager'
-)
+# `deploy/trusted-runner-repositories.txt` is the sole committed source of
+# truth for private repositories allowed to schedule this privileged runner
+# group. It is identity-bearing so a rename, transfer, deletion, duplicate, or
+# visibility change fails closed before any runner-group mutation.
+TRUSTED_REPOSITORIES=()
+
+read_trusted_repositories() {
+    local entry repo_id repo_name
+    declare -A seen_ids=() seen_names=()
+
+    if [ ! -f "${TRUSTED_REPOSITORIES_FILE}" ]; then
+        echo "ERROR: trusted repository manifest is missing: ${TRUSTED_REPOSITORIES_FILE}" >&2
+        return 1
+    fi
+    while IFS= read -r entry || [ -n "${entry}" ]; do
+        if ! [[ "${entry}" =~ ^([0-9]+):([a-z0-9][a-z0-9.-]*)$ ]]; then
+            echo "ERROR: trusted repository manifest contains an invalid identity entry" >&2
+            return 1
+        fi
+        repo_id=${BASH_REMATCH[1]}
+        repo_name=${BASH_REMATCH[2]}
+        if [[ -n "${seen_ids[${repo_id}]+x}" || -n "${seen_names[${repo_name}]+x}" ]]; then
+            echo "ERROR: trusted repository manifest contains a duplicate identity" >&2
+            return 1
+        fi
+        seen_ids[${repo_id}]=1
+        seen_names[${repo_name}]=1
+        TRUSTED_REPOSITORIES+=("${entry}")
+    done < "${TRUSTED_REPOSITORIES_FILE}"
+
+    if [ "${#TRUSTED_REPOSITORIES[@]}" -ne 9 ]; then
+        echo "ERROR: trusted repository manifest must contain exactly nine identities" >&2
+        return 1
+    fi
+}
+
+read_trusted_repositories || exit 1
 
 # These public repositories are rollout prerequisites even when GitHub's public
 # repository enumeration is incomplete or changes shape. Their committed IDs

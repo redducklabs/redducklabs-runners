@@ -750,6 +750,7 @@ PY
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
         export RELEASE_NAME=redducklabs-runners
         export RUNNER_SCALE_SET_NAME=redducklabs-runners
+        export CANONICAL_RUNNER_IMAGE=registry.digitalocean.com/redducklabs/github-runner:latest
         export ARC_CHART_VERSION=0.14.2
         export FIXTURE_ACTUAL_SHA
         export FIXTURE_MUTATION_LOG="$mutation_log"
@@ -3283,6 +3284,97 @@ assert_rollback_ignores_deploy_only_inputs() {
     fi
 }
 
+assert_final_review_regressions() {
+    if python3 - <<'PY'
+from pathlib import Path
+
+expected = [
+    "776507734:zipbot-internal",
+    "1006277397:therapy-link",
+    "1018231298:redducklabs",
+    "1025075333:autoduck",
+    "1033531555:platform-observability",
+    "1037651737:zipbot-v2",
+    "1154788719:redducklaw",
+    "1193238112:aurolegal.ai",
+    "1351028230:manager",
+]
+manifest = Path("deploy/trusted-runner-repositories.txt").read_text(encoding="utf-8").splitlines()
+if manifest != expected:
+    raise SystemExit("trusted repository manifest is not the exact nine identity-bearing entries")
+script = Path("scripts/verify-runner-trust-boundary.sh").read_text(encoding="utf-8")
+for token in (
+    "TRUSTED_REPOSITORIES_FILE=",
+    "deploy/trusted-runner-repositories.txt",
+    "read_trusted_repositories",
+):
+    if token not in script:
+        raise SystemExit(f"trust verifier does not consume the committed manifest ({token})")
+if "'776507734:zipbot-internal'" in script:
+    raise SystemExit("trust verifier retains an independent hard-coded trusted repository list")
+PY
+    then
+        pass "Trust verifier consumes the exact committed identity-bearing repository manifest"
+    else
+        fail "Trusted repository manifest is not the enforced trust source of truth"
+    fi
+
+    local image_script="$FIXTURE_DIR/deploy-noncanonical-runner-image.sh"
+    : > "$image_script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$image_script"; then
+        fail "Deploy canonical-image regression fixture could not be materialized"
+    else
+        sed -i 's#export INPUT_RUNNER_IMAGE=registry.digitalocean.com/redducklabs/github-runner:latest#export INPUT_RUNNER_IMAGE=registry.digitalocean.com/redducklabs/github-runner:alternate#' "$image_script"
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$image_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Deploy accepts a noncanonical runner image that ordinary scaling rejects"
+        elif [ -s "$FIXTURE_DIR/mutations" ]; then
+            fail "Deploy rejects a noncanonical runner image only after mutation"
+        elif ! grep -Fq 'fixed canonical image' "$FIXTURE_DIR/output"; then
+            fail "Deploy noncanonical-image rejection is not diagnostic"
+        else
+            pass "Deploy rejects a noncanonical runner image before mutation"
+        fi
+    fi
+
+    if python3 - <<'PY'
+from pathlib import Path
+
+runbook = " ".join(Path("docs/runbooks/node-pool-sizing.md").read_text(encoding="utf-8").split())
+required = [
+    "Run Deploy GitHub Runners with `operation=prepare-trust-boundary`",
+    "Run Scale Runners with `action=rollout-quiesce`",
+    "Record the emitted post-quiesce Helm revision",
+    "Run Node Pool Sizing",
+    "Run Deploy GitHub Runners with `operation=deploy`",
+    "consumes the recorded rollback revision",
+    "operation=rollback`, that saved revision",
+]
+positions = []
+for text in required:
+    position = runbook.find(text)
+    if position < 0:
+        raise SystemExit(f"runbook is missing required rollout instruction: {text}")
+    positions.append(position)
+if positions != sorted(positions):
+    raise SystemExit("runbook rollout instructions are not ordered trust -> quiesce/capture -> pool -> deploy -> rollback")
+if "Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of the rendered scale set and representative Pod before Helm mutation, and records" in runbook:
+    raise SystemExit("runbook incorrectly assigns rollback-revision capture to Deploy")
+
+values = Path("deploy/dind-values.yaml").read_text(encoding="utf-8")
+if "the cluster is 1.33" in values:
+    raise SystemExit("values file retains stale Kubernetes 1.33 statement")
+if "Kubernetes API server and eligible runner nodes must be 1.36 or newer" not in values:
+    raise SystemExit("values file does not state the supported Kubernetes version invariant")
+PY
+    then
+        pass "Runbook sequencing and Kubernetes-version documentation match the executable rollout contract"
+    else
+        fail "Runbook sequencing or Kubernetes-version documentation is stale"
+    fi
+}
+
 assert_final_workflow_graph_and_prerequisites() {
     if python3 - <<'PY'
 import pathlib
@@ -3423,6 +3515,7 @@ assert_exact_deploy_namespace
 assert_rollback_recovery_route
 assert_rollback_live_asrs_contract
 assert_rollback_ignores_deploy_only_inputs
+assert_final_review_regressions
 assert_final_workflow_graph_and_prerequisites
 echo ""
 
