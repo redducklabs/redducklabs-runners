@@ -161,22 +161,25 @@ validate_public_identity() {
     ' <<<"$repository" >/dev/null
 }
 
+validate_private_identity() {
+    local repository=$1 expected_id=$2 expected_name=$3
+    jq -e --argjson id "$expected_id" --arg owner "$ORG" \
+        --arg name "$expected_name" '
+        .id == $id
+        and .owner.login == $owner
+        and .name == $name
+        and .full_name == ($owner + "/" + $name)
+        and .visibility == "private"
+        and .private == true
+    ' <<<"$repository" >/dev/null
+}
+
 echo "Validating committed private repository identities..."
 for entry in "${TRUSTED_REPOSITORIES[@]}"; do
     repo_id=${entry%%:*}
     repo_name=${entry#*:}
     repo_json=$(github_read "repository ${repo_name}" "/repositories/${repo_id}") || exit 1
-    if ! jq -e \
-        --argjson id "$repo_id" \
-        --arg owner "$ORG" \
-        --arg name "$repo_name" \
-        '.id == $id
-         and .owner.login == $owner
-         and .name == $name
-         and .full_name == ($owner + "/" + $name)
-         and .visibility == "private"
-         and .private == true' \
-        <<<"$repo_json" >/dev/null; then
+    if ! validate_private_identity "$repo_json" "$repo_id" "$repo_name"; then
         echo "ERROR: committed repository identity ${repo_id}:${repo_name} is unknown, transferred, renamed, or not private" >&2
         exit 1
     fi
@@ -436,10 +439,17 @@ if [ "$actual_ids" != "$expected_sorted" ]; then
     echo "ERROR: runner-group repository readback drift: selected membership is not exact" >&2
     exit 1
 fi
-if ! jq -se 'all(.[].repositories[]?; .visibility == "private" and .private == true)' \
-    <<<"$repositories_json" >/dev/null; then
-    echo "ERROR: runner-group repository readback contains a non-private repository" >&2
-    exit 1
-fi
+
+echo "Revalidating private repository identities after runner-group readback..."
+for entry in "${TRUSTED_REPOSITORIES[@]}"; do
+    repo_id=${entry%%:*}
+    repo_name=${entry#*:}
+    repo_json=$(github_read "post-readback repository identity ${repo_name}" \
+        "/repositories/${repo_id}") || exit 1
+    if ! validate_private_identity "$repo_json" "$repo_id" "$repo_name"; then
+        echo "ERROR: post-readback repository identity ${repo_id}:${repo_name} is unknown, transferred, renamed, or not private" >&2
+        exit 1
+    fi
+done
 
 echo "Trust boundary verified: group=${GROUP_NAME}, visibility=selected, public=false, repositories=9, public workflows audited"

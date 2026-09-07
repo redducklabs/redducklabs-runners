@@ -1346,12 +1346,21 @@ fi
 printf '%s\t%s\n' "$joined" "$body" >> "$GH_CALL_LOG"
 
 repo_json() {
-    local id=$1 name=$2 visibility=private
+    local id=$1 name=$2 visibility=private identity_reads
     if [ "${GH_SCENARIO}" = public_allowlist ] && [ "$name" = manager ]; then
         visibility=public
     fi
     if [ "${GH_SCENARIO}" = unknown_allowlist ] && [ "$name" = manager ]; then
         name=unexpected-repository
+    fi
+    identity_reads=$(grep -c "/repositories/${id}" "$GH_CALL_LOG" || true)
+    if [ "${GH_SCENARIO}" = post_readback_public ] \
+      && [ "$name" = manager ] && [ "$identity_reads" -ge 2 ]; then
+        visibility=public
+    fi
+    if [ "${GH_SCENARIO}" = post_readback_renamed ] \
+      && [ "$name" = manager ] && [ "$identity_reads" -ge 2 ]; then
+        name=renamed-manager
     fi
     printf '{"id":%s,"name":"%s","full_name":"redducklabs/%s","visibility":"%s","private":%s,"owner":{"login":"redducklabs"}}\n' \
         "$id" "$name" "$name" "$visibility" "$([ "$visibility" = private ] && echo true || echo false)"
@@ -1504,6 +1513,19 @@ case "$joined" in
     *"orgs/redducklabs/actions/runner-groups/777/repositories?per_page=100"*)
         if [ "${GH_SCENARIO}" = readback_drift ]; then
             printf '{"total_count":1,"repositories":[{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true}]}\n'
+        elif [ "${GH_SCENARIO}" = reduced_membership ]; then
+            printf '{"total_count":9,"repositories":['
+            printf '%s' \
+              '{"id":776507734},' \
+              '{"id":1006277397},' \
+              '{"id":1018231298},' \
+              '{"id":1025075333},' \
+              '{"id":1033531555},' \
+              '{"id":1037651737},' \
+              '{"id":1154788719},' \
+              '{"id":1193238112},' \
+              '{"id":1351028230}'
+            printf ']}\n'
         else
             printf '{"total_count":9,"repositories":['
             printf '%s' \
@@ -1589,19 +1611,27 @@ expected_reads = [
     "/repositories/1208056940",
     "orgs/redducklabs/actions/runner-groups?per_page=100",
 ]
+identity_reads = expected_reads[:9]
 mutation_index = next(
     index for index, call in enumerate(calls)
     if "--method POST orgs/redducklabs/actions/runner-groups" in call
 )
 for endpoint in expected_reads:
     matches = [index for index, call in enumerate(calls) if endpoint in call]
-    if not matches or max(matches) >= mutation_index:
+    if not matches or min(matches) >= mutation_index:
         raise SystemExit(f"required read missing or after mutation: {endpoint}")
 if "--method POST orgs/redducklabs/actions/runner-groups" not in calls[mutation_index]:
     raise SystemExit("creation is not the first mutation")
-if not any("runner-groups/777" in call for call in calls[mutation_index + 1:]) \
-   or not any("runner-groups/777/repositories" in call for call in calls[mutation_index + 1:]):
+membership_index = next(
+    index for index, call in enumerate(calls)
+    if index > mutation_index and "runner-groups/777/repositories?per_page=100" in call
+)
+if not any("runner-groups/777" in call for call in calls[mutation_index + 1:]):
     raise SystemExit("readback calls are missing or reordered")
+for endpoint in identity_reads:
+    matches = [index for index, call in enumerate(calls) if endpoint in call]
+    if len(matches) < 2 or max(matches) <= membership_index:
+        raise SystemExit(f"fresh post-readback identity validation missing: {endpoint}")
 PY
         then
             pass "Trust boundary creates the selected private group atomically with the exact call sequence"
@@ -1722,6 +1752,45 @@ PY
     else
         pass "Trust boundary halts safely after partial reconciliation failure"
     fi
+
+    if run_trust_fixture reduced_membership "$FIXTURE_DIR/trust-output" \
+      && grep -Eq -- '--method (PATCH|PUT)' "$FIXTURE_DIR/gh-calls" \
+      && [ "$(grep -c '/repositories/1351028230' "$FIXTURE_DIR/gh-calls")" -eq 2 ] \
+      && grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+        pass "Trust boundary accepts reduced exact membership only after fresh private identity readback"
+    else
+        fail "Trust boundary cannot validate reduced exact membership with fresh private identity readback"
+    fi
+
+    : > "$FIXTURE_DIR/gh-calls"
+    if (
+        export PATH="$FIXTURE_DIR/fake-bin:$PATH"
+        export GH_SCENARIO=reduced_membership GH_CALL_LOG="$FIXTURE_DIR/gh-calls"
+        bash scripts/verify-runner-trust-boundary.sh \
+          --expected-sha "$(git rev-parse HEAD)" --verify-only
+    ) >"$FIXTURE_DIR/trust-output" 2>&1 \
+      && ! grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls" \
+      && [ "$(grep -c '/repositories/1351028230' "$FIXTURE_DIR/gh-calls")" -eq 2 ] \
+      && grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+        pass "Trust boundary verify-only mode freshly validates reduced exact membership identities"
+    else
+        fail "Trust boundary verify-only mode does not freshly validate reduced exact membership identities"
+    fi
+
+    local post_readback_scenario
+    for post_readback_scenario in post_readback_public post_readback_renamed; do
+        if run_trust_fixture "$post_readback_scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary accepts ${post_readback_scenario//_/ } repository identity drift"
+        elif ! grep -Eq -- '--method (PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+            fail "Trust boundary rejects ${post_readback_scenario//_/ } before reconciliation"
+        elif grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary reports success after ${post_readback_scenario//_/ }"
+        elif ! grep -Fqi 'post-readback repository identity' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary ${post_readback_scenario//_/ } rejection is not diagnostic"
+        else
+            pass "Trust boundary fails closed on ${post_readback_scenario//_/ } after reconciliation"
+        fi
+    done
 
     if run_trust_fixture managed_copilot "$FIXTURE_DIR/trust-output" \
       && ! grep -q 'contents/dynamic/agents/copilot-pull-request-reviewer' "$FIXTURE_DIR/gh-calls" \
