@@ -465,18 +465,189 @@ jobs:
 
           kubectl apply --server-side --dry-run=server -f "${REPRESENTATIVE_POD}" -o json > "${ADMITTED_POD}"
 
-          python3 - "${ADMITTED_ASRS}" "${ADMITTED_POD}" "${RUNNER_IMAGE}" <<'PY'
-          import json
+          python3 - "${ASRS}" "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${ADMITTED_POD}" "${RUNNER_IMAGE}" <<'PY'
+          from copy import deepcopy
           import re
           import sys
+          import yaml
 
           def load(path):
               with open(path, encoding="utf-8") as stream:
-                  return json.load(stream)
+                  return yaml.safe_load(stream)
 
-          asrs = load(sys.argv[1])
-          pod = load(sys.argv[2])
-          runner_image = sys.argv[3]
+          expected_asrs = load(sys.argv[1])
+          asrs = load(sys.argv[2])
+          expected_pod = load(sys.argv[3])
+          pod = load(sys.argv[4])
+          runner_image = sys.argv[5]
+
+          def first_difference(expected, admitted, path="spec"):
+              if type(expected) is not type(admitted):
+                  return path
+              if isinstance(expected, dict):
+                  if expected.keys() != admitted.keys():
+                      changed_key = sorted(expected.keys() ^ admitted.keys())[0]
+                      return f"{path}.{changed_key}"
+                  for key in expected:
+                      difference = first_difference(
+                          expected[key], admitted[key], f"{path}.{key}"
+                      )
+                      if difference:
+                          return difference
+              elif isinstance(expected, list):
+                  if len(expected) != len(admitted):
+                      return path
+                  for index, (expected_item, admitted_item) in enumerate(
+                      zip(expected, admitted)
+                  ):
+                      difference = first_difference(
+                          expected_item, admitted_item, f"{path}[{index}]"
+                      )
+                      if difference:
+                          return difference
+              elif expected != admitted:
+                  return path
+              return None
+
+          def strip_default(mapping, expected, key, value):
+              # Only remove a server-populated field when the submitted object
+              # omitted it and the returned value is the documented API default.
+              if key not in expected and mapping.get(key) == value:
+                  mapping.pop(key)
+
+          def default_pull_policy(image):
+              reference = image.rsplit("/", 1)[-1]
+              if "@" in reference:
+                  return "IfNotPresent"
+              if ":" not in reference or reference.rsplit(":", 1)[-1] == "latest":
+                  return "Always"
+              return "IfNotPresent"
+
+          def canonical_pod_specs(expected, admitted):
+              expected = deepcopy(expected)
+              admitted = deepcopy(admitted)
+
+              # Kubernetes Pod API defaults explicitly permitted to appear in
+              # the server response when absent from the submitted PodSpec.
+              pod_defaults = {
+                  "dnsPolicy": "ClusterFirst",
+                  "enableServiceLinks": True,
+                  "hostUsers": True,
+                  "preemptionPolicy": "PreemptLowerPriority",
+                  "priority": 0,
+                  "schedulerName": "default-scheduler",
+                  "securityContext": {},
+                  "terminationGracePeriodSeconds": 30,
+              }
+              for key, value in pod_defaults.items():
+                  strip_default(admitted, expected, key, value)
+              if "serviceAccount" not in expected and "serviceAccount" in admitted \
+                 and admitted.get("serviceAccount") == admitted.get("serviceAccountName"):
+                  admitted.pop("serviceAccount")
+
+              expected_tolerations = expected.get("tolerations", [])
+              default_tolerations = [
+                  {"key": "node.kubernetes.io/not-ready", "operator": "Exists",
+                   "effect": "NoExecute", "tolerationSeconds": 300},
+                  {"key": "node.kubernetes.io/unreachable", "operator": "Exists",
+                   "effect": "NoExecute", "tolerationSeconds": 300},
+              ]
+              admitted["tolerations"] = [
+                  item for item in admitted.get("tolerations", [])
+                  if item in expected_tolerations or item not in default_tolerations
+              ]
+              if "tolerations" not in expected and not admitted["tolerations"]:
+                  admitted.pop("tolerations")
+
+              api_access = re.compile(r"kube-api-access-[a-z0-9]+")
+              def api_access_volume(item):
+                  if not api_access.fullmatch(item.get("name") or ""):
+                      return False
+                  projected = item.get("projected")
+                  if not isinstance(projected, dict) or projected.get("defaultMode") != 420:
+                      return False
+                  sources = projected.get("sources")
+                  expected_sources = [
+                      {"serviceAccountToken": {
+                          "expirationSeconds": 3607, "path": "token",
+                      }},
+                      {"configMap": {
+                          "name": "kube-root-ca.crt",
+                          "items": [{"key": "ca.crt", "path": "ca.crt"}],
+                      }},
+                      {"downwardAPI": {"items": [{
+                          "path": "namespace",
+                          "fieldRef": {
+                              "apiVersion": "v1", "fieldPath": "metadata.namespace",
+                          },
+                      }]}},
+                  ]
+                  return set(projected) == {"defaultMode", "sources"} \
+                      and sources == expected_sources \
+                      and set(item) == {"name", "projected"}
+
+              expected_volume_names = {
+                  item.get("name") for item in expected.get("volumes", [])
+              }
+              admitted["volumes"] = [
+                  item for item in admitted.get("volumes", [])
+                  if item.get("name") in expected_volume_names
+                  or not api_access_volume(item)
+              ]
+              if "volumes" not in expected and not admitted["volumes"]:
+                  admitted.pop("volumes")
+
+              for field in ("containers", "initContainers"):
+                  expected_items = expected.get(field, [])
+                  admitted_items = admitted.get(field, [])
+                  if len(expected_items) != len(admitted_items):
+                      continue
+                  for expected_item, admitted_item in zip(expected_items, admitted_items):
+                      container_defaults = {
+                          "imagePullPolicy": default_pull_policy(expected_item.get("image", "")),
+                          "resources": {},
+                          "terminationMessagePath": "/dev/termination-log",
+                          "terminationMessagePolicy": "File",
+                      }
+                      for key, value in container_defaults.items():
+                          strip_default(admitted_item, expected_item, key, value)
+                      expected_mounts = expected_item.get("volumeMounts", [])
+                      expected_mount_names = {item.get("name") for item in expected_mounts}
+                      admitted_item["volumeMounts"] = [
+                          item for item in admitted_item.get("volumeMounts", [])
+                          if item.get("name") in expected_mount_names
+                          or item != {
+                              "name": item.get("name"),
+                              "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                              "readOnly": True,
+                          }
+                          or not api_access.fullmatch(item.get("name") or "")
+                      ]
+                      if "volumeMounts" not in expected_item \
+                         and not admitted_item["volumeMounts"]:
+                          admitted_item.pop("volumeMounts")
+              return expected, admitted
+
+          expected_asrs_spec = deepcopy(expected_asrs.get("spec", {}))
+          admitted_asrs_spec = deepcopy(asrs.get("spec", {}))
+          expected_template = expected_asrs_spec.get("template", {}).get("spec", {})
+          admitted_template = admitted_asrs_spec.get("template", {}).get("spec", {})
+          expected_template, admitted_template = canonical_pod_specs(
+              expected_template, admitted_template
+          )
+          expected_asrs_spec["template"]["spec"] = expected_template
+          admitted_asrs_spec["template"]["spec"] = admitted_template
+          difference = first_difference(expected_asrs_spec, admitted_asrs_spec, "asrs.spec")
+          if difference:
+              raise SystemExit(f"admission changed an unapproved ASRS field at {difference}")
+
+          expected_pod_spec, admitted_pod_spec = canonical_pod_specs(
+              expected_pod.get("spec", {}), pod.get("spec", {})
+          )
+          difference = first_difference(expected_pod_spec, admitted_pod_spec, "pod.spec")
+          if difference:
+              raise SystemExit(f"admission changed an unapproved Pod field at {difference}")
+
           if asrs.get("spec", {}).get("runnerGroup") != "redducklabs-private-runners":
               raise SystemExit("admission changed the named private runner group")
           if asrs.get("spec", {}).get("runnerScaleSetName") != "redducklabs-runners":

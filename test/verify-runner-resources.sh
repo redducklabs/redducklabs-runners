@@ -741,6 +741,12 @@ write_fake_gh() {
 set -euo pipefail
 
 joined="$*"
+paginated=false
+for argument in "$@"; do
+    if [ "$argument" = --paginate ]; then
+        paginated=true
+    fi
+done
 body=""
 if [[ " $joined " == *" --input - "* ]]; then
     body=$(cat)
@@ -772,11 +778,16 @@ case "$joined" in
     *"orgs/redducklabs/repos?type=public"*)
         if [ "${GH_SCENARIO}" = public_label ] || [ "${GH_SCENARIO}" = dynamic_runs_on ] \
           || [ "${GH_SCENARIO}" = workflow_schema ] || [ "${GH_SCENARIO}" = mixed_case_label ] \
-          || [ "${GH_SCENARIO}" = later_page_public_label ]; then
-            if [ "${GH_SCENARIO}" = later_page_public_label ]; then
+          || [ "${GH_SCENARIO}" = later_page_public_label ] \
+          || [ "${GH_SCENARIO}" = later_page_workflow_label ]; then
+            if [ "${GH_SCENARIO}" = later_page_public_label ] && [ "$paginated" = true ]; then
                 printf '[]\n[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
             else
-                printf '[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+                if [ "${GH_SCENARIO}" = later_page_public_label ]; then
+                    printf '[]\n'
+                else
+                    printf '[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+                fi
             fi
         else
             printf '[]\n'
@@ -785,8 +796,12 @@ case "$joined" in
     *"repos/redducklabs/public-repo/actions/workflows"*)
         if [ "${GH_SCENARIO}" = workflow_schema ]; then
             printf '{"total":1,"pipelines":[]}\n'
-        elif [ "${GH_SCENARIO}" = later_page_public_label ]; then
-            printf '{"total_count":0,"workflows":[]}\n{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = later_page_public_label ] || [ "${GH_SCENARIO}" = later_page_workflow_label ]; then
+            if [ "$paginated" = true ]; then
+                printf '{"total_count":0,"workflows":[]}\n{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
+            else
+                printf '{"total_count":0,"workflows":[]}\n'
+            fi
         else
             printf '{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
         fi
@@ -859,14 +874,14 @@ SH
     chmod +x "$FIXTURE_DIR/fake-bin/gh"
 }
 
-run_trust_fixture() {  # scenario, output
-    local scenario=$1 output=$2
+run_trust_fixture() {  # scenario, output, optional verifier script
+    local scenario=$1 output=$2 verifier=${3:-scripts/verify-runner-trust-boundary.sh}
     : > "$FIXTURE_DIR/gh-calls"
     (
         export PATH="$FIXTURE_DIR/fake-bin:$PATH"
         export GH_SCENARIO="$scenario"
         export GH_CALL_LOG="$FIXTURE_DIR/gh-calls"
-        bash scripts/verify-runner-trust-boundary.sh \
+        bash "$verifier" \
           --expected-sha "$(git rev-parse HEAD)"
     ) >"$output" 2>&1
 }
@@ -947,7 +962,7 @@ PY
     fi
 
     local scenario expected
-    for scenario in permission_failure public_allowlist unknown_allowlist readback_drift public_label mixed_case_label dynamic_runs_on workflow_schema later_page_public_label; do
+    for scenario in permission_failure public_allowlist unknown_allowlist readback_drift public_label mixed_case_label dynamic_runs_on workflow_schema later_page_public_label later_page_workflow_label; do
         case "$scenario" in
             permission_failure) expected='permission' ;;
             public_allowlist) expected='private' ;;
@@ -958,6 +973,7 @@ PY
             dynamic_runs_on) expected='dynamic runs-on' ;;
             workflow_schema) expected='schema' ;;
             later_page_public_label) expected='redducklabs-runners' ;;
+            later_page_workflow_label) expected='redducklabs-runners' ;;
         esac
         if run_trust_fixture "$scenario" "$FIXTURE_DIR/trust-output"; then
             fail "Trust boundary accepts ${scenario//_/ }"
@@ -969,6 +985,44 @@ PY
             pass "Trust boundary fails closed on ${scenario//_/ }"
         fi
     done
+
+    if grep -q -- '--paginate orgs/redducklabs/repos?type=public&per_page=100' "$FIXTURE_DIR/gh-calls" \
+      && grep -q -- '--paginate repos/redducklabs/public-repo/actions/workflows?per_page=100' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary paginates public repository and workflow enumeration"
+    else
+        fail "Trust boundary omits pagination from a public GitHub enumeration"
+    fi
+
+    local repository_mutant="$FIXTURE_DIR/trust-no-repository-pagination.sh"
+    local workflow_mutant="$FIXTURE_DIR/trust-no-workflow-pagination.sh"
+    python3 - scripts/verify-runner-trust-boundary.sh "$repository_mutant" "$workflow_mutant" <<'PY'
+import sys
+
+source_path, repository_path, workflow_path = sys.argv[1:]
+with open(source_path, encoding="utf-8") as stream:
+    source = stream.read()
+repository_needle = 'public repository enumeration" --paginate \\\n'
+workflow_needle = 'workflow enumeration for ${repo_name}" --paginate \\\n'
+if source.count(repository_needle) != 1 or source.count(workflow_needle) != 1:
+    raise SystemExit("pagination mutation fixture could not locate both enumerations")
+with open(repository_path, "w", encoding="utf-8") as stream:
+    stream.write(source.replace(repository_needle, 'public repository enumeration" \\\n'))
+with open(workflow_path, "w", encoding="utf-8") as stream:
+    stream.write(source.replace(workflow_needle, 'workflow enumeration for ${repo_name}" \\\n'))
+PY
+    chmod +x "$repository_mutant" "$workflow_mutant"
+    if run_trust_fixture later_page_public_label "$FIXTURE_DIR/trust-output" "$repository_mutant" \
+      && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+        pass "Public-repository pagination fixture hides later pages without --paginate"
+    else
+        fail "Public-repository pagination fake exposes later pages without --paginate"
+    fi
+    if run_trust_fixture later_page_workflow_label "$FIXTURE_DIR/trust-output" "$workflow_mutant" \
+      && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+        pass "Workflow pagination fixture hides later pages without --paginate"
+    else
+        fail "Workflow pagination fake exposes later pages without --paginate"
+    fi
 
     if run_trust_fixture existing "$FIXTURE_DIR/trust-output"; then
         mutation_line=$(grep -nE -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls" | head -1 | cut -d: -f1)
@@ -1344,6 +1398,60 @@ if mutation != 'none':
         next(item for item in containers if item.get('name') == 'runner')['volumeMounts'] = []
     elif mutation == 'restart':
         next(item for item in init_containers if item.get('name') == 'dind')['restartPolicy'] = 'Never'
+    elif mutation == 'host_network':
+        spec['hostNetwork'] = True
+    elif mutation == 'host_pid':
+        spec['hostPID'] = True
+    elif mutation == 'host_ipc':
+        spec['hostIPC'] = True
+    elif mutation == 'unknown_top_level':
+        spec['unapprovedSecurityField'] = {'enabled': True}
+    elif mutation == 'api_defaults' and document.get('kind') == 'Pod':
+        spec.update({
+            'dnsPolicy': 'ClusterFirst',
+            'enableServiceLinks': True,
+            'hostUsers': True,
+            'preemptionPolicy': 'PreemptLowerPriority',
+            'priority': 0,
+            'schedulerName': 'default-scheduler',
+            'securityContext': {},
+            'serviceAccount': spec['serviceAccountName'],
+            'terminationGracePeriodSeconds': 30,
+        })
+        spec['tolerations'].extend([
+            {'key': 'node.kubernetes.io/not-ready', 'operator': 'Exists',
+             'effect': 'NoExecute', 'tolerationSeconds': 300},
+            {'key': 'node.kubernetes.io/unreachable', 'operator': 'Exists',
+             'effect': 'NoExecute', 'tolerationSeconds': 300},
+        ])
+        spec['volumes'].append({
+            'name': 'kube-api-access-fixture',
+            'projected': {
+                'defaultMode': 420,
+                'sources': [
+                    {'serviceAccountToken': {'expirationSeconds': 3607, 'path': 'token'}},
+                    {'configMap': {'name': 'kube-root-ca.crt',
+                                   'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}},
+                    {'downwardAPI': {'items': [{'path': 'namespace', 'fieldRef': {
+                        'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}]}},
+                ],
+            },
+        })
+        for item in containers + init_containers:
+            item.setdefault('resources', {})
+            image = item.get('image', '')
+            reference = image.rsplit('/', 1)[-1]
+            item['imagePullPolicy'] = (
+                'Always' if ':' not in reference or reference.endswith(':latest')
+                else 'IfNotPresent'
+            )
+            item['terminationMessagePath'] = '/dev/termination-log'
+            item['terminationMessagePolicy'] = 'File'
+            item.setdefault('volumeMounts', []).append({
+                'name': 'kube-api-access-fixture',
+                'mountPath': '/var/run/secrets/kubernetes.io/serviceaccount',
+                'readOnly': True,
+            })
 print(json.dumps(document))
 PY
                     ;;
@@ -1395,7 +1503,7 @@ assert_deploy_preflight_fixtures() {
     fi
 
     local mutation
-    for mutation in resources group placement image privileged unexpected_container wiring restart; do
+    for mutation in resources group placement image privileged unexpected_container wiring restart host_network host_pid host_ipc unknown_top_level; do
         if run_deploy_preflight_fixture false 500 500 "$mutation" container 1 36 false "$FIXTURE_DIR/preflight-output"; then
             fail "Deploy accepts unsafe admission mutation: ${mutation}"
         elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
@@ -1404,6 +1512,13 @@ assert_deploy_preflight_fixtures() {
             pass "Admission mutation is rejected: ${mutation}"
         fi
     done
+
+    if run_deploy_preflight_fixture false 500 500 api_defaults container 1 36 false "$FIXTURE_DIR/preflight-output" \
+      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+        pass "Canonical admission comparison permits only documented API defaults"
+    else
+        fail "Canonical admission comparison rejects documented API defaults"
+    fi
 
     local shape
     for shape in pod_level restartable_sidecar regular_init_peak overhead malformed; do
