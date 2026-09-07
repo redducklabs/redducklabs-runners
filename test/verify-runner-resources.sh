@@ -2179,6 +2179,19 @@ import json, os, sys, yaml
 with open(sys.argv[1], encoding='utf-8') as source:
     document = yaml.safe_load(source)
 mutation = os.environ.get('FIXTURE_ADMISSION_MUTATION')
+if (os.environ.get('FIXTURE_EXISTING_FIELD_OWNERSHIP') == 'true'
+        and document.get('kind') == 'AutoscalingRunnerSet'
+        and document.get('metadata', {}).get('name') == 'redducklabs-runners'):
+    template = document['spec']['template']['spec']
+    by_name = {
+        item.get('name'): item
+        for item in template.get('containers', []) + template.get('initContainers', [])
+    }
+    for name in ('runner', 'dind'):
+        by_name[name]['resources'] = {
+            'requests': {'memory': '5Gi'},
+            'limits': {'memory': '10Gi'},
+        }
 if mutation != 'none':
     spec = document.get('spec', {})
     if document.get('kind') == 'AutoscalingRunnerSet':

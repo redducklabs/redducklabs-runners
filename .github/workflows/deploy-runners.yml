@@ -560,6 +560,7 @@ jobs:
           echo "🔬 Rendering and validating the exact deployment candidate..."
           CANDIDATE="${RUNNER_TEMP}/runner-candidate.yaml"
           ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
+          PREFLIGHT_ASRS="${RUNNER_TEMP}/runner-preflight-asrs.yaml"
           ADMITTED_ASRS="${RUNNER_TEMP}/runner-admitted-asrs.json"
           REPRESENTATIVE_POD="${RUNNER_TEMP}/runner-representative-pod.json"
           ADMITTED_POD="${RUNNER_TEMP}/runner-admitted-pod.json"
@@ -601,11 +602,12 @@ jobs:
           SH
           chmod 0700 "${HASH_GATE}"
 
-          python3 - "${CANDIDATE}" "${ASRS}" <<'PY'
+          python3 - "${CANDIDATE}" "${ASRS}" "${PREFLIGHT_ASRS}" <<'PY'
+          from copy import deepcopy
           import sys
           import yaml
 
-          source, target = sys.argv[1:]
+          source, target, preflight_target = sys.argv[1:]
           with open(source, encoding="utf-8") as stream:
               matches = [doc for doc in yaml.safe_load_all(stream)
                          if isinstance(doc, dict) and doc.get("kind") == "AutoscalingRunnerSet"]
@@ -613,10 +615,14 @@ jobs:
               raise SystemExit(f"expected one AutoscalingRunnerSet, found {len(matches)}")
           with open(target, "w", encoding="utf-8") as stream:
               yaml.safe_dump(matches[0], stream, sort_keys=False)
+          preflight = deepcopy(matches[0])
+          preflight["metadata"]["name"] = "redducklabs-runners-compatibility-preflight"
+          with open(preflight_target, "w", encoding="utf-8") as stream:
+              yaml.safe_dump(preflight, stream, sort_keys=False)
           PY
 
           kubectl apply --server-side --force-conflicts --dry-run=server \
-            -f "${ASRS}" -o json > "${ADMITTED_ASRS}"
+            -f "${PREFLIGHT_ASRS}" -o json > "${ADMITTED_ASRS}"
 
           python3 - "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${NAMESPACE}" <<'PY'
           import json
@@ -1132,6 +1138,7 @@ jobs:
           rm -f \
             "${RUNNER_TEMP}/runner-candidate.yaml" \
             "${RUNNER_TEMP}/runner-candidate-asrs.yaml" \
+            "${RUNNER_TEMP}/runner-preflight-asrs.yaml" \
             "${RUNNER_TEMP}/runner-admitted-asrs.json" \
             "${RUNNER_TEMP}/runner-representative-pod.json" \
             "${RUNNER_TEMP}/runner-admitted-pod.json" \
