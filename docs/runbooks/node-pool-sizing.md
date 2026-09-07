@@ -1,6 +1,7 @@
 # Runbook: Runner Node Pool Sizing
 
-Operational contract for the fixed GitHub Actions runner pool.
+Reviewed target operating contract for the GitHub Actions runner pool. It is
+pending CI deployment and external live acceptance.
 
 - **Cluster:** `redducklabs-cluster` (context `do-sfo3-redducklabs-cluster`, region sfo3)
 - **Pool:** `github-runners-pool-16g`
@@ -8,17 +9,18 @@ Operational contract for the fixed GitHub Actions runner pool.
 - **Pool labels/taints:** `node-type=github-runner`, `workload-type=ci-cd`,
   taint `github-runner=true:NoSchedule`
 
-## Current invariant: two runner pods per node
+## Reviewed target invariant: two runner pods per node
 
-The August one-pod-per-node design is superseded. The runner and privileged DinD
-sidecar now share a pod-level request of **3 CPU / 5 GiB memory** and a shared
-**6 GiB memory limit**. Neither container has a competing CPU or memory budget.
+The August one-pod-per-node design is superseded. In the reviewed target, the
+runner and privileged DinD sidecar share a pod-level request of **3 CPU / 5 GiB
+memory** and a shared **6 GiB memory limit**. Neither container defines a
+competing CPU or memory budget.
 
-On a measured node with 13.32 GiB and 7880m allocatable, two pods reserve 10
-GiB and 6 CPU. A third pod does not fit. Two $96 nodes therefore provide four
+On a measured node with 13.32 GiB and 7880m allocatable, two target pods reserve
+10 GiB and 6 CPU. A third pod does not fit. Two $96 nodes would provide four
 self-hosted jobs with a fixed **$192 monthly cap**.
 
-The pool and scale set are intentionally fixed:
+The reviewed pool and scale-set target is:
 
 ```
 minRunners=2  maxRunners=4
@@ -28,7 +30,7 @@ min_nodes=2   max_nodes=2   count=2
 `deploy/dind-values.yaml` is the source of truth. The CI workflows reject
 larger runner bounds, node-pool values other than 2/2, and live-capacity drift.
 
-## Current configuration
+## Reviewed target configuration
 
 | Setting | Value | Where it lives |
 |---|---|---|
@@ -38,7 +40,7 @@ larger runner bounds, node-pool values other than 2/2, and live-capacity drift.
 | `max_nodes` | 2 | node pool (applied by the workflow below) |
 | Per pod | 3 CPU / 5 GiB request; 6 GiB shared memory limit | `deploy/dind-values.yaml` |
 
-**Cost floor and ceiling: $192/month** (two fixed nodes).
+**Target cost floor and ceiling: $192/month** (two fixed nodes).
 
 The recorded GitHub-hosted comparison is 3,000 Team-plan included private
 minutes plus $0.006 per standard Linux private minute. $192 equals 35,000

@@ -9,8 +9,8 @@ Deploy secure, scalable GitHub Actions self-hosted runners on Kubernetes with co
 - **Security Tools**: kubeconform 0.8.0, kubesec 2.14.2, Trivy 0.74.0
 - **Docker-in-Docker Support**: Build containers within runners, with a dedicated memory reservation for the Docker daemon
 - **Auto-scaling**: Configurable min/max runner instances (2 warm / 8 maximum by default)
-- **Production Ready**: Resource limits, health checks, and monitoring
-- **Dual Configuration**: Template versions for reuse and production configs for Red Duck Labs
+- **CI-reviewed configuration**: Resource limits, health checks, and monitoring
+- **Dual Configuration**: Template versions for reuse and reviewed Red Duck Labs target configs
 - **Security optimized**: Multi-stage build with SHA256/GPG-verified tools and a machine-enforced CVE-floor gate
 
 ## Prerequisites
@@ -34,8 +34,8 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
   the underlying Kubernetes feature floor.
 - DigitalOcean Container Registry (for custom images)
 - A dedicated, labeled and tainted node pool for runners
-  (`node-type=github-runner`, taint `github-runner=true:NoSchedule`), fixed at
-  two nodes with two runner pods per node - see
+  (`node-type=github-runner`, taint `github-runner=true:NoSchedule`), targeted
+  at two nodes with two runner pods per node - see
   [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
 
 ## Quick Start - GitHub Actions Deployment
@@ -200,7 +200,10 @@ guide and update the pinned fingerprint in the Dockerfile and in
 `test/verify-aws-key-expiry.sh`. Locally, `--no-cache` (or bumping
 `AWSCLI_VERSION`) forces the in-image check to re-run.
 
-## Runner Capacity and Memory
+## Reviewed Target: Runner Capacity and Memory
+
+This is the reviewed target configuration. It remains pending CI deployment and
+the external live-acceptance evidence described below.
 
 | | Value |
 |---|---|
@@ -210,10 +213,10 @@ guide and update the pinned fingerprint in the Dockerfile and in
 | Node pool | Exactly two `s-8vcpu-16gb` nodes in `github-runners-pool-16g` (`min_nodes=max_nodes=2`) |
 | Fleet cost | Two fixed **$96/node/month** nodes; **$192/month maximum** |
 
-Two pods fit per dedicated node. On the measured 13.32 GiB / 7880m allocatable
-node, two proposed pods reserve 10 GiB and 6 CPU; a third does not fit. The
-pool does not scale beyond two nodes, so work above four concurrent private jobs
-remains queued at GitHub rather than producing unschedulable runner pods.
+On the measured 13.32 GiB / 7880m allocatable node, the reviewed target's two
+proposed pods reserve 10 GiB and 6 CPU; a third does not fit. Its pool cap is
+two nodes, so work above four concurrent private jobs remains queued at GitHub
+rather than producing unschedulable runner pods.
 
 The 6 GiB limit is one pod-wide budget, not independent container limits. An
 `OOMKilled` status identifies where the kernel enforced that shared budget; it
@@ -226,8 +229,9 @@ pod-budget design; see [the superseded design record](docs/specs/2026-08-19-runn
 ### Trust boundary and hosted-runner placement
 
 Every self-hosted runner pod includes privileged DinD. Two jobs on one node
-therefore share a kernel and increase the cross-job blast radius. The fleet is
-limited to the organization runner group `redducklabs-private-runners`, with
+therefore share a kernel and increase the cross-job blast radius. The reviewed
+target limits the fleet to the organization runner group
+`redducklabs-private-runners`, with
 `visibility=selected`, public access disabled, and exactly these private
 repositories: `aurolegal.ai`, `autoduck`, `manager`, `platform-observability`,
 `redducklabs`, `redducklaw`, `therapy-link`, `zipbot-internal`, and `zipbot-v2`.
@@ -466,7 +470,7 @@ redducklabs-runners/
 ├── deploy/                    # Deployment configurations
 │   ├── deploy.sh              # Legacy local helper; CI is the production path
 │   ├── deploy.template.sh
-│   ├── dind-values.yaml       # Production values
+│   ├── dind-values.yaml       # Reviewed target values
 │   └── dind-values.template.yaml
 ├── scripts/                   # Local operational helpers
 │   ├── scale-runners.sh       # Status-only helper
@@ -507,9 +511,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Kubernetes Documentation](https://kubernetes.io/docs/)
 - [DigitalOcean Kubernetes](https://docs.digitalocean.com/products/kubernetes/)
 
-## Red Duck Labs Configuration
+## Reviewed Red Duck Labs Target Configuration
 
-This repository is configured for Red Duck Labs production environment:
+This repository records the reviewed target configuration, pending CI deployment
+and external live acceptance:
 
 - **Cluster**: `do-sfo3-redducklabs-cluster`
 - **Registry**: `registry.digitalocean.com/redducklabs`

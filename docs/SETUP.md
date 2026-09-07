@@ -28,9 +28,9 @@ scale, or roll back the runner fleet.
 3. Click **"Run workflow"** button
 4. Configure deployment options:
    - **Min runners**: Minimum number of runners (default: 2)
-    - **Max runners**: Maximum number of runners (default and ceiling: 4)
-    - **Expected SHA**: Exact reviewed commit SHA
-    - **Accept privileged runner co-tenancy**: Required for trust preparation or deployment
+   - **Max runners**: Maximum number of runners (default and ceiling: 4)
+   - **Expected SHA**: Exact reviewed commit SHA
+   - **Accept privileged runner co-tenancy**: Required for trust preparation or deployment
    - **Runner image**: Docker image to use (default: `registry.digitalocean.com/redducklabs/github-runner:latest`)
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
@@ -128,14 +128,15 @@ helm template redducklabs-runners \
   -f deploy/dind-values.yaml
 ```
 
-### Capacity and diagnostic model
+### Reviewed target: capacity and diagnostics
 
-Two 3 CPU / 5 GiB pods fit on each measured 13.32 GiB / 7880m dedicated node;
-a third does not. The production pool is fixed at two $96 nodes, so the four
-self-hosted runner ceiling is also the $192 monthly cost cap. Runner Status
-reports sanitized DOKS autoscaler `Backoff` diagnostics when its known provider
-text format is available. It reports diagnostics unavailable for missing or
-changed provider data and never treats those diagnostics as a capacity gate.
+Pending CI deployment and external live acceptance, the reviewed target fits two
+3 CPU / 5 GiB pods on each measured 13.32 GiB / 7880m dedicated node; a third
+does not fit. Its pool target is two $96 nodes, so its four self-hosted runner
+ceiling is also a $192 monthly cost cap. Runner Status reports sanitized DOKS
+autoscaler `Backoff` diagnostics when its known provider text format is
+available. It reports diagnostics unavailable for missing or changed provider
+data and never treats those diagnostics as a capacity gate.
 
 An OOM kill identifies the killed container but does not attribute aggregate
 shared-budget consumption. Diagnose from pod aggregate use, both containers'
@@ -153,9 +154,12 @@ See `docs/runbooks/node-pool-sizing.md`.
 
 This tests all pre-installed tools in the runners.
 
-### 2. Test in GitHub Workflow
+### 2. Test in an allow-listed private repository
 
-Create a test workflow in your repository:
+This self-hosted example is for an allow-listed private repository only, after
+the reviewed target has CI deployment and external live-acceptance evidence. Do
+not copy it into a public repository or a repository outside the selected runner
+group.
 
 ```yaml
 # .github/workflows/test-runners.yml
@@ -190,6 +194,14 @@ jobs:
       - name: Test Docker-in-Docker
         run: |
           docker run --rm hello-world
+```
+
+For a public repository, keep the job on GitHub-hosted infrastructure:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
 ```
 
 ## 🛠️ Status monitoring

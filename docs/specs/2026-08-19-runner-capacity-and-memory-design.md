@@ -5,7 +5,8 @@
 **Scope:** Runner concurrency ceiling, per-job memory, and OOM attribution.
 
 > **Superseded on 2026-09-06.** This record preserves the August decision and
-> its evidence. The active operating design is
+> its evidence. The reviewed target design, pending CI deployment and external
+> live acceptance, is
 > [`2026-09-06-runner-density-and-cost-cap-design.md`](2026-09-06-runner-density-and-cost-cap-design.md):
 > two fixed $96 nodes, four self-hosted runners, pod-level 3 CPU / 5 GiB
 > requests, and a shared 6 GiB pod memory limit. Its shared-budget OOM
@@ -69,7 +70,8 @@ chart template with no `resources` field**, and a user-supplied container named
 `dind` is explicitly filtered out of values by the
 `gha-runner-scale-set.non-runner-non-dind-containers` helper.
 
-Verified in chart **0.12.1** (deployed) and **0.14.2** (current). There is no
+Verified at the time in chart **0.12.1** (deployed) and **0.14.2**
+(then-current). There is no
 values-level way to give the Docker daemon a memory reservation while
 `containerMode.type: "dind"` is set.
 
@@ -117,7 +119,7 @@ previous 3-CPU limit throttled builds to 3 of 8 available cores.
 
 ### OOM attribution
 
-Because both containers now carry explicit limits, an OOM kill names the
+In the August design, because both containers carried explicit limits, an OOM kill named the
 container that overran: `runner` means the job process, `dind` means a Docker
 build. This was the specific requirement, as the dominant failure mode was not
 known in advance.
@@ -139,7 +141,8 @@ known in advance.
   fully enabled - `--kubelet-insecure-tls` is **not** required on this DOKS
   cluster and is deliberately not set.
 - **Node pool sizing moved into code.** The pool's bounds previously existed
-  only as a comment while the real values were set by hand. Now applied by
+  only as a comment while the real values were set by hand. At that time they
+  were applied by
   `.github/workflows/node-pool-sizing.yml`, which validates the bounds against
   `deploy/dind-values.yaml` and verifies that pool labels and taints survive.
 - **Capacity drift detection.** `deploy-runners.yml` and `runner-status.yml`
