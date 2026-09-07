@@ -38,5 +38,7 @@ Codex-specific adapter rules:
 ## Tooling Warnings
 
 - The bundled Superpowers shell scripts may have CRLF line endings under
-  Windows/WSL. If Bash reports `set: pipefail\r: invalid option name`, stream the
-  script through `sed 's/\r$//'` before invoking `bash -s -- <arguments>`.
+  Windows/WSL. If Bash reports `set: pipefail\r: invalid option name`, copy the
+  complete `scripts/` directory into the plan's ignored SDD workspace, run
+  `sed -i 's/\r$//'` on the copies, and invoke the copied script. Streaming one
+  script to `bash -s` breaks scripts that locate sibling helpers via `$0`.
