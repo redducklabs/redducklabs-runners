@@ -1408,6 +1408,9 @@ case "$joined" in
           || [ "${GH_SCENARIO}" = later_page_public_label ] \
           || [ "${GH_SCENARIO}" = later_page_workflow_label ] \
           || [ "${GH_SCENARIO}" = managed_copilot ] \
+          || [ "${GH_SCENARIO}" = managed_dependabot ] \
+          || [ "${GH_SCENARIO}" = managed_codeql ] \
+          || [ "${GH_SCENARIO}" = managed_dynamic_near_miss ] \
           || [ "${GH_SCENARIO}" = unknown_dynamic_path ] \
           || [ "${GH_SCENARIO}" = url_sensitive ] \
           || [ "${GH_SCENARIO}" = default_branch_drift ] \
@@ -1440,6 +1443,12 @@ case "$joined" in
             fi
         elif [ "${GH_SCENARIO}" = managed_copilot ]; then
             printf '{"total_count":1,"workflows":[{"path":"dynamic/agents/copilot-pull-request-reviewer","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = managed_dependabot ]; then
+            printf '{"total_count":1,"workflows":[{"path":"dynamic/dependabot/dependabot-updates","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = managed_codeql ]; then
+            printf '{"total_count":1,"workflows":[{"path":"dynamic/github-code-scanning/codeql","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = managed_dynamic_near_miss ]; then
+            printf '{"total_count":1,"workflows":[{"path":"dynamic/dependabot/dependabot-updates-preview","state":"active"}]}\n'
         elif [ "${GH_SCENARIO}" = unknown_dynamic_path ]; then
             printf '{"total_count":1,"workflows":[{"path":"dynamic/agents/unrecognized","state":"active"}]}\n'
         elif [ "${GH_SCENARIO}" = url_sensitive ]; then
@@ -1717,9 +1726,37 @@ PY
     if run_trust_fixture managed_copilot "$FIXTURE_DIR/trust-output" \
       && ! grep -q 'contents/dynamic/agents/copilot-pull-request-reviewer' "$FIXTURE_DIR/gh-calls" \
       && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
-        pass "Trust boundary skips only GitHub's exact managed Copilot workflow path"
+        pass "Trust boundary skips GitHub's exact managed Copilot workflow path"
     else
         fail "Trust boundary does not safely skip GitHub's exact managed Copilot workflow path"
+    fi
+
+    if run_trust_fixture managed_dependabot "$FIXTURE_DIR/trust-output" \
+      && ! grep -q 'contents/dynamic/dependabot/dependabot-updates' "$FIXTURE_DIR/gh-calls" \
+      && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary skips GitHub's exact managed Dependabot updates workflow path"
+    else
+        fail "Trust boundary does not safely skip GitHub's exact managed Dependabot updates workflow path"
+    fi
+
+    if run_trust_fixture managed_codeql "$FIXTURE_DIR/trust-output" \
+      && ! grep -q 'contents/dynamic/github-code-scanning/codeql' "$FIXTURE_DIR/gh-calls" \
+      && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary skips GitHub's exact managed CodeQL default-setup workflow path"
+    else
+        fail "Trust boundary does not safely skip GitHub's exact managed CodeQL default-setup workflow path"
+    fi
+
+    if run_trust_fixture managed_dynamic_near_miss "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary accepts a near-miss GitHub-managed dynamic workflow path"
+    elif grep -q 'contents/dynamic/dependabot/dependabot-updates-preview' "$FIXTURE_DIR/gh-calls"; then
+        fail "Trust boundary attempts a contents read for a near-miss GitHub-managed dynamic workflow path"
+    elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+        fail "Trust boundary mutates before rejecting a near-miss GitHub-managed dynamic workflow path"
+    elif ! grep -Fqi 'unsupported workflow path' "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary near-miss workflow-path rejection is not diagnostic"
+    else
+        pass "Trust boundary fails closed on near-miss GitHub-managed dynamic workflow paths"
     fi
 
     if run_trust_fixture unknown_dynamic_path "$FIXTURE_DIR/trust-output"; then

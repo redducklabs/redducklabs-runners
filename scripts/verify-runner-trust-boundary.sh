@@ -251,10 +251,20 @@ while IFS=$'\t' read -r repo_id repo_name enumerated_branch; do
 
     while IFS= read -r workflow_path; do
         [ -n "$workflow_path" ] || continue
-        if [ "$workflow_path" = "dynamic/agents/copilot-pull-request-reviewer" ]; then
-            echo "Skipping GitHub-managed Copilot pull-request reviewer workflow for ${repo_name}"
-            continue
-        fi
+        case "$workflow_path" in
+            dynamic/agents/copilot-pull-request-reviewer)
+                echo "Skipping GitHub-managed Copilot pull-request reviewer workflow for ${repo_name}"
+                continue
+                ;;
+            dynamic/dependabot/dependabot-updates)
+                echo "Skipping GitHub-managed Dependabot updates workflow for ${repo_name}"
+                continue
+                ;;
+            dynamic/github-code-scanning/codeql)
+                echo "Skipping GitHub-managed CodeQL default-setup workflow for ${repo_name}"
+                continue
+                ;;
+        esac
         case "$workflow_path" in
             .github/workflows/*) ;;
             *)

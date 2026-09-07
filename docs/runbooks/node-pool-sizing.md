@@ -85,8 +85,10 @@ public access disabled, and exactly `aurolegal.ai`, `autoduck`, `manager`,
 `platform-observability`, `redducklabs`, `redducklaw`, `therapy-link`,
 `zipbot-internal`, and `zipbot-v2`. CI scans all public organization workflows;
 any direct or unresolved dynamic use of `redducklabs-runners` fails closed.
-GitHub's exact managed path `dynamic/agents/copilot-pull-request-reviewer` is
-the only workflow entry skipped without a contents read; every other
+The only workflow entries skipped without a contents read are GitHub's exact
+managed dynamic paths `dynamic/agents/copilot-pull-request-reviewer`,
+`dynamic/dependabot/dependabot-updates`, and
+`dynamic/github-code-scanning/codeql`; every unknown or near-miss
 non-repository path fails closed. Fleet and prerequisite mutation workflows
 share the non-cancelling `runner-fleet-mutation` concurrency group.
 
