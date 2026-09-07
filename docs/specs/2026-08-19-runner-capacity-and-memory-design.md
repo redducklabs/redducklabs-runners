@@ -1,8 +1,15 @@
 # Runner Capacity and Memory Design
 
 **Date:** 2026-08-19
-**Status:** Implemented
+**Status:** Superseded (historical record)
 **Scope:** Runner concurrency ceiling, per-job memory, and OOM attribution.
+
+> **Superseded on 2026-09-06.** This record preserves the August decision and
+> its evidence. The active operating design is
+> [`2026-09-06-runner-density-and-cost-cap-design.md`](2026-09-06-runner-density-and-cost-cap-design.md):
+> two fixed $96 nodes, four self-hosted runners, pod-level 3 CPU / 5 GiB
+> requests, and a shared 6 GiB pod memory limit. Its shared-budget OOM
+> diagnostics replace the causal container-only attribution stated below.
 
 Toolchain and chart version upgrades are explicitly **out of scope** and are
 tracked as separate work.

@@ -28,13 +28,14 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
    - [Create in DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens)
 
 ### Infrastructure Requirements
-- **Kubernetes cluster 1.29+** - Red Duck Labs uses DigitalOcean (currently 1.33).
-  1.29 is a hard floor: the Docker-in-Docker daemon runs as a *native sidecar*
-  (an init container with `restartPolicy: Always`), which earlier versions ignore.
+- **Kubernetes 1.36 or newer** - deployment preflight verifies both the API
+  server and eligible runner nodes. The Docker-in-Docker daemon is a *native
+  sidecar* (an init container with `restartPolicy: Always`), for which 1.29 is
+  the underlying Kubernetes feature floor.
 - DigitalOcean Container Registry (for custom images)
 - A dedicated, labeled and tainted node pool for runners
-  (`node-type=github-runner`, taint `github-runner=true:NoSchedule`), sized so
-  that one runner pod fits per node - see
+  (`node-type=github-runner`, taint `github-runner=true:NoSchedule`), fixed at
+  two nodes with two runner pods per node - see
   [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
 
 ## Quick Start - GitHub Actions Deployment
@@ -203,32 +204,67 @@ guide and update the pinned fingerprint in the Dockerfile and in
 
 | | Value |
 |---|---|
-| Concurrent runners | **8** (`maxRunners`), 2 always warm (`minRunners`) |
-| Memory per job | **~12.5Gi usable** - runner limit 10Gi, Docker daemon limit 10Gi |
-| CPU per job | All 8 vCPU (no CPU limit) |
-| Node pool | `github-runners-pool-16g`, `s-8vcpu-16gb`, autoscaling 2-8 nodes |
-| Cost | **$192/mo floor** (2 warm nodes), **$768/mo ceiling** (8 nodes, only while 8 jobs run) |
+| Concurrent self-hosted runners | **4** maximum, 2 warm (`minRunners: 2`, `maxRunners: 4`) |
+| Pod scheduler request | **3 CPU and 5 GiB memory**, shared by the runner and DinD sidecar |
+| Pod memory limit | **6 GiB shared** by the runner and privileged DinD sidecar |
+| Node pool | Exactly two `s-8vcpu-16gb` nodes in `github-runners-pool-16g` (`min_nodes=max_nodes=2`) |
+| Fleet cost | Two fixed **$96/node/month** nodes; **$192/month maximum** |
 
-**One runner pod runs per node.** The pod requests 10Gi of memory (runner 5Gi +
-dind 5Gi) against ~13.32Gi of node allocatable, so two pods cannot share a node
-and the cluster-autoscaler adds a node per concurrent job. This is deliberate:
-it stops one job's `docker build` from starving another's, which was the cause
-of intermittent out-of-memory failures.
+Two pods fit per dedicated node. On the measured 13.32 GiB / 7880m allocatable
+node, two proposed pods reserve 10 GiB and 6 CPU; a third does not fit. The
+pool does not scale beyond two nodes, so work above four concurrent private jobs
+remains queued at GitHub rather than producing unschedulable runner pods.
 
-Two consequences worth knowing:
+The 6 GiB limit is one pod-wide budget, not independent container limits. An
+`OOMKilled` status identifies where the kernel enforced that shared budget; it
+does not establish which container consumed most of it. Review pod aggregate
+use, both containers' use and restart counts, node headroom, and events.
 
-- **`maxRunners` and the pool's `max_nodes` must be raised together.** Runners
-  above `max_nodes` sit `Pending` forever. The **Node Pool Sizing** workflow
-  enforces this, and **Deploy GitHub Runners** and **Runner Status** both warn
-  on drift.
-- **Jobs beyond the warm pool wait for a node** to be provisioned and the
-  ~1.34GB runner image to be pulled. `minRunners`/`min_nodes` is the dial that
-  trades money for that latency.
+The August one-pod-per-node design is historical and superseded by this shared
+pod-budget design; see [the superseded design record](docs/specs/2026-08-19-runner-capacity-and-memory-design.md).
 
-Memory is split into two independent budgets - the `runner` container for work
-run directly on the runner, and the `dind` sidecar for anything run inside
-Docker. See [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
-for how to change any of this.
+### Trust boundary and hosted-runner placement
+
+Every self-hosted runner pod includes privileged DinD. Two jobs on one node
+therefore share a kernel and increase the cross-job blast radius. The fleet is
+limited to the organization runner group `redducklabs-private-runners`, with
+`visibility=selected`, public access disabled, and exactly these private
+repositories: `aurolegal.ai`, `autoduck`, `manager`, `platform-observability`,
+`redducklabs`, `redducklaw`, `therapy-link`, `zipbot-internal`, and `zipbot-v2`.
+
+Before deployment, CI enumerates public organization repositories and fails if
+any workflow job selects `redducklabs-runners`; public workflows use free
+standard GitHub-hosted runners. CI also requires explicit acceptance of the
+privileged co-tenancy risk, reconciles and reads back the runner-group policy,
+and rejects repository-membership drift.
+
+### Cost comparison
+
+The recorded Team-plan comparison is 3,000 included private GitHub-hosted
+minutes per month and $0.006 per standard Linux private minute thereafter. The
+$192 fixed fleet equals 35,000 private hosted minutes per month. The
+organization billing total was not available with the `admin:org` credential,
+so this is a break-even calculation rather than measured organization usage.
+Standard GitHub-hosted minutes for public repositories are free.
+
+Deployment performs server-side dry-runs of both the rendered
+`AutoscalingRunnerSet` and a representative Pod before Helm mutation. The
+preflight rejects unsupported pod-level resources, admission drift, incompatible
+Kubernetes versions, and insufficient per-node headroom. **Runner Status** also
+reports sanitized provider-capacity diagnostics from the DOKS autoscaler when
+their known format is available; otherwise it reports that diagnostics are
+unavailable. See [node-pool sizing](docs/runbooks/node-pool-sizing.md).
+
+### External acceptance prerequisites
+
+Live acceptance is deterministic only after the trust boundary succeeds. The
+private `redducklabs/aurolegal.ai` density workflow runs from a unique annotated
+tag at its reviewed workflow SHA, checks `expected_workflow_sha`, and proves four
+overlapping jobs on four distinct ephemeral runners with 2+2 placement across
+the fixed two nodes. The migrated toolkit workflow runs from its own reviewed
+tag and SHA, checks out source `f042c7192797e59b9c10ab034a4d4c2bbcaee1ca`, and
+runs its four-version matrix on GitHub-hosted runners. The controller verifies
+each dispatched run's `headSha`; the toolkit workload must not consume ARC.
 
 ## GitHub Actions Management
 
@@ -239,23 +275,23 @@ available for investigation and explicitly requested operations.
 
 | Workflow | Description | Trigger |
 |----------|-------------|---------|
-| **Deploy GitHub Runners** | Initial deployment or updates | Manual (`workflow_dispatch`) |
-| **Scale GitHub Runners** | Scale up/down/custom | Manual (`workflow_dispatch`) |
-| **Node Pool Sizing** | Set node pool min/max nodes (runner capacity ceiling) | Manual (`workflow_dispatch`) |
+| **Deploy GitHub Runners** | CI-only trust preparation, deployment, and rollback | Manual (`workflow_dispatch`) |
+| **Scale GitHub Runners** | Reviewed runner-bound changes, capped at four | Manual (`workflow_dispatch`) |
+| **Node Pool Sizing** | CI-only fixed runner-pool validation and 2/2 bounds | Manual (`workflow_dispatch`) |
 | **Deploy Cluster Addons** | Deploy metrics-server (`kubectl top`) | Manual (`workflow_dispatch`) |
 | **Runner Status** | Runner health, registration, memory headroom, OOM kills | Manual + Daily at 9 AM UTC |
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
 | **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
 
-### Scaling via GitHub Actions
+### CI-only runner changes
 
-1. Go to **Actions** → **Scale GitHub Runners**
-2. Choose scaling action:
-   - `status`: Check current configuration
-   - `scale-up`: Scale to default (2-4 runners)
-   - `scale-down`: Minimal configuration (0-1 runners)
-   - `scale-max`: Maximum capacity (4-8 runners)
-   - `scale-custom`: Custom min/max values
+Runner-group preparation, runner deployment, node-pool changes, and rollback
+run only through GitHub Actions with the reviewed commit supplied as
+`expected_sha`. Deploy first runs `prepare-trust-boundary`, which performs the
+read-only public-workflow checks and runner-group reconciliation without Helm,
+Kubernetes, or DigitalOcean mutation. A deployment or rollback uses the same
+recorded SHA. Rollback uses the recorded post-quiesce Helm revision and restores
+the isolated two-runner template while retaining the private runner group.
 
 ### Monitoring via GitHub Actions
 
@@ -275,31 +311,12 @@ available for investigation and explicitly requested operations.
    - Scale runners to zero
    - Provide recovery instructions
 
-## Local Management
+## Local status
 
-Run local management commands from the repository root. These scripts can mutate
-the live runner fleet, so use them only when local operations are intended.
-
-### Quick Scaling
+The local helper is read-only and accepts only `status`:
 
 ```bash
 ./scripts/scale-runners.sh status
-./scripts/scale-runners.sh up
-./scripts/scale-runners.sh max
-./scripts/scale-runners.sh down
-./scripts/scale-runners.sh scale 3 6
-```
-
-### Interactive Administration
-
-```bash
-./scripts/runner-admin.sh
-```
-
-### Emergency Stop
-
-```bash
-./scripts/emergency-stop.sh
 ```
 
 ## Testing
@@ -309,7 +326,7 @@ the live runner fleet, so use them only when local operations are intended.
 ```bash
 ./test/verify-tools.sh
 ./test/test-deployment.sh
-./test/verify-runner-resources.sh   # memory reservations + one-pod-per-node (no cluster needed)
+./test/verify-runner-resources.sh   # pod-level resources, two-pods-per-node, trust/preflight fixtures (no cluster needed)
 ./test/verify-cve-floor.sh <image>
 ./test/verify-aws-key-expiry.sh docker/aws-cli-public.key
 ./test/verify-docker-version.sh
@@ -371,8 +388,6 @@ is report-only (see "Included Tools").
 ### Check Runner Status
 ```bash
 ./scripts/scale-runners.sh status
-kubectl get pods -n arc-runners
-kubectl logs -n arc-runners <pod-name> -c runner
 ```
 
 ### Verify GitHub Registration
@@ -383,27 +398,15 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
 
 ### Diagnosing Out-Of-Memory Failures
 
-The runner container and the Docker daemon have **separate memory budgets**, so
-an OOM kill names the one that overran:
+The runner container and Docker daemon share the pod's 6 GiB memory limit. An
+OOM kill names the killed container, not the component that consumed most of
+the shared budget. Use **Runner Status** for aggregate pod and per-container
+metrics, restart counts, node headroom, events, and sanitized provider-capacity
+diagnostics.
 
 ```bash
-# Live memory use per container
-kubectl top pods -n arc-runners --containers
-
-# Node headroom
-kubectl top nodes
-
-# Recent OOM kills and evictions (runner pods are ephemeral - check promptly)
-kubectl get events -n arc-runners --sort-by=.lastTimestamp | grep -Ei 'oom|evict'
+Actions -> Runner Status -> Run workflow
 ```
-
-| Container killed | Cause | Fix |
-|---|---|---|
-| `runner` | The job process itself (npm, jest, webpack, pytest, go build) | Raise the `runner` memory limit, or lower the job's own worker count |
-| `dind` | A Docker build, compose, or testcontainers | Raise the `dind` memory limit |
-
-Both limits are in `deploy/dind-values.yaml`. The scheduled **Runner Status**
-workflow reports the same information on every run.
 
 ### Common Issues
 
@@ -411,9 +414,10 @@ workflow reports the same information on every run.
 - **Runners not appearing**: Verify GitHub token has correct scopes
 - **Build failures**: Ensure Docker-in-Docker is properly configured
 - **Scaling issues**: Check AutoScalingRunnerSet status
-- **Runners stuck `Pending`**: `maxRunners` likely exceeds the node pool's
-  `max_nodes`. One runner pod runs per node - see
-  [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md)
+- **Runners stuck `Pending`**: inspect **Runner Status** for fixed 2/2 pool or
+  four-runner drift and provider-capacity diagnostics. Do not change the pool
+  locally; use the CI gates documented in
+  [docs/runbooks/node-pool-sizing.md](docs/runbooks/node-pool-sizing.md).
 - **`kubectl top` says "Metrics API not available"**: run the
   **Deploy Cluster Addons** workflow to install metrics-server
 
@@ -460,14 +464,14 @@ redducklabs-runners/
 │   ├── build-and-push.sh      # Production script
 │   └── build-and-push.template.sh
 ├── deploy/                    # Deployment configurations
-│   ├── deploy.sh              # Production script
+│   ├── deploy.sh              # Legacy local helper; CI is the production path
 │   ├── deploy.template.sh
 │   ├── dind-values.yaml       # Production values
 │   └── dind-values.template.yaml
-├── scripts/                   # Local management scripts
-│   ├── scale-runners.sh       # Main scaling script
-│   ├── runner-admin.sh        # Interactive admin
-│   ├── emergency-stop.sh      # Emergency shutdown
+├── scripts/                   # Local operational helpers
+│   ├── scale-runners.sh       # Status-only helper
+│   ├── runner-admin.sh        # Legacy interactive helper
+│   ├── emergency-stop.sh      # Legacy local helper
 │   └── README.md
 ├── test/                      # Testing scripts
 │   ├── verify-tools.sh        # Tool verification
@@ -511,6 +515,6 @@ This repository is configured for Red Duck Labs production environment:
 - **Registry**: `registry.digitalocean.com/redducklabs`
 - **Namespace**: `arc-runners`
 - **Runner Label**: `redducklabs-runners`
-- **Scaling**: 2-4 runners (default), 4-8 runners (maximum)
+- **Scaling**: 2 warm runners, 4 maximum runners, fixed two-node pool
 
 Template versions (`.template.*` files) are provided for reuse by other organizations.
