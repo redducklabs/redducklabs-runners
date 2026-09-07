@@ -173,11 +173,10 @@ jobs:
             exit 0
           fi
 
-          # Namespace is the only non-revision dispatch value needed to locate
-          # the rollback release. Deploy-only runner settings must never block
-          # the recovery path.
-          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
-            echo "❌ Error: namespace must be a valid DNS-1123 label"
+          # Runner release ownership and prerequisites are intentionally fixed
+          # to the production namespace; reject drift before any mutation.
+          if [ "${NAMESPACE}" != "arc-runners" ]; then
+            echo "❌ Error: namespace must be exactly arc-runners"
             exit 1
           fi
           if [ "${OPERATION}" = "rollback" ]; then
@@ -1224,14 +1223,14 @@ jobs:
 
           validate_rollback_values() {
             python3 scripts/validate-runner-isolation-contract.py \
-              --kind values --max-runners 2 \
-              --runner-group redducklabs-private-runners --require-automount
+              --contract legacy-isolated --kind values \
+              --min-runners 2 --max-runners 2 --runner-group private
           }
 
           validate_rollback_manifest() {
             python3 scripts/validate-runner-isolation-contract.py \
-              --kind manifest --max-runners 2 \
-              --runner-group redducklabs-private-runners --require-automount \
+              --contract legacy-isolated --kind manifest \
+              --min-runners 2 --max-runners 2 --runner-group private \
               < "$1"
           }
 

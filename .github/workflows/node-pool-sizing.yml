@@ -202,9 +202,10 @@ jobs:
               and (.max_nodes | tostring) == $expected_max
               and .size == "s-8vcpu-16gb"
               and .auto_scale == true
-              and .labels["node-type"] == "github-runner"
-              and .labels["workload-type"] == "ci-cd"
-              and ([.taints[]? | select(.key == "github-runner")] == [{
+              and .labels == {
+                "node-type": "github-runner", "workload-type": "ci-cd"
+              }
+              and (.taints == [{
                 key: "github-runner", value: "true", effect: "NoSchedule"
               }])
             ' <<<"${state}" >/dev/null || {
@@ -228,19 +229,19 @@ jobs:
             }
             values=$(helm get values redducklabs-runners -n arc-runners -o json)
             python3 scripts/validate-runner-isolation-contract.py \
-              --kind values --max-runners 2 \
-              --runner-group redducklabs-private-runners --require-automount \
+              --contract density --kind values \
+              --min-runners 2 --max-runners 2 --runner-group private \
               <<<"${values}" || {
-              echo "❌ Error: Helm state is not exact private 2/2 isolated 5Gi+5Gi state"
+              echo "❌ Error: Helm state is not exact private 2/2 pod-level density state"
               return 1
             }
             asrs=$(kubectl get autoscalingrunnersets.actions.github.com \
               -n arc-runners -o json)
             python3 scripts/validate-runner-isolation-contract.py \
-              --kind asrs-list --max-runners 2 \
-              --runner-group redducklabs-private-runners --require-automount \
+              --contract density --kind asrs-list \
+              --min-runners 2 --max-runners 2 --runner-group private \
               <<<"${asrs}" || {
-              echo "❌ Error: live AutoscalingRunnerSet is not exact private 2/2 isolated 5Gi+5Gi state"
+              echo "❌ Error: live AutoscalingRunnerSet is not exact private 2/2 pod-level density state"
               return 1
             }
           }
@@ -281,6 +282,22 @@ jobs:
               echo "❌ Error: exactly two Ready runner nodes are required; found ${ready}/${total}"
               return 1
             }
+            if ! jq -e '
+              all(.items[];
+                .metadata.labels["node-type"] == "github-runner"
+                and .metadata.labels["workload-type"] == "ci-cd"
+                and ([.spec.taints[]? | select(.key == "github-runner")] == [{
+                  key: "github-runner", value: "true", effect: "NoSchedule"
+                }])
+                and ([.spec.taints[]? | select(
+                  (.effect == "NoSchedule" or .effect == "NoExecute")
+                  and .key != "github-runner"
+                )] | length == 0)
+              )
+            ' <<<"${nodes}" >/dev/null; then
+              echo "❌ Error: ${stage} runner nodes violate required labels or schedulable taints"
+              return 1
+            fi
             OBSERVED_NODE_IDENTITIES=$(jq -c '
               [.items[] | {
                 uid: (.metadata.uid // ""),

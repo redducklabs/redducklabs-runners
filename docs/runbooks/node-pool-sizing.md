@@ -60,8 +60,12 @@ from a workstation. The local `scripts/scale-runners.sh` helper accepts only
 2. Run Scale Runners and Node Pool Sizing from that same SHA. Node Pool Sizing
    accepts only 2/2. Before lowering `max_nodes`, it performs two complete
    observations of the pool, exact Helm and live ASRS 2/2 private isolated
-   state, queue demand, and two Ready nodes. Cluster ID, pool ID, and sorted
-   node UID/providerID pairs must remain identical between observations.
+   state, queue demand, and two Ready nodes. The provider pool must expose
+   exactly the two intended custom labels and the single
+   `github-runner=true:NoSchedule` taint. Each live runner node must carry both
+   labels and that taint, with no additional `NoSchedule`/`NoExecute` taint the
+   runner does not tolerate. Cluster ID, pool ID, and sorted node
+   UID/providerID pairs must remain identical between observations.
 3. Run Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of
    the rendered scale set and representative Pod before Helm mutation, and
    records the post-quiesce pre-density Helm revision as the rollback target.

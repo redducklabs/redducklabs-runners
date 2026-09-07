@@ -469,6 +469,7 @@ run_fixture() {  # script, mutation log, output log
     : > "$FIXTURE_DIR/asrs-read-count"
     rm -f "$FIXTURE_DIR/pool-updated"
     rm -f "$FIXTURE_DIR/helm-updated"
+    rm -f "$FIXTURE_DIR/helm-updated-min" "$FIXTURE_DIR/helm-updated-max"
     rm -f "$FIXTURE_DIR/bootstrap-created"
     cat > "$FIXTURE_DIR/rollback-manifest.yaml" <<'YAML'
 apiVersion: actions.github.com/v1alpha1
@@ -594,30 +595,62 @@ manifest = {
 with open(sys.argv[2], "w", encoding="utf-8") as stream:
     yaml.safe_dump(manifest, stream, sort_keys=False)
 PY
-    if [ "${FIXTURE_TEMPLATE_DRIFT:-none}" != none ]; then
-        python3 - "$FIXTURE_DIR/rollback-manifest.yaml" "${FIXTURE_TEMPLATE_DRIFT}" <<'PY'
+    # This is independently rooted in the verbatim fa2a4df values fixture,
+    # never derived by reshaping the density target.
+    python3 - test/fixtures/arc-legacy-isolated-values.yaml "$FIXTURE_DIR/legacy-manifest.yaml" <<'PY'
 import sys
 import yaml
 
-path, mutation = sys.argv[1:]
-with open(path, encoding="utf-8") as stream:
-    document = yaml.safe_load(stream)
-spec = document["spec"]["template"]["spec"]
-if mutation == "automount":
-    spec.pop("automountServiceAccountToken", None)
-elif mutation == "placement":
-    spec["nodeSelector"] = {"node-type": "worker"}
-elif mutation == "token":
-    spec["volumes"].append({
-        "name": "kube-api-access-fixture",
-        "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]},
-    })
-elif mutation == "extra":
-    spec["hostNetwork"] = True
-else:
-    raise SystemExit(f"unknown fixture template mutation: {mutation}")
-with open(path, "w", encoding="utf-8") as stream:
-    yaml.safe_dump(document, stream, sort_keys=False)
+with open(sys.argv[1], encoding="utf-8") as stream:
+    values = yaml.safe_load(stream)
+template = values["template"]
+template["spec"]["restartPolicy"] = "Never"
+template["spec"]["serviceAccountName"] = "redducklabs-runners-gha-rs-no-permission"
+manifest = {
+    "apiVersion": "actions.github.com/v1alpha1",
+    "kind": "AutoscalingRunnerSet",
+    "metadata": {"name": "redducklabs-runners"},
+    "spec": {
+        "githubConfigUrl": "https://github.com/redducklabs",
+        "githubConfigSecret": "redducklabs-runners-gha-rs-github-secret",
+        "runnerScaleSetName": "redducklabs-runners",
+        "minRunners": 2,
+        "maxRunners": 8,
+        "template": template,
+    },
+}
+with open(sys.argv[2], "w", encoding="utf-8") as stream:
+    yaml.safe_dump(manifest, stream, sort_keys=False)
+PY
+    if [ "${FIXTURE_TEMPLATE_DRIFT:-none}" != none ]; then
+        python3 - "$FIXTURE_DIR/rollback-manifest.yaml" "$FIXTURE_DIR/legacy-manifest.yaml" "${FIXTURE_TEMPLATE_DRIFT}" <<'PY'
+import sys
+import yaml
+
+density_path, legacy_path, mutation = sys.argv[1:]
+for path in (density_path, legacy_path):
+    with open(path, encoding="utf-8") as stream:
+        document = yaml.safe_load(stream)
+    spec = document["spec"]["template"]["spec"]
+    if mutation == "automount":
+        spec.pop("automountServiceAccountToken", None)
+    elif mutation == "placement":
+        spec["nodeSelector"] = {"node-type": "worker"}
+    elif mutation == "token":
+        spec["volumes"].append({
+            "name": "kube-api-access-fixture",
+            "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]},
+        })
+    elif mutation == "extra":
+        spec["hostNetwork"] = True
+    elif mutation == "host_namespace":
+        spec["hostPID"] = True
+    elif mutation == "security":
+        spec["containers"][0]["securityContext"]["allowPrivilegeEscalation"] = False
+    else:
+        raise SystemExit(f"unknown fixture template mutation: {mutation}")
+    with open(path, "w", encoding="utf-8") as stream:
+        yaml.safe_dump(document, stream, sort_keys=False)
 PY
     fi
     (
@@ -635,12 +668,18 @@ PY
         export FIXTURE_SHA_READ_LOG="$FIXTURE_DIR/sha-reads"
         export FIXTURE_HELM_READ_LOG="$FIXTURE_DIR/helm-reads"
         export FIXTURE_ROLLBACK_MANIFEST="$FIXTURE_DIR/rollback-manifest.yaml"
+        export FIXTURE_LEGACY_MANIFEST="$FIXTURE_DIR/legacy-manifest.yaml"
         export FIXTURE_ROLLBACK_INVALID="${FIXTURE_ROLLBACK_INVALID:-none}"
         export FIXTURE_POOL_MIN FIXTURE_POOL_MAX FIXTURE_POOL_COUNT
         export FIXTURE_POOL_SIZE="${FIXTURE_POOL_SIZE:-s-8vcpu-16gb}"
         export FIXTURE_POOL_WORKLOAD_LABEL="${FIXTURE_POOL_WORKLOAD_LABEL:-ci-cd}"
         export FIXTURE_POOL_TAINT_VALUE="${FIXTURE_POOL_TAINT_VALUE:-true}"
         export FIXTURE_POOL_TAINT_EFFECT="${FIXTURE_POOL_TAINT_EFFECT:-NoSchedule}"
+        export FIXTURE_POOL_EXTRA_LABEL="${FIXTURE_POOL_EXTRA_LABEL:-false}"
+        export FIXTURE_POOL_EXTRA_TAINT="${FIXTURE_POOL_EXTRA_TAINT:-false}"
+        export FIXTURE_NODE_WORKLOAD_LABEL="${FIXTURE_NODE_WORKLOAD_LABEL:-ci-cd}"
+        export FIXTURE_NODE_TAINT_VALUE="${FIXTURE_NODE_TAINT_VALUE:-true}"
+        export FIXTURE_NODE_EXTRA_BLOCKING_TAINT="${FIXTURE_NODE_EXTRA_BLOCKING_TAINT:-false}"
         export FIXTURE_READY_NODES="${FIXTURE_READY_NODES:-2}"
         export FIXTURE_SCALE_DEMAND="${FIXTURE_SCALE_DEMAND:-2}"
         export FIXTURE_PLATFORM_STATE="${FIXTURE_PLATFORM_STATE:-ready}"
@@ -663,6 +702,8 @@ PY
         export FIXTURE_MISSING_CRD="${FIXTURE_MISSING_CRD:-none}"
         export FIXTURE_TEMPLATE_DRIFT="${FIXTURE_TEMPLATE_DRIFT:-none}"
         export FIXTURE_HELM_UPDATED="$FIXTURE_DIR/helm-updated"
+        export FIXTURE_HELM_UPDATED_MIN="$FIXTURE_DIR/helm-updated-min"
+        export FIXTURE_HELM_UPDATED_MAX="$FIXTURE_DIR/helm-updated-max"
         export FIXTURE_BOOTSTRAP_CREATED="$FIXTURE_DIR/bootstrap-created"
         export FIXTURE_POOL_RACE_COUNT="${FIXTURE_POOL_RACE_COUNT:-$FIXTURE_POOL_COUNT}"
         export FIXTURE_POOL_READ_COUNT="$FIXTURE_DIR/pool-read-count"
@@ -704,27 +745,41 @@ PY
                 if [ "$FIXTURE_ROLLBACK_INVALID" = manifest ]; then
                     sed 's/memory: 5Gi/memory: 4Gi/g' "$FIXTURE_ROLLBACK_MANIFEST"
                 else
-                    local manifest_max manifest_group
+                    local manifest_min=2 manifest_max manifest_group base_manifest
                     manifest_max=$FIXTURE_HELM_MAX
                     manifest_group=$FIXTURE_HELM_GROUP
                     if [[ " $* " == *" --revision "* ]]; then
                         manifest_max=2
                         manifest_group=$FIXTURE_REVISION_GROUP
                     elif [ -e "$FIXTURE_HELM_UPDATED" ]; then
-                        manifest_max=2
+                        manifest_min=$(cat "$FIXTURE_HELM_UPDATED_MIN")
+                        manifest_max=$(cat "$FIXTURE_HELM_UPDATED_MAX")
                         manifest_group=$FIXTURE_HELM_POST_GROUP
                     fi
-                    if [ "$manifest_group" = __missing__ ]; then
-                        sed \
-                          -e "s/maxRunners: 2/maxRunners: $manifest_max/" \
-                          -e '/runnerGroup:/d' \
-                          "$FIXTURE_ROLLBACK_MANIFEST"
-                    else
-                        sed \
-                          -e "s/maxRunners: 2/maxRunners: $manifest_max/" \
-                          -e "s/runnerGroup: redducklabs-private-runners/runnerGroup: $manifest_group/" \
-                          "$FIXTURE_ROLLBACK_MANIFEST"
+                    base_manifest=$FIXTURE_ROLLBACK_MANIFEST
+                    if [ "${FIXTURE_FORCE_LEGACY:-false}" = true ] || [ "$FIXTURE_HELM_MAX" = 8 ] || [[ " $* " == *" --revision "* ]] \
+                      || [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
+                        base_manifest=$FIXTURE_LEGACY_MANIFEST
                     fi
+                    python3 - "$base_manifest" "$manifest_min" "$manifest_max" "$manifest_group" <<'PY'
+import os
+import sys
+import yaml
+
+path, minimum, maximum, group = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    manifest = yaml.safe_load(stream)
+spec = manifest["spec"]
+spec["minRunners"] = int(minimum)
+spec["maxRunners"] = int(maximum)
+if group in ("__missing__", "Default"):
+    spec.pop("runnerGroup", None)
+else:
+    spec["runnerGroup"] = group
+    if "resources" not in spec["template"]["spec"] and os.environ.get("FIXTURE_TEMPLATE_DRIFT") != "automount":
+        spec["template"]["spec"]["automountServiceAccountToken"] = False
+print(yaml.safe_dump(manifest, sort_keys=False))
+PY
                 fi
                 return 0
             fi
@@ -733,6 +788,12 @@ PY
                 *" upgrade "*)
                     echo "helm $*" >> "$FIXTURE_MUTATION_LOG"
                     : > "$FIXTURE_HELM_UPDATED"
+                    for argument in "$@"; do
+                        case "$argument" in
+                            minRunners=*) printf '%s\n' "${argument#*=}" > "$FIXTURE_HELM_UPDATED_MIN" ;;
+                            maxRunners=*) printf '%s\n' "${argument#*=}" > "$FIXTURE_HELM_UPDATED_MAX" ;;
+                        esac
+                    done
                     if [[ " $* " == *"minRunners=0"* ]] && [[ " $* " == *"maxRunners=0"* ]]; then
                         : > "$FIXTURE_BOOTSTRAP_CREATED"
                     fi
@@ -744,32 +805,41 @@ PY
                 if [ "$FIXTURE_ROLLBACK_INVALID" = values ]; then
                     echo '{"minRunners":2,"maxRunners":4,"runnerGroup":"redducklabs-private-runners"}'
                 else
-                    local helm_max=$FIXTURE_HELM_MAX helm_group=$FIXTURE_HELM_GROUP reads
+                    local helm_min=2 helm_max=$FIXTURE_HELM_MAX helm_group=$FIXTURE_HELM_GROUP reads base_manifest
                     reads=$(wc -l < "$FIXTURE_HELM_VALUES_READ_COUNT")
                     echo read >> "$FIXTURE_HELM_VALUES_READ_COUNT"
                     if [[ " $* " == *" --revision "* ]]; then
                         helm_max=2
                         helm_group=$FIXTURE_REVISION_GROUP
                     elif [ -e "$FIXTURE_HELM_UPDATED" ]; then
-                        helm_max=2
+                        helm_min=$(cat "$FIXTURE_HELM_UPDATED_MIN")
+                        helm_max=$(cat "$FIXTURE_HELM_UPDATED_MAX")
                         helm_group=$FIXTURE_HELM_POST_GROUP
                     elif [ "$reads" -ge 1 ]; then
                         helm_group=$FIXTURE_SECOND_HELM_GROUP
                     fi
-                    python3 - "$FIXTURE_ROLLBACK_MANIFEST" "$helm_max" "$helm_group" <<'PY'
+                    base_manifest=$FIXTURE_ROLLBACK_MANIFEST
+                    if [ "${FIXTURE_FORCE_LEGACY:-false}" = true ] || [ "$FIXTURE_HELM_MAX" = 8 ] || [[ " $* " == *" --revision "* ]] \
+                      || [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
+                        base_manifest=$FIXTURE_LEGACY_MANIFEST
+                    fi
+                    python3 - "$base_manifest" "$helm_min" "$helm_max" "$helm_group" <<'PY'
 import json
+import os
 import sys
 import yaml
 
-path, maximum, group = sys.argv[1:]
+path, minimum, maximum, group = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     manifest = yaml.safe_load(stream)
 template = manifest["spec"]["template"]["spec"]
 template.pop("restartPolicy", None)
 template.pop("serviceAccountName", None)
-values = {"minRunners": 2, "maxRunners": int(maximum), "template": {"spec": template}}
-if group != "__missing__":
+values = {"minRunners": int(minimum), "maxRunners": int(maximum), "template": {"spec": template}}
+if group not in ("__missing__", "Default"):
     values["runnerGroup"] = group
+    if "resources" not in template and os.environ.get("FIXTURE_TEMPLATE_DRIFT") != "automount":
+        template["automountServiceAccountToken"] = False
 print(json.dumps(values))
 PY
                 fi
@@ -800,9 +870,13 @@ PY
                         count=$FIXTURE_POOL_RACE_COUNT
                         pool_id=$FIXTURE_SECOND_POOL_ID
                     fi
-                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"},"taints":[{"key":"github-runner","value":"%s","effect":"%s"}]}]\n' \
+                    local extra_label extra_taint
+                    extra_label=""; extra_taint=""
+                    [ "$FIXTURE_POOL_EXTRA_LABEL" = true ] && extra_label=',"unexpected":"value"'
+                    [ "$FIXTURE_POOL_EXTRA_TAINT" = true ] && extra_taint=',{"key":"unexpected","value":"true","effect":"NoSchedule"}'
+                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"%s},"taints":[{"key":"github-runner","value":"%s","effect":"%s"}%s]}]\n' \
                       "$pool_id" "$FIXTURE_POOL_MIN" "$max" "$count" "$FIXTURE_POOL_SIZE" \
-                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$FIXTURE_POOL_TAINT_VALUE" "$FIXTURE_POOL_TAINT_EFFECT" ; return 0 ;;
+                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$extra_label" "$FIXTURE_POOL_TAINT_VALUE" "$FIXTURE_POOL_TAINT_EFFECT" "$extra_taint" ; return 0 ;;
             esac
             return 0
         }
@@ -867,8 +941,11 @@ PY
                     echo read >> "$FIXTURE_NODE_READ_COUNT"
                     first_uid=fixture-node-a-uid
                     if [ "$node_reads" -ge 1 ]; then first_uid=$FIXTURE_SECOND_NODE_UID; fi
+                    local node_extra_taint
+                    node_extra_taint=""
+                    [ "$FIXTURE_NODE_EXTRA_BLOCKING_TAINT" = true ] && node_extra_taint=',{"key":"maintenance","value":"true","effect":"NoSchedule"}'
                     if [ "$FIXTURE_READY_NODES" = 2 ]; then
-                        printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}\n' "$first_uid"
+                        printf '{"items":[{"metadata":{"uid":"%s","labels":{"node-type":"github-runner","workload-type":"%s"}},"spec":{"providerID":"digitalocean://node-a","taints":[{"key":"github-runner","value":"%s","effect":"NoSchedule"}%s]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid","labels":{"node-type":"github-runner","workload-type":"%s"}},"spec":{"providerID":"digitalocean://node-b","taints":[{"key":"github-runner","value":"%s","effect":"NoSchedule"}%s]},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}\n' "$first_uid" "$FIXTURE_NODE_WORKLOAD_LABEL" "$FIXTURE_NODE_TAINT_VALUE" "$node_extra_taint" "$FIXTURE_NODE_WORKLOAD_LABEL" "$FIXTURE_NODE_TAINT_VALUE" "$node_extra_taint"
                     else
                         printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}\n' "$first_uid"
                     fi
@@ -876,19 +953,28 @@ PY
                     ;;
                 *" get pods "*) echo '{"items":[]}' ; return 0 ;;
                 *" get autoscalingrunnersets.actions.github.com "*)
-                    local asrs_reads asrs_group
+                    local asrs_reads asrs_group asrs_manifest
                     asrs_reads=$(wc -l < "$FIXTURE_ASRS_READ_COUNT")
                     echo read >> "$FIXTURE_ASRS_READ_COUNT"
                     asrs_group=redducklabs-private-runners
                     if [ "$asrs_reads" -ge 1 ]; then asrs_group=$FIXTURE_SECOND_ASRS_GROUP; fi
-                    python3 - "$FIXTURE_ROLLBACK_MANIFEST" "$asrs_group" <<'PY'
+                    asrs_manifest=$FIXTURE_ROLLBACK_MANIFEST
+                    if [ "${FIXTURE_FORCE_LEGACY:-false}" = true ] || [ "$FIXTURE_HELM_MAX" = 8 ] || [ "${FIXTURE_ROLLBACK_ACTIVE:-false}" = true ]; then
+                        asrs_manifest=$FIXTURE_LEGACY_MANIFEST
+                    fi
+                    python3 - "$asrs_manifest" "$asrs_group" "$([ -e "$FIXTURE_HELM_UPDATED" ] && cat "$FIXTURE_HELM_UPDATED_MIN" || echo 2)" "$([ -e "$FIXTURE_HELM_UPDATED" ] && cat "$FIXTURE_HELM_UPDATED_MAX" || echo "$FIXTURE_HELM_MAX")" <<'PY'
 import json
+import os
 import sys
 import yaml
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     manifest = yaml.safe_load(stream)
 manifest["spec"]["runnerGroup"] = sys.argv[2]
+manifest["spec"]["minRunners"] = int(sys.argv[3])
+manifest["spec"]["maxRunners"] = int(sys.argv[4])
+if "resources" not in manifest["spec"]["template"]["spec"] and os.environ.get("FIXTURE_TEMPLATE_DRIFT") != "automount":
+    manifest["spec"]["template"]["spec"]["automountServiceAccountToken"] = False
 print(json.dumps({"items": [manifest]}))
 PY
                     return 0
@@ -1014,7 +1100,7 @@ assert_scale_capacity_gate() {
     : > "$script"
     if ! materialize_workflow_step "$workflow" "$validation_step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
        || ! materialize_workflow_step "$workflow" "$capacity_step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
-       || ! materialize_workflow_token "$workflow" 'helm upgrade' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+       || ! materialize_workflow_token "$workflow" '--timeout 180s' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
         fail "Scale Runners has no executable capacity gate before Helm"
         return
     fi
@@ -2172,6 +2258,8 @@ PY
     sed -i 's/export ACTION=fixture/export ACTION=rollout-quiesce/' "$script"
     local original_max=$FIXTURE_POOL_MAX
     local case_max case_group
+    FIXTURE_FORCE_LEGACY=true
+    export FIXTURE_FORCE_LEGACY
     while IFS='|' read -r case_max case_group; do
         FIXTURE_POOL_MAX=$case_max
         FIXTURE_HELM_MAX=$case_max
@@ -2190,11 +2278,12 @@ PY
         fi
     done <<'CASES'
 8|Default
+8|__missing__
 2|redducklabs-private-runners
 CASES
 
     local invalid_group
-    for invalid_group in __missing__ arbitrary-runner-group; do
+    for invalid_group in arbitrary-runner-group; do
         FIXTURE_POOL_MAX=8
         FIXTURE_HELM_MAX=8
         FIXTURE_HELM_GROUP=$invalid_group
@@ -2225,6 +2314,7 @@ CASES
         pass "Rollout-quiesce rejects a rollback revision with non-private state"
     fi
 
+    unset FIXTURE_FORCE_LEGACY
     FIXTURE_POOL_MAX=$original_max FIXTURE_HELM_MAX=2
     unset FIXTURE_HELM_GROUP FIXTURE_HELM_POST_GROUP FIXTURE_REVISION_GROUP
 }
@@ -2795,6 +2885,195 @@ PY
     fi
 }
 
+assert_distinct_legacy_and_density_contracts() {
+    local legacy_values=test/fixtures/arc-legacy-isolated-values.yaml
+    local legacy_manifest="$FIXTURE_DIR/legacy-isolated-manifest.yaml"
+    local literal_default="$FIXTURE_DIR/legacy-literal-default.yaml"
+    local private_legacy="$FIXTURE_DIR/legacy-private-2x2.yaml"
+    python3 - "$legacy_values" "$literal_default" "$private_legacy" <<'PY'
+import copy
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    legacy = yaml.safe_load(stream)
+literal = copy.deepcopy(legacy)
+literal["runnerGroup"] = "Default"
+private = copy.deepcopy(legacy)
+private["minRunners"] = 2
+private["maxRunners"] = 2
+private["runnerGroup"] = "redducklabs-private-runners"
+private["template"]["spec"]["automountServiceAccountToken"] = False
+for path, value in ((sys.argv[2], literal), (sys.argv[3], private)):
+    with open(path, "w", encoding="utf-8") as stream:
+        yaml.safe_dump(value, stream, sort_keys=False)
+PY
+    if ! python -B scripts/validate-runner-isolation-contract.py \
+      --contract legacy-isolated --kind values --min-runners 2 --max-runners 8 \
+      --runner-group default < "$legacy_values"; then
+        fail "Validator rejects the real legacy Default 2/8 isolated values"
+    elif ! helm template redducklabs-runners "$CHART" \
+      --version "$CHART_VERSION" --kube-version "$KUBE_VERSION" \
+      -f "$legacy_values" --set githubConfigSecret.github_token=PLACEHOLDER \
+      --set controllerServiceAccount.name=arc-gha-rs-controller \
+      --set controllerServiceAccount.namespace=arc-systems > "$legacy_manifest" \
+      || ! python -B scripts/validate-runner-isolation-contract.py \
+        --contract legacy-isolated --kind manifest --min-runners 2 --max-runners 8 \
+        --runner-group default < "$legacy_manifest"; then
+        fail "Validator rejects the real rendered legacy Default contract"
+    else
+        pass "Validator accepts real legacy values with absent Default group semantics"
+    fi
+
+    if ! python -B scripts/validate-runner-isolation-contract.py \
+      --contract legacy-isolated --kind values --min-runners 2 --max-runners 8 \
+      --runner-group default < "$literal_default" \
+      || ! python -B scripts/validate-runner-isolation-contract.py \
+        --contract legacy-isolated --kind values --min-runners 2 --max-runners 2 \
+        --runner-group private < "$private_legacy"; then
+        fail "Validator rejects literal Default or private 2/2 legacy isolation semantics"
+    else
+        pass "Validator accepts literal Default and private 2/2 legacy isolation semantics"
+    fi
+
+    if python -B scripts/validate-runner-isolation-contract.py \
+      --contract density --kind values --min-runners 2 --max-runners 2 \
+      --runner-group private < "$private_legacy"; then
+        fail "Density validator accepts the legacy isolated template"
+    else
+        pass "Density and legacy isolation contracts are not conflated"
+    fi
+}
+
+assert_ordinary_scale_contract_guards() {
+    local step action drift script
+    while IFS='|' read -r step action drift; do
+        script="$FIXTURE_DIR/ordinary-${action}.sh"
+        : > "$script"
+        materialize_workflow_step .github/workflows/scale-runners.yml \
+          'Check current status' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+            fail "${action} prestate fixture could not be materialized"
+            continue
+          }
+        materialize_workflow_step .github/workflows/scale-runners.yml \
+          "$step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+            fail "${action} mutation fixture could not be materialized"
+            continue
+          }
+        sed -i "s/export ACTION=fixture/export ACTION=${action}/" "$script"
+        FIXTURE_TEMPLATE_DRIFT=$drift
+        export FIXTURE_TEMPLATE_DRIFT
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "${action} accepts unsafe ${drift} prestate"
+        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
+            fail "${action} reaches Helm with unsafe ${drift} prestate"
+        else
+            pass "${action} rejects unsafe ${drift} prestate before Helm"
+        fi
+    done <<'CASES'
+Scale up (default)|scale-up|token
+Scale down (minimal)|scale-down|host_namespace
+Scale to maximum|scale-max|placement
+Custom scaling|scale-custom|security
+CASES
+    unset FIXTURE_TEMPLATE_DRIFT
+
+    while IFS='|' read -r step action; do
+        script="$FIXTURE_DIR/ordinary-${action}-safe.sh"
+        : > "$script"
+        materialize_workflow_step .github/workflows/scale-runners.yml \
+          'Check current status' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
+        materialize_workflow_step .github/workflows/scale-runners.yml \
+          "$step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
+        materialize_workflow_step .github/workflows/scale-runners.yml \
+          'Verify scaling' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
+        sed -i "s/export ACTION=fixture/export ACTION=${action}/g" "$script"
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+          && grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
+            pass "${action} validates exact density prestate and result"
+        else
+            fail "${action} cannot complete exact density prestate/result validation"
+        fi
+    done <<'CASES'
+Scale up (default)|scale-up
+Scale down (minimal)|scale-down
+Scale to maximum|scale-max
+Custom scaling|scale-custom
+CASES
+
+    script="$FIXTURE_DIR/ordinary-result-drift.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/scale-runners.yml \
+      'Scale up (default)' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
+    materialize_workflow_step .github/workflows/scale-runners.yml \
+      'Verify scaling' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
+    sed -i 's/export ACTION=fixture/export ACTION=scale-up/g' "$script"
+    FIXTURE_TEMPLATE_DRIFT=extra
+    export FIXTURE_TEMPLATE_DRIFT
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Ordinary scale result validation accepts unsafe extra template state"
+    elif ! grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
+        fail "Ordinary scale result fixture did not reach its controlled Helm boundary"
+    else
+        pass "Ordinary scaling rejects unsafe result state after Helm readback"
+    fi
+    unset FIXTURE_TEMPLATE_DRIFT
+}
+
+assert_exact_provider_and_live_node_isolation() {
+    local script="$FIXTURE_DIR/exact-provider-node-isolation.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/node-pool-sizing.yml \
+      'Reduce pool maximum without node removal' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+        fail "Exact provider/node isolation fixture could not be materialized"
+        return
+      }
+    local label variable value
+    while IFS='|' read -r label variable value; do
+        printf -v "$variable" '%s' "$value"
+        export "$variable"
+        FIXTURE_POOL_MAX=8
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Node Pool Sizing accepts ${label}"
+        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
+            fail "Node Pool Sizing mutates after ${label}"
+        else
+            pass "Node Pool Sizing rejects ${label} before mutation"
+        fi
+        unset "$variable"
+    done <<'CASES'
+an extra provider label|FIXTURE_POOL_EXTRA_LABEL|true
+an extra provider taint|FIXTURE_POOL_EXTRA_TAINT|true
+a live node missing workload isolation|FIXTURE_NODE_WORKLOAD_LABEL|missing
+a live node with the wrong runner taint|FIXTURE_NODE_TAINT_VALUE|false
+a live node with an additional blocking taint|FIXTURE_NODE_EXTRA_BLOCKING_TAINT|true
+CASES
+    FIXTURE_POOL_MAX=2
+}
+
+assert_exact_deploy_namespace() {
+    local script="$FIXTURE_DIR/deploy-noncanonical-namespace.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+        fail "Deploy namespace fixture could not be materialized"
+        return
+      }
+    sed -i 's/export INPUT_NAMESPACE=arc-runners/export INPUT_NAMESPACE=other-runners/' "$script"
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts a noncanonical namespace that conflicts with Helm ownership checks"
+    elif [ -s "$FIXTURE_DIR/mutations" ]; then
+        fail "Deploy rejects a noncanonical namespace only after mutation"
+    else
+        pass "Deploy rejects a noncanonical namespace before mutation"
+    fi
+}
+
 assert_rollback_recovery_route() {
     local script="$FIXTURE_DIR/rollback-recovery-route.sh"
     : > "$script"
@@ -2946,7 +3225,7 @@ assert_live_capacity_drift_fails
 assert_scale_capacity_gate
 assert_scale_workflow_static_contract
 
-assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' 'helm upgrade' Helm '^helm upgrade .*gha-runner-scale-set'
+assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' '--timeout 180s' Helm '^helm upgrade .*gha-runner-scale-set'
 FIXTURE_POOL_MAX=8
 assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizing.yml 'Validate inputs against deploy/dind-values.yaml' 'node-pool update' doctl '^doctl kubernetes cluster node-pool update '
 FIXTURE_POOL_MAX=2
@@ -2975,6 +3254,10 @@ assert_deploy_unused_revision_cannot_route
 assert_absent_sa_bootstrap_contract
 assert_complete_isolation_and_pool_contracts
 assert_registry_temp_and_oidc_hardening
+assert_distinct_legacy_and_density_contracts
+assert_ordinary_scale_contract_guards
+assert_exact_provider_and_live_node_isolation
+assert_exact_deploy_namespace
 assert_rollback_recovery_route
 assert_rollback_ignores_deploy_only_inputs
 assert_final_workflow_graph_and_prerequisites

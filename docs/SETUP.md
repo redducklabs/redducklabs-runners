@@ -56,6 +56,10 @@ Helm operation enables the requested runner count after preflight succeeds.
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
 
+`arc-runners` is the only accepted runner namespace. Helm ownership annotations
+and prepared platform resources use that canonical namespace, so deploy and
+rollback input validation rejects any other value before mutation.
+
 ### Step 4: Monitor Deployment
 
 The reviewed workflow validates the expected SHA, reconciles the private runner
@@ -63,6 +67,10 @@ group, performs server-side dry-runs of the rendered `AutoscalingRunnerSet` and
 representative Pod, checks live node capacity, then deploys only when those
 gates pass. The `prepare-trust-boundary` operation performs the runner-group
 and public-workflow checks without Helm, Kubernetes, or DigitalOcean mutation.
+Ordinary scaling accepts only a pinned deployed chart in the private runner
+group whose Helm values, rendered ASRS, and live ASRS exactly match the current
+pod-level density contract. That complete contract is read back after scaling;
+legacy isolated values are accepted only by rollout-quiesce and rollback.
 
 ### Step 5: Manage Runners
 

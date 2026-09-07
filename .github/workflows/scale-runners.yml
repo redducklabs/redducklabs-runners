@@ -238,6 +238,7 @@ jobs:
       - name: Check current status
         id: current-status
         env:
+          ACTION: ${{ needs.validate-inputs.outputs.action }}
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "📊 Checking current runner status..."
@@ -264,6 +265,37 @@ jobs:
             echo "❌ Error: Invalid current values retrieved from Helm"
             exit 1
           fi
+
+          case "${ACTION}" in
+            scale-up|scale-down|scale-max|scale-custom)
+              RELEASES=$(helm list -n "${NAMESPACE}" -o json)
+              if ! jq -e --arg name "${RELEASE_NAME}" --arg version "${ARC_CHART_VERSION}" '
+                [.[] | select(.name == $name
+                  and .chart == ("gha-runner-scale-set-" + $version)
+                  and .status == "deployed")] | length == 1
+              ' <<<"${RELEASES}" >/dev/null; then
+                echo "❌ Error: ordinary scaling requires the pinned deployed runner chart"
+                exit 1
+              fi
+              validate_density() {
+                local kind=$1
+                python3 scripts/validate-runner-isolation-contract.py \
+                  --contract density --kind "${kind}" \
+                  --min-runners "${CURRENT_MIN}" --max-runners "${CURRENT_MAX}" \
+                  --runner-group private
+              }
+              validate_density values <<<"${VALUES_JSON}" || {
+                echo "❌ Error: ordinary scaling prestate violates the exact density contract"
+                exit 1
+              }
+              CURRENT_MANIFEST="${RUNNER_TEMP}/ordinary-scale-prestate.yaml"
+              helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${CURRENT_MANIFEST}"
+              validate_density manifest < "${CURRENT_MANIFEST}" || exit 1
+              CURRENT_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
+                -n "${NAMESPACE}" -o json)
+              validate_density asrs-list <<<"${CURRENT_ASRS}" || exit 1
+              ;;
+          esac
           
           echo "current_min=${CURRENT_MIN}" >> $GITHUB_OUTPUT
           echo "current_max=${CURRENT_MAX}" >> $GITHUB_OUTPUT
@@ -338,21 +370,19 @@ jobs:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           validate_isolated_values() {
-            local expected_max=$1 expected_group=$2 require_automount=$3
-            local automount_args=()
-            [ "${require_automount}" = true ] && automount_args+=(--require-automount)
+            local expected_max=$1 expected_group=$2
             python3 scripts/validate-runner-isolation-contract.py \
-              --kind values --max-runners "${expected_max}" \
-              --runner-group "${expected_group}" "${automount_args[@]}"
+              --contract legacy-isolated --kind values \
+              --min-runners 2 --max-runners "${expected_max}" \
+              --runner-group "${expected_group}"
           }
 
           validate_isolated_manifest() {
-            local manifest=$1 expected_max=$2 expected_group=$3 require_automount=$4
-            local automount_args=()
-            [ "${require_automount}" = true ] && automount_args+=(--require-automount)
+            local manifest=$1 expected_max=$2 expected_group=$3
             python3 scripts/validate-runner-isolation-contract.py \
-              --kind manifest --max-runners "${expected_max}" \
-              --runner-group "${expected_group}" "${automount_args[@]}" \
+              --contract legacy-isolated --kind manifest \
+              --min-runners 2 --max-runners "${expected_max}" \
+              --runner-group "${expected_group}" \
               < "${manifest}"
           }
 
@@ -368,28 +398,28 @@ jobs:
 
           PRE_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
           PRE_MAX=$(jq -r '.maxRunners // empty' <<<"${PRE_VALUES}")
-          PRE_GROUP=$(jq -r '.runnerGroup // empty' <<<"${PRE_VALUES}")
+          PRE_GROUP=$(jq -r '.runnerGroup // "Default"' <<<"${PRE_VALUES}")
           case "${PRE_MAX}:${PRE_GROUP}" in
             8:Default)
-              PRE_AUTOMOUNT_REQUIRED=false
+              PRE_CONTRACT_GROUP=default
               ;;
             2:redducklabs-private-runners)
-              PRE_AUTOMOUNT_REQUIRED=true
+              PRE_CONTRACT_GROUP=private
               ;;
             *)
               echo "❌ Error: pre-quiesce release must be legacy Default 2/8 or private 2/2; found 2/${PRE_MAX} group='${PRE_GROUP}'"
               exit 1
               ;;
           esac
-          if ! validate_isolated_values "${PRE_MAX}" "${PRE_GROUP}" \
-            "${PRE_AUTOMOUNT_REQUIRED}" <<<"${PRE_VALUES}"; then
+          if ! validate_isolated_values "${PRE_MAX}" "${PRE_CONTRACT_GROUP}" \
+            <<<"${PRE_VALUES}"; then
             echo "❌ Error: pre-quiesce release is not the recognized isolated 2/${PRE_MAX}, 5Gi+5Gi ${PRE_GROUP} template"
             exit 1
           fi
           PRE_MANIFEST="${RUNNER_TEMP}/pre-quiesce-manifest.yaml"
           helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${PRE_MANIFEST}"
           validate_isolated_manifest "${PRE_MANIFEST}" "${PRE_MAX}" \
-            "${PRE_GROUP}" "${PRE_AUTOMOUNT_REQUIRED}"
+            "${PRE_CONTRACT_GROUP}"
 
           helm upgrade "${RELEASE_NAME}" \
             oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
@@ -422,19 +452,19 @@ jobs:
           fi
 
           POST_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! validate_isolated_values 2 redducklabs-private-runners true <<<"${POST_VALUES}"; then
+          if ! validate_isolated_values 2 private <<<"${POST_VALUES}"; then
             echo "❌ Error: quiesced release values do not preserve the rollback template"
             exit 1
           fi
           POST_MANIFEST="${RUNNER_TEMP}/post-quiesce-manifest.yaml"
           helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${POST_MANIFEST}"
           validate_isolated_manifest "${POST_MANIFEST}" 2 \
-            redducklabs-private-runners true
+            private
           LIVE_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
             -n "${NAMESPACE}" -o json)
           if ! python3 scripts/validate-runner-isolation-contract.py \
-            --kind asrs-list --max-runners 2 \
-            --runner-group redducklabs-private-runners --require-automount \
+            --contract legacy-isolated --kind asrs-list \
+            --min-runners 2 --max-runners 2 --runner-group private \
             <<<"${LIVE_ASRS}"; then
             echo "❌ Error: live quiesced AutoscalingRunnerSet is not exact private 2/2 isolated state"
             exit 1
@@ -450,7 +480,7 @@ jobs:
           fi
           REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
             -n "${NAMESPACE}" -o json)
-          if ! validate_isolated_values 2 redducklabs-private-runners true \
+          if ! validate_isolated_values 2 private \
             <<<"${REVISION_VALUES}"; then
             echo "❌ Error: rollback revision values are not exact private 2/2 isolated state"
             exit 1
@@ -459,7 +489,7 @@ jobs:
           helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
             -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
           validate_isolated_manifest "${REVISION_MANIFEST}" 2 \
-            redducklabs-private-runners true
+            private
           echo "rollback_revision=${REVISION}" >> "${GITHUB_OUTPUT}"
           {
             echo "## Rollout quiesced"
@@ -661,31 +691,48 @@ jobs:
                 if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "4" ]; then
                   echo "✅ Scale up verified"
                 else
-                  echo "⚠️ Scale up may not have applied correctly"
+                  echo "❌ Scale up did not apply correctly"; exit 1
                 fi
                 ;;
               scale-down)
                 if [ "${NEW_MIN}" = "0" ] && [ "${NEW_MAX}" = "1" ]; then
                   echo "✅ Scale down verified"
                 else
-                  echo "⚠️ Scale down may not have applied correctly"
+                  echo "❌ Scale down did not apply correctly"; exit 1
                 fi
                 ;;
               scale-max)
                 if [ "${NEW_MIN}" = "4" ] && [ "${NEW_MAX}" = "4" ]; then
                   echo "✅ Scale to maximum verified"
                 else
-                  echo "⚠️ Scale to maximum may not have applied correctly"
+                  echo "❌ Scale to maximum did not apply correctly"; exit 1
                 fi
                 ;;
               scale-custom)
                 if [ "${NEW_MIN}" = "${MIN_RUNNERS}" ] && [ "${NEW_MAX}" = "${MAX_RUNNERS}" ]; then
                   echo "✅ Custom scaling verified"
                 else
-                  echo "⚠️ Custom scaling may not have applied correctly"
+                  echo "❌ Custom scaling did not apply correctly"; exit 1
                 fi
                 ;;
             esac
+            if [ "${ACTION}" != "rollout-quiesce" ]; then
+              validate_density_result() {
+                local kind=$1
+                python3 scripts/validate-runner-isolation-contract.py \
+                  --contract density --kind "${kind}" \
+                  --min-runners "${NEW_MIN}" --max-runners "${NEW_MAX}" \
+                  --runner-group private
+              }
+              validate_density_result values <<<"${NEW_VALUES}" || exit 1
+              NEW_MANIFEST="${RUNNER_TEMP}/ordinary-scale-result.yaml"
+              helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${NEW_MANIFEST}"
+              validate_density_result manifest < "${NEW_MANIFEST}" || exit 1
+              NEW_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
+                -n "${NAMESPACE}" -o json)
+              validate_density_result asrs-list <<<"${NEW_ASRS}" || exit 1
+            fi
           else
-            echo "⚠️ Could not verify new configuration"
+            echo "❌ Could not verify new configuration"
+            exit 1
           fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the complete private-runner ARC isolation contract."""
+"""Validate explicit legacy-isolated and density ARC runner contracts."""
 
 import argparse
 import json
@@ -8,7 +8,7 @@ import sys
 import yaml
 
 
-def expected_template(rendered: bool, require_automount: bool) -> dict:
+def common_template(rendered: bool) -> dict:
     template = {
         "imagePullSecrets": [{"name": "do-registry-secret"}],
         "nodeSelector": {"node-type": "github-runner"},
@@ -20,10 +20,6 @@ def expected_template(rendered: bool, require_automount: bool) -> dict:
                 "value": "true",
             }
         ],
-        "resources": {
-            "requests": {"cpu": "3", "memory": "5Gi"},
-            "limits": {"memory": "6Gi"},
-        },
         "initContainers": [
             {
                 "args": ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"],
@@ -89,7 +85,34 @@ def expected_template(rendered: bool, require_automount: bool) -> dict:
     if rendered:
         template["restartPolicy"] = "Never"
         template["serviceAccountName"] = "redducklabs-runners-gha-rs-no-permission"
-    if require_automount:
+    return template
+
+
+def density_template(rendered: bool) -> dict:
+    template = common_template(rendered)
+    template["resources"] = {
+        "requests": {"cpu": "3", "memory": "5Gi"},
+        "limits": {"memory": "6Gi"},
+    }
+    template["automountServiceAccountToken"] = False
+    return template
+
+
+def legacy_isolated_template(rendered: bool, private: bool) -> dict:
+    template = common_template(rendered)
+    by_name = {
+        item["name"]: item
+        for item in template["containers"] + template["initContainers"]
+    }
+    by_name["runner"]["resources"] = {
+        "requests": {"cpu": "2", "memory": "5Gi"},
+        "limits": {"memory": "10Gi"},
+    }
+    by_name["dind"]["resources"] = {
+        "requests": {"cpu": "1", "memory": "5Gi"},
+        "limits": {"memory": "10Gi"},
+    }
+    if private:
         template["automountServiceAccountToken"] = False
     return template
 
@@ -119,23 +142,43 @@ def parse_input(kind: str) -> tuple[dict, bool]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--contract", choices=("legacy-isolated", "density"), required=True
+    )
+    parser.add_argument(
         "--kind", choices=("values", "manifest", "asrs-list"), required=True
     )
-    parser.add_argument("--max-runners", type=int, choices=(2, 8), required=True)
+    parser.add_argument("--min-runners", type=int, required=True)
+    parser.add_argument("--max-runners", type=int, required=True)
     parser.add_argument(
         "--runner-group",
-        choices=("Default", "redducklabs-private-runners"),
+        choices=("default", "private"),
         required=True,
     )
-    parser.add_argument("--require-automount", action="store_true")
     args = parser.parse_args()
 
     try:
         state, rendered = parse_input(args.kind)
-        if state.get("minRunners") != 2 or state.get("maxRunners") != args.max_runners:
+        if (
+            state.get("minRunners") != args.min_runners
+            or state.get("maxRunners") != args.max_runners
+        ):
             raise ValueError("runner bounds do not match")
-        if state.get("runnerGroup", "Default") != args.runner_group:
+        if args.runner_group == "default":
+            if state.get("runnerGroup", "Default") != "Default":
+                raise ValueError("runner group does not match Default semantics")
+        elif state.get("runnerGroup") != "redducklabs-private-runners":
             raise ValueError("runner group does not match")
+        private = args.runner_group == "private"
+        if args.contract == "density":
+            if not private or not (
+                0 <= args.min_runners <= args.max_runners <= 4 and args.max_runners >= 1
+            ):
+                raise ValueError("density bounds/group are not permitted")
+        elif (args.min_runners, args.max_runners, args.runner_group) not in (
+            (2, 8, "default"),
+            (2, 2, "private"),
+        ):
+            raise ValueError("legacy isolation bounds/group are not permitted")
         if rendered:
             if state.get("runnerScaleSetName") != "redducklabs-runners":
                 raise ValueError("runner scale-set name does not match")
@@ -147,12 +190,11 @@ def main() -> int:
             ):
                 raise ValueError("GitHub configuration secret does not match")
         template = state.get("template", {}).get("spec")
-        expected = expected_template(rendered, args.require_automount)
-        if not args.require_automount and isinstance(template, dict):
-            if template.get("automountServiceAccountToken") is False:
-                expected["automountServiceAccountToken"] = False
-            elif "automountServiceAccountToken" in template:
-                raise ValueError("legacy automount value is unsafe")
+        expected = (
+            density_template(rendered)
+            if args.contract == "density"
+            else legacy_isolated_template(rendered, private)
+        )
         if template != expected:
             raise ValueError("security/resource/placement template is not exact")
     except (
