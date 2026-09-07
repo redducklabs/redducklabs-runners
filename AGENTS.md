@@ -46,3 +46,7 @@ Codex-specific adapter rules:
   call fails argument parsing, resend it with valid `task_name`, `fork_turns`,
   `model`, `reasoning_effort`, and `message` fields; parsing failures do not
   create an agent or change repository state.
+- Offline ARC scale-set rendering requires placeholder GitHub credentials and
+  explicit controller service-account values. Use the full `helm template`
+  invocation from `test/verify-runner-resources.sh`; omitting those values makes
+  the chart attempt live controller discovery and fail before kubeconform runs.
