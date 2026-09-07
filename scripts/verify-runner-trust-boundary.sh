@@ -177,7 +177,7 @@ for job_name, job in jobs.items():
     if any("${{" in selector for selector in selectors):
         print(f"dynamic runs-on expression in job {job_name}")
         raise SystemExit(2)
-    if any(selector.strip() == forbidden_label for selector in selectors):
+    if any(selector.strip().casefold() == forbidden_label.casefold() for selector in selectors):
         print(f"forbidden runner label {forbidden_label} in job {job_name}")
         raise SystemExit(2)
 PY

@@ -88,6 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       operation: ${{ steps.validate.outputs.operation }}
+      expected_sha: ${{ steps.validate.outputs.expected_sha }}
       rollback_revision: ${{ steps.validate.outputs.rollback_revision }}
       min_runners: ${{ steps.validate.outputs.min_runners }}
       max_runners: ${{ steps.validate.outputs.max_runners }}
@@ -100,18 +101,27 @@ jobs:
 
       - name: Validate and sanitize inputs
         id: validate
+        env:
+          INPUT_MIN_RUNNERS: ${{ inputs.min_runners }}
+          INPUT_MAX_RUNNERS: ${{ inputs.max_runners }}
+          INPUT_NAMESPACE: ${{ inputs.namespace }}
+          INPUT_RUNNER_IMAGE: ${{ inputs.runner_image }}
+          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+          INPUT_ACCEPT_CO_TENANCY: ${{ inputs.accept_privileged_runner_co_tenancy }}
+          INPUT_ROLLBACK_REVISION: ${{ inputs.rollback_revision }}
         run: |
           echo "🔍 Validating deployment inputs..."
           
           # Validate numeric inputs
-          MIN_RUNNERS="${{ github.event.inputs.min_runners }}"
-          MAX_RUNNERS="${{ github.event.inputs.max_runners }}"
-          NAMESPACE="${{ github.event.inputs.namespace }}"
-          RUNNER_IMAGE="${{ github.event.inputs.runner_image }}"
-          EXPECTED_SHA="${{ github.event.inputs.expected_sha }}"
-          OPERATION="${{ github.event.inputs.operation }}"
-          ACCEPT_CO_TENANCY="${{ github.event.inputs.accept_privileged_runner_co_tenancy }}"
-          ROLLBACK_REVISION="${{ github.event.inputs.rollback_revision }}"
+          MIN_RUNNERS="${INPUT_MIN_RUNNERS}"
+          MAX_RUNNERS="${INPUT_MAX_RUNNERS}"
+          NAMESPACE="${INPUT_NAMESPACE}"
+          RUNNER_IMAGE="${INPUT_RUNNER_IMAGE}"
+          EXPECTED_SHA="${INPUT_EXPECTED_SHA}"
+          OPERATION="${INPUT_OPERATION}"
+          ACCEPT_CO_TENANCY="${INPUT_ACCEPT_CO_TENANCY}"
+          ROLLBACK_REVISION="${INPUT_ROLLBACK_REVISION}"
 
           ACTUAL_SHA=$(git rev-parse HEAD)
           if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -179,6 +189,7 @@ jobs:
           
           # Set validated outputs
           echo "operation=${OPERATION}" >> $GITHUB_OUTPUT
+          echo "expected_sha=${EXPECTED_SHA}" >> $GITHUB_OUTPUT
           echo "rollback_revision=${ROLLBACK_REVISION}" >> $GITHUB_OUTPUT
           echo "min_runners=${MIN_RUNNERS}" >> $GITHUB_OUTPUT
           echo "max_runners=${MAX_RUNNERS}" >> $GITHUB_OUTPUT
@@ -204,6 +215,7 @@ jobs:
       - name: Reconcile trusted runner group
         env:
           GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
         run: |
           # GitHub runner-group endpoint used by the verifier:
           # orgs/redducklabs/actions/runner-groups
@@ -212,7 +224,7 @@ jobs:
             exit 1
           fi
           bash scripts/verify-runner-trust-boundary.sh \
-            --expected-sha "${{ github.event.inputs.expected_sha }}"
+            --expected-sha "${EXPECTED_SHA}"
 
   deploy:
     name: Deploy Self-Hosted Runners
@@ -259,11 +271,13 @@ jobs:
           done
       
       - name: Configure DigitalOcean access
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
           echo "🔧 Configuring DigitalOcean access..."
           
           # Validate DO_TOKEN
-          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+          if [ -z "${DO_TOKEN}" ]; then
             echo "❌ Error: DO_TOKEN secret is not set!"
             exit 1
           fi
@@ -271,7 +285,7 @@ jobs:
           # Initialize doctl with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring doctl..."
-            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+            if doctl auth init --access-token "${DO_TOKEN}"; then
               echo "✅ DigitalOcean authentication configured"
               break
             elif [ "${attempt}" = "3" ]; then
@@ -303,10 +317,11 @@ jobs:
           done
       
       - name: Check node pool capacity
+        env:
+          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
+          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
         run: |
           echo "📐 Checking node pool capacity against requested runner count..."
-          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
-          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
           POOL_NAME="github-runners-pool-16g"
 
           PODS_PER_NODE=2
@@ -360,12 +375,14 @@ jobs:
 
       - name: Render and preflight candidate
         if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
+          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
+          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
           echo "🔬 Rendering and validating the exact deployment candidate..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
-          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
-          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
-          RUNNER_IMAGE="${{ needs.validate-inputs.outputs.runner_image }}"
           CANDIDATE="${RUNNER_TEMP}/runner-candidate.yaml"
           ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
           ADMITTED_ASRS="${RUNNER_TEMP}/runner-admitted-asrs.json"
@@ -373,19 +390,41 @@ jobs:
           ADMITTED_POD="${RUNNER_TEMP}/runner-admitted-pod.json"
           NODES_JSON="${RUNNER_TEMP}/runner-nodes.json"
           PODS_JSON="${RUNNER_TEMP}/all-pods.json"
+          CANDIDATE_HASH="${RUNNER_TEMP}/runner-candidate.sha256"
+          HASH_GATE="${RUNNER_TEMP}/runner-candidate-hash-gate.sh"
           umask 077
 
           helm template "${RELEASE_NAME}" \
             oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
             --namespace "${NAMESPACE}" \
             --values deploy/dind-values.yaml \
-            --set githubConfigSecret.github_token="${{ secrets.RUNNER_TOKEN }}" \
+            --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
             --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
             --set minRunners="${MIN_RUNNERS}" \
             --set maxRunners="${MAX_RUNNERS}" \
             --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
+            --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
             --set runnerGroup=redducklabs-private-runners \
+            --set controllerServiceAccount.name=arc-gha-rs-controller \
+            --set controllerServiceAccount.namespace=arc-systems \
             --version "${ARC_CHART_VERSION}" > "${CANDIDATE}"
+
+          sha256sum "${CANDIDATE}" | awk '{print $1}' > "${CANDIDATE_HASH}"
+          cat > "${HASH_GATE}" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          INPUT=$(mktemp "${RUNNER_TEMP}/helm-postrender.XXXXXX")
+          trap 'rm -f "${INPUT}"' EXIT
+          cat > "${INPUT}"
+          EXPECTED=$(cat "${RUNNER_TEMP}/runner-candidate.sha256")
+          ACTUAL=$(sha256sum "${INPUT}" | awk '{print $1}')
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "ERROR: candidate manifest hash mismatch: expected ${EXPECTED}, got ${ACTUAL}" >&2
+            exit 1
+          fi
+          cat "${INPUT}"
+          SH
+          chmod 0700 "${HASH_GATE}"
 
           python3 - "${CANDIDATE}" "${ASRS}" <<'PY'
           import sys
@@ -426,15 +465,56 @@ jobs:
 
           kubectl apply --server-side --dry-run=server -f "${REPRESENTATIVE_POD}" -o json > "${ADMITTED_POD}"
 
-          python3 - "${ADMITTED_ASRS}" "${ADMITTED_POD}" <<'PY'
+          python3 - "${ADMITTED_ASRS}" "${ADMITTED_POD}" "${RUNNER_IMAGE}" <<'PY'
           import json
+          import re
           import sys
 
           def load(path):
               with open(path, encoding="utf-8") as stream:
                   return json.load(stream)
 
-          asrs, pod = map(load, sys.argv[1:])
+          asrs = load(sys.argv[1])
+          pod = load(sys.argv[2])
+          runner_image = sys.argv[3]
+          if asrs.get("spec", {}).get("runnerGroup") != "redducklabs-private-runners":
+              raise SystemExit("admission changed the named private runner group")
+          if asrs.get("spec", {}).get("runnerScaleSetName") != "redducklabs-runners":
+              raise SystemExit("admission changed the runner scale-set name")
+
+          required_toleration = {
+              "key": "github-runner", "operator": "Equal",
+              "value": "true", "effect": "NoSchedule",
+          }
+          default_toleration_keys = {
+              "node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable",
+          }
+
+          def validate_tolerations(items):
+              if required_toleration not in items:
+                  raise SystemExit("admission changed the dedicated-node toleration")
+              for item in items:
+                  if item == required_toleration:
+                      continue
+                  if not (
+                      item.get("key") in default_toleration_keys
+                      and item.get("operator") == "Exists"
+                      and item.get("effect") == "NoExecute"
+                      and item.get("tolerationSeconds") == 300
+                  ):
+                      raise SystemExit("admission injected an unexpected toleration")
+
+          def validate_mounts(container, expected):
+              actual = {(item.get("name"), item.get("mountPath"))
+                        for item in container.get("volumeMounts", [])}
+              if not expected.issubset(actual):
+                  raise SystemExit(f"admission changed volume wiring for {container.get('name')}")
+              extras = actual - expected
+              for name, path in extras:
+                  if not (re.fullmatch(r"kube-api-access-[a-z0-9]+", name or "")
+                          and path == "/var/run/secrets/kubernetes.io/serviceaccount"):
+                      raise SystemExit(f"admission injected an unexpected mount for {container.get('name')}")
+
           specs = [asrs["spec"]["template"]["spec"], pod["spec"]]
           for spec in specs:
               resources = spec.get("resources", {})
@@ -442,20 +522,90 @@ jobs:
                   raise SystemExit("admission changed the pod-level requests")
               if resources.get("limits") != {"memory": "6Gi"}:
                   raise SystemExit("admission changed the pod-level limits")
-              containers = list(spec.get("containers", [])) + list(spec.get("initContainers", []))
+              if spec.get("nodeSelector") != {"node-type": "github-runner"}:
+                  raise SystemExit("admission changed the dedicated runner node selector")
+              validate_tolerations(spec.get("tolerations", []))
+              if spec.get("restartPolicy") != "Never":
+                  raise SystemExit("admission changed the Pod restart policy")
+              if spec.get("serviceAccountName") != "redducklabs-runners-gha-rs-no-permission":
+                  raise SystemExit("admission changed the no-permission runner service account")
+              if spec.get("imagePullSecrets") != [{"name": "do-registry-secret"}]:
+                  raise SystemExit("admission changed the private registry pull secret")
+
+              app_containers = spec.get("containers", [])
+              init_containers = spec.get("initContainers", [])
+              if [item.get("name") for item in app_containers] != ["runner"]:
+                  raise SystemExit("admission changed the exact runner container set")
+              if [item.get("name") for item in init_containers] != ["init-dind-externals", "dind"]:
+                  raise SystemExit("admission changed the exact init/native-sidecar set")
+              containers = list(app_containers) + list(init_containers)
               by_name = {container.get("name"): container for container in containers}
               for name in ("runner", "dind"):
-                  if name not in by_name:
-                      raise SystemExit(f"admission removed required container {name}")
                   budget = by_name[name].get("resources") or {}
                   if budget.get("requests") or budget.get("limits"):
                       raise SystemExit(f"admission injected a competing {name} resource budget")
+
+              runner = by_name["runner"]
+              dind = by_name["dind"]
+              externals = by_name["init-dind-externals"]
+              if runner.get("image") != runner_image or externals.get("image") != runner_image:
+                  raise SystemExit("admission changed the pinned runner image")
+              if dind.get("image") != "docker:29.7.2-dind":
+                  raise SystemExit("admission changed the pinned DinD image")
+              if dind.get("securityContext", {}).get("privileged") is not True:
+                  raise SystemExit("admission removed the accepted privileged DinD setting")
+              if runner.get("securityContext") != {
+                  "runAsUser": 1001, "runAsGroup": 121,
+                  "allowPrivilegeEscalation": True, "readOnlyRootFilesystem": False,
+              }:
+                  raise SystemExit("admission changed the runner security context")
               if by_name["dind"].get("restartPolicy") != "Always":
                   raise SystemExit("admission removed native-sidecar restartPolicy")
+              if runner.get("command") != ["/home/runner/run.sh"]:
+                  raise SystemExit("admission changed the runner entrypoint")
+              if {(item.get("name"), item.get("value")) for item in runner.get("env", [])} != {
+                  ("DOCKER_HOST", "unix:///var/run/docker.sock"),
+                  ("RUNNER_WAIT_FOR_DOCKER_IN_SECONDS", "120"),
+              }:
+                  raise SystemExit("admission changed runner/DinD coordination")
+              if dind.get("args") != [
+                  "dockerd", "--host=unix:///var/run/docker.sock", "--group=$(DOCKER_GROUP_GID)",
+              ]:
+                  raise SystemExit("admission changed the DinD socket/group arguments")
+              if dind.get("env") != [{"name": "DOCKER_GROUP_GID", "value": "123"}]:
+                  raise SystemExit("admission changed the DinD group identity")
+
+              validate_mounts(runner, {("work", "/home/runner/_work"), ("dind-sock", "/var/run")})
+              validate_mounts(dind, {
+                  ("work", "/home/runner/_work"), ("dind-sock", "/var/run"),
+                  ("dind-externals", "/home/runner/externals"),
+              })
+              validate_mounts(externals, {("dind-externals", "/home/runner/tmpDir")})
+              volumes = spec.get("volumes", [])
+              expected_volumes = {"work", "dind-sock", "dind-externals"}
+              for volume in volumes:
+                  name = volume.get("name")
+                  if name in expected_volumes:
+                      if volume.get("emptyDir") != {}:
+                          raise SystemExit(f"admission changed emptyDir volume {name}")
+                  elif not (re.fullmatch(r"kube-api-access-[a-z0-9]+", name or "")
+                            and "projected" in volume):
+                      raise SystemExit("admission injected an unexpected volume")
+              if not expected_volumes.issubset({item.get("name") for item in volumes}):
+                  raise SystemExit("admission removed required runner/DinD volumes")
+          if pod.get("metadata", {}).get("labels", {}).get(
+              "actions.github.com/scale-set-name"
+          ) != "redducklabs-runners":
+              raise SystemExit("admission changed the representative Pod scale-set label")
           PY
 
-          SERVER_MINOR=$(kubectl version -o json | jq -r '.serverVersion.minor' | sed 's/[^0-9].*$//')
-          if ! [[ "${SERVER_MINOR}" =~ ^[0-9]+$ ]] || [ "${SERVER_MINOR}" -lt 36 ]; then
+          SERVER_VERSION=$(kubectl version -o json)
+          SERVER_MAJOR=$(jq -r '.serverVersion.major' <<<"${SERVER_VERSION}" | sed 's/[^0-9].*$//')
+          SERVER_MINOR=$(jq -r '.serverVersion.minor' <<<"${SERVER_VERSION}" | sed 's/[^0-9].*$//')
+          if ! [[ "${SERVER_MAJOR}" =~ ^[0-9]+$ ]] \
+             || ! [[ "${SERVER_MINOR}" =~ ^[0-9]+$ ]] \
+             || [ "${SERVER_MAJOR}" -lt 1 ] \
+             || { [ "${SERVER_MAJOR}" -eq 1 ] && [ "${SERVER_MINOR}" -lt 36 ]; }; then
             echo "❌ Error: Kubernetes API server 1.36 or newer is required"
             exit 1
           fi
@@ -464,8 +614,10 @@ jobs:
           kubectl get pods -A -o json > "${PODS_JSON}"
           python3 - "${ADMITTED_POD}" "${NODES_JSON}" "${PODS_JSON}" "${RELEASE_NAME}" <<'PY'
           import json
+          import math
           import re
           import sys
+          from decimal import Decimal
 
           admitted_path, nodes_path, pods_path, release = sys.argv[1:]
           with open(admitted_path, encoding="utf-8") as stream:
@@ -477,7 +629,15 @@ jobs:
 
           def cpu_m(value):
               value = str(value or "0")
-              return int(value[:-1]) if value.endswith("m") else int(float(value) * 1000)
+              if value.endswith("n"):
+                  milli = Decimal(value[:-1]) / Decimal(1_000_000)
+              elif value.endswith("u"):
+                  milli = Decimal(value[:-1]) / Decimal(1_000)
+              elif value.endswith("m"):
+                  milli = Decimal(value[:-1])
+              else:
+                  milli = Decimal(value) * Decimal(1000)
+              return math.ceil(milli)
 
           def memory_mi(value):
               value = str(value or "0")
@@ -490,7 +650,7 @@ jobs:
                          "Ki": 1 / 1024, "M": 1000**2 / 1024**2, "Mi": 1,
                          "G": 1000**3 / 1024**2, "Gi": 1024,
                          "T": 1000**4 / 1024**2, "Ti": 1024**2}
-              return int(amount * factors[unit])
+              return math.ceil(amount * factors[unit])
 
           def requests(pod):
               spec = pod.get("spec", {})
@@ -557,28 +717,91 @@ jobs:
         if: needs.validate-inputs.outputs.operation == 'rollback'
         env:
           GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
         run: |
-          EXPECTED_SHA="${{ github.event.inputs.expected_sha }}"
           ACTUAL_SHA=$(git rev-parse HEAD)
           if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
             echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
             exit 1
           fi
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
-          REVISION="${{ needs.validate-inputs.outputs.rollback_revision }}"
+
+          validate_rollback_values() {
+            jq -e '
+              .minRunners == 2 and .maxRunners == 2
+              and .runnerGroup == "redducklabs-private-runners"
+              and ([.template.spec.containers[]? | select(.name=="runner")
+                    | .resources.requests.memory] == ["5Gi"])
+              and ([.template.spec.initContainers[]? | select(.name=="dind")
+                    | .resources.requests.memory] == ["5Gi"])
+            ' >/dev/null
+          }
+
+          validate_rollback_manifest() {
+            python3 - "$1" <<'PY'
+          import sys
+          import yaml
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              matches = [doc for doc in yaml.safe_load_all(stream)
+                         if isinstance(doc, dict) and doc.get("kind") == "AutoscalingRunnerSet"]
+          if len(matches) != 1:
+              raise SystemExit("rollback manifest must contain exactly one AutoscalingRunnerSet")
+          spec = matches[0].get("spec", {})
+          if spec.get("minRunners") != 2 or spec.get("maxRunners") != 2:
+              raise SystemExit("rollback manifest runner bounds are not 2/2")
+          if spec.get("runnerGroup") != "redducklabs-private-runners":
+              raise SystemExit("rollback manifest runner group is not private")
+          pod = spec.get("template", {}).get("spec", {})
+          runners = [item for item in pod.get("containers", []) if item.get("name") == "runner"]
+          dinds = [item for item in pod.get("initContainers", []) if item.get("name") == "dind"]
+          if len(runners) != 1 or len(dinds) != 1:
+              raise SystemExit("rollback manifest runner/DinD template is incomplete")
+          if runners[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
+              raise SystemExit("rollback manifest runner request is not 5Gi")
+          if dinds[0].get("resources", {}).get("requests", {}).get("memory") != "5Gi":
+              raise SystemExit("rollback manifest DinD request is not 5Gi")
+          PY
+          }
+
+          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
+          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
+            [.[] | select(
+              (.revision | tostring) == $revision
+              and .chart == ("gha-runner-scale-set-" + $version)
+              and (.status == "deployed" or .status == "superseded"))] | length == 1
+          ' <<<"${HISTORY}" >/dev/null; then
+            echo "❌ Error: rollback revision is missing, not chart ${ARC_CHART_VERSION}, or not deployable"
+            exit 1
+          fi
+
+          REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
+            -n "${NAMESPACE}" -o json)
+          if ! validate_rollback_values <<<"${REVISION_VALUES}"; then
+            echo "❌ Error: rollback revision values do not preserve 2/2 bounds, private group, and 5Gi+5Gi requests"
+            exit 1
+          fi
+          REVISION_MANIFEST="${RUNNER_TEMP}/rollback-revision-manifest.yaml"
+          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
+            -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
+          if ! validate_rollback_manifest "${REVISION_MANIFEST}"; then
+            echo "❌ Error: rollback revision manifest does not preserve the isolated runner template"
+            exit 1
+          fi
+
           helm rollback "${RELEASE_NAME}" "${REVISION}" \
             --namespace "${NAMESPACE}" --wait --timeout 300s
 
           RESTORED=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! jq -e '
-            .minRunners == 2 and .maxRunners == 2
-            and .runnerGroup == "redducklabs-private-runners"
-            and ([.template.spec.containers[]? | select(.name=="runner")
-                  | .resources.requests.memory] == ["5Gi"])
-            and ([.template.spec.initContainers[]? | select(.name=="dind")
-                  | .resources.requests.memory] == ["5Gi"])
-          ' <<<"${RESTORED}" >/dev/null; then
+          if ! validate_rollback_values <<<"${RESTORED}"; then
             echo "❌ Error: rollback revision does not restore the isolated 5Gi+5Gi, 2/2 private-group configuration"
+            exit 1
+          fi
+          RESTORED_MANIFEST="${RUNNER_TEMP}/rollback-restored-manifest.yaml"
+          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${RESTORED_MANIFEST}"
+          if ! validate_rollback_manifest "${RESTORED_MANIFEST}"; then
+            echo "❌ Error: rollback live manifest readback does not restore the isolated runner template"
             exit 1
           fi
           bash scripts/verify-runner-trust-boundary.sh \
@@ -587,9 +810,10 @@ jobs:
 
       - name: Create namespace if not exists
         if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "📁 Ensuring namespace exists..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           if ! kubectl get namespace "${NAMESPACE}" &>/dev/null; then
             echo "Creating namespace: ${NAMESPACE}"
@@ -600,9 +824,10 @@ jobs:
       
       - name: Configure registry access
         if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "🔐 Configuring registry access..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           # Check if registry secret exists
           if ! kubectl get secret do-registry-secret -n "${NAMESPACE}" &>/dev/null; then
@@ -741,17 +966,24 @@ jobs:
 
       - name: Deploy runners
         if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
+          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
+          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
           echo "🚀 Deploying GitHub runners..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
+          HASH_GATE="${RUNNER_TEMP}/runner-candidate-hash-gate.sh"
+          if [ ! -x "${HASH_GATE}" ]; then
+            echo "❌ Error: preflight candidate hash gate is unavailable"
+            exit 1
+          fi
 
           # Source of truth is the committed deploy/dind-values.yaml (node pool
           # pinning, tolerations, resources, securityContext). Only secrets and
           # the workflow_dispatch inputs are overlaid via --set so the file stays
           # the single place those values are defined.
-          MIN_RUNNERS="${{ needs.validate-inputs.outputs.min_runners }}"
-          MAX_RUNNERS="${{ needs.validate-inputs.outputs.max_runners }}"
-          RUNNER_IMAGE="${{ needs.validate-inputs.outputs.runner_image }}"
 
           # Deploy with retry logic
           for attempt in 1 2 3; do
@@ -760,13 +992,17 @@ jobs:
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
               --values deploy/dind-values.yaml \
-              --set githubConfigSecret.github_token="${{ secrets.RUNNER_TOKEN }}" \
+              --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
               --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
               --set minRunners="${MIN_RUNNERS}" \
               --set maxRunners="${MAX_RUNNERS}" \
               --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
+              --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
               --set runnerGroup=redducklabs-private-runners \
+              --set controllerServiceAccount.name=arc-gha-rs-controller \
+              --set controllerServiceAccount.namespace=arc-systems \
               --version "${ARC_CHART_VERSION}" \
+              --post-renderer "${HASH_GATE}" \
               --wait \
               --timeout 300s; then
 
@@ -786,9 +1022,10 @@ jobs:
       
       - name: Verify deployment
         if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "✅ Deployment complete! Checking runner status..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           echo ""
           echo "📊 Runner pods:"
@@ -844,12 +1081,23 @@ jobs:
             "${RUNNER_TEMP}/runner-representative-pod.json" \
             "${RUNNER_TEMP}/runner-admitted-pod.json" \
             "${RUNNER_TEMP}/runner-nodes.json" \
-            "${RUNNER_TEMP}/all-pods.json"
+            "${RUNNER_TEMP}/all-pods.json" \
+            "${RUNNER_TEMP}/runner-candidate.sha256" \
+            "${RUNNER_TEMP}/runner-candidate-hash-gate.sh" \
+            "${RUNNER_TEMP}/rollback-revision-manifest.yaml" \
+            "${RUNNER_TEMP}/rollback-restored-manifest.yaml" \
+            "${RUNNER_TEMP}"/helm-postrender.*
       
       - name: Summary
         if: always()
+        env:
+          OPERATION: ${{ needs.validate-inputs.outputs.operation }}
+          ROLLBACK_REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
+          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
+          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
         run: |
-          OPERATION="${{ needs.validate-inputs.outputs.operation }}"
           JOB_STATUS="${{ job.status }}"
           if [ "${JOB_STATUS}" != "success" ]; then
             echo "## ❌ Runner ${OPERATION} failed" >> $GITHUB_STEP_SUMMARY
@@ -859,7 +1107,7 @@ jobs:
           if [ "${OPERATION}" = "rollback" ]; then
             echo "## ✅ Runner rollback complete" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- **Revision**: ${{ needs.validate-inputs.outputs.rollback_revision }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Revision**: ${ROLLBACK_REVISION}" >> $GITHUB_STEP_SUMMARY
             echo "- **Runner Group**: `redducklabs-private-runners`" >> $GITHUB_STEP_SUMMARY
             echo "- **Restored Concurrency**: 2" >> $GITHUB_STEP_SUMMARY
             exit 0
@@ -870,10 +1118,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Configuration" >> $GITHUB_STEP_SUMMARY
           echo "- **Runner Label**: \`${RUNNER_SCALE_SET_NAME}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Namespace**: \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Min Runners**: ${{ needs.validate-inputs.outputs.min_runners }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Max Runners**: ${{ needs.validate-inputs.outputs.max_runners }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: \`${{ needs.validate-inputs.outputs.runner_image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace**: \`${NAMESPACE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Min Runners**: ${MIN_RUNNERS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runners**: ${MAX_RUNNERS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${RUNNER_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Usage" >> $GITHUB_STEP_SUMMARY
           echo "Add this to your workflow:" >> $GITHUB_STEP_SUMMARY

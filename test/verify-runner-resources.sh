@@ -283,6 +283,7 @@ materialize_workflow_step() {  # workflow, exact step name, expected SHA, max ru
     python - "$1" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY'
 import os
 import re
+import shlex
 import sys
 import yaml
 
@@ -296,6 +297,14 @@ for job in (document.get("jobs") or {}).values():
             shell = step["run"]
             replacements = {
                 "github.event.inputs.action": "scale-custom",
+                "inputs.operation": "deploy",
+                "inputs.accept_privileged_runner_co_tenancy": "true",
+                "inputs.rollback_revision": "7",
+                "inputs.min_runners": "2",
+                "inputs.max_runners": max_runners,
+                "inputs.expected_sha": expected_sha,
+                "inputs.namespace": "arc-runners",
+                "inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "github.event.inputs.operation": "deploy",
                 "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
                 "github.event.inputs.rollback_revision": "7",
@@ -310,6 +319,9 @@ for job in (document.get("jobs") or {}).values():
                 "github.event.inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "needs.validate-inputs.outputs.max_runners": max_runners,
                 "needs.validate-inputs.outputs.min_runners": "2",
+                "needs.validate-inputs.outputs.expected_sha": expected_sha,
+                "needs.validate-inputs.outputs.operation": "deploy",
+                "needs.validate-inputs.outputs.rollback_revision": "7",
                 "needs.validate-inputs.outputs.namespace": "arc-runners",
                 "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "steps.validate.outputs.max_nodes": max_nodes,
@@ -330,6 +342,9 @@ for job in (document.get("jobs") or {}).values():
                 return "fixture"
             shell = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", replace, shell)
             with open(output, "a", encoding="utf-8") as target:
+                for name, value in (step.get("env") or {}).items():
+                    rendered = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", replace, str(value))
+                    target.write(f"export {name}={shlex.quote(rendered)}\n")
                 target.write(shell)
                 target.write("\n")
             raise SystemExit(0)
@@ -341,6 +356,7 @@ PY
 materialize_workflow_token() {  # workflow, token, expected SHA, max runners, min nodes, max nodes, output file
     python - "$1" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY'
 import re
+import shlex
 import sys
 import yaml
 
@@ -355,6 +371,14 @@ for job in (document.get("jobs") or {}).values():
             continue
         replacements = {
             "github.event.inputs.expected_sha": expected_sha,
+            "inputs.operation": "deploy",
+            "inputs.accept_privileged_runner_co_tenancy": "true",
+            "inputs.rollback_revision": "7",
+            "inputs.min_runners": "2",
+            "inputs.max_runners": max_runners,
+            "inputs.expected_sha": expected_sha,
+            "inputs.namespace": "arc-runners",
+            "inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "github.event.inputs.operation": "deploy",
             "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
             "github.event.inputs.rollback_revision": "7",
@@ -365,6 +389,9 @@ for job in (document.get("jobs") or {}).values():
             "github.event.inputs.apply": "true",
             "needs.validate-inputs.outputs.max_runners": max_runners,
             "needs.validate-inputs.outputs.min_runners": "2",
+            "needs.validate-inputs.outputs.expected_sha": expected_sha,
+            "needs.validate-inputs.outputs.operation": "deploy",
+            "needs.validate-inputs.outputs.rollback_revision": "7",
             "needs.validate-inputs.outputs.namespace": "arc-runners",
             "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "steps.validate.outputs.max_nodes": max_nodes,
@@ -383,6 +410,9 @@ for job in (document.get("jobs") or {}).values():
             return "fixture"
         shell = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", replace, shell)
         with open(output, "a", encoding="utf-8") as target:
+            for name, value in (step.get("env") or {}).items():
+                rendered = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", replace, str(value))
+                target.write(f"export {name}={shlex.quote(rendered)}\n")
             target.write(shell)
             target.write("\n")
         raise SystemExit(0)
@@ -394,9 +424,33 @@ PY
 run_fixture() {  # script, mutation log, output log
     local fixture_script=$1 mutation_log=$2 output_log=$3
     : > "$FIXTURE_DIR/sha-reads"
+    : > "$FIXTURE_DIR/helm-reads"
+    cat > "$FIXTURE_DIR/rollback-manifest.yaml" <<'YAML'
+apiVersion: actions.github.com/v1alpha1
+kind: AutoscalingRunnerSet
+metadata:
+  name: redducklabs-runners
+spec:
+  minRunners: 2
+  maxRunners: 2
+  runnerGroup: redducklabs-private-runners
+  template:
+    spec:
+      containers:
+        - name: runner
+          resources:
+            requests:
+              memory: 5Gi
+      initContainers:
+        - name: dind
+          resources:
+            requests:
+              memory: 5Gi
+YAML
     (
         export GITHUB_OUTPUT="$FIXTURE_DIR/github-output"
         export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
+        export RUNNER_TEMP="$FIXTURE_DIR"
         export GH_TOKEN=fixture-token
         export CLUSTER_NAME=redducklabs-cluster
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
@@ -405,6 +459,9 @@ run_fixture() {  # script, mutation log, output log
         export FIXTURE_ACTUAL_SHA
         export FIXTURE_MUTATION_LOG="$mutation_log"
         export FIXTURE_SHA_READ_LOG="$FIXTURE_DIR/sha-reads"
+        export FIXTURE_HELM_READ_LOG="$FIXTURE_DIR/helm-reads"
+        export FIXTURE_ROLLBACK_MANIFEST="$FIXTURE_DIR/rollback-manifest.yaml"
+        export FIXTURE_ROLLBACK_INVALID="${FIXTURE_ROLLBACK_INVALID:-none}"
         export FIXTURE_POOL_MIN FIXTURE_POOL_MAX FIXTURE_POOL_COUNT
         git() {
             if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
@@ -415,12 +472,35 @@ run_fixture() {  # script, mutation log, output log
             command git "$@"
         }
         helm() {
+            if [ "$1" = history ]; then
+                echo "helm $*" >> "$FIXTURE_HELM_READ_LOG"
+                if [ "$FIXTURE_ROLLBACK_INVALID" = chart ]; then
+                    echo '[{"revision":7,"chart":"gha-runner-scale-set-0.13.0","status":"superseded"}]'
+                else
+                    echo '[{"revision":7,"chart":"gha-runner-scale-set-0.14.2","status":"superseded"}]'
+                fi
+                return 0
+            fi
+            if [ "$1" = get ] && [ "$2" = manifest ]; then
+                echo "helm $*" >> "$FIXTURE_HELM_READ_LOG"
+                if [ "$FIXTURE_ROLLBACK_INVALID" = manifest ]; then
+                    sed 's/memory: 5Gi/memory: 4Gi/g' "$FIXTURE_ROLLBACK_MANIFEST"
+                else
+                    command cat "$FIXTURE_ROLLBACK_MANIFEST"
+                fi
+                return 0
+            fi
             case " $* " in
                 *" rollback "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG"; export FIXTURE_ROLLBACK_ACTIVE=true ;;
                 *" upgrade "*|*" uninstall "*) echo "helm $*" >> "$FIXTURE_MUTATION_LOG" ;;
             esac
             if [ "$1" = "get" ] && [ "$2" = "values" ]; then
-                echo '{"minRunners":2,"maxRunners":2,"runnerGroup":"redducklabs-private-runners","template":{"spec":{"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}'
+                echo "helm $*" >> "$FIXTURE_HELM_READ_LOG"
+                if [ "$FIXTURE_ROLLBACK_INVALID" = values ]; then
+                    echo '{"minRunners":2,"maxRunners":4,"runnerGroup":"redducklabs-private-runners"}'
+                else
+                    echo '{"minRunners":2,"maxRunners":2,"runnerGroup":"redducklabs-private-runners","template":{"spec":{"containers":[{"name":"runner","resources":{"requests":{"memory":"5Gi"}}}],"initContainers":[{"name":"dind","resources":{"requests":{"memory":"5Gi"}}}]}}}'
+                fi
             fi
             return 0
         }
@@ -691,8 +771,13 @@ case "$joined" in
     *"/repositories/1037651737"*) repo_json 1037651737 zipbot-v2 ;;
     *"orgs/redducklabs/repos?type=public"*)
         if [ "${GH_SCENARIO}" = public_label ] || [ "${GH_SCENARIO}" = dynamic_runs_on ] \
-          || [ "${GH_SCENARIO}" = workflow_schema ]; then
-            printf '[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+          || [ "${GH_SCENARIO}" = workflow_schema ] || [ "${GH_SCENARIO}" = mixed_case_label ] \
+          || [ "${GH_SCENARIO}" = later_page_public_label ]; then
+            if [ "${GH_SCENARIO}" = later_page_public_label ]; then
+                printf '[]\n[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+            else
+                printf '[{"name":"public-repo","default_branch":"main","visibility":"public"}]\n'
+            fi
         else
             printf '[]\n'
         fi
@@ -700,6 +785,8 @@ case "$joined" in
     *"repos/redducklabs/public-repo/actions/workflows"*)
         if [ "${GH_SCENARIO}" = workflow_schema ]; then
             printf '{"total":1,"pipelines":[]}\n'
+        elif [ "${GH_SCENARIO}" = later_page_public_label ]; then
+            printf '{"total_count":0,"workflows":[]}\n{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
         else
             printf '{"total_count":1,"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}\n'
         fi
@@ -707,6 +794,8 @@ case "$joined" in
     *"repos/redducklabs/public-repo/contents/.github/workflows/ci.yml"*)
         if [ "${GH_SCENARIO}" = dynamic_runs_on ]; then
             printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: ${{ matrix.runner }}' '    steps: []'
+        elif [ "${GH_SCENARIO}" = mixed_case_label ]; then
+            printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: RedDuckLabs-Runners' '    steps: []'
         else
             printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: redducklabs-runners' '    steps: []'
         fi
@@ -717,6 +806,8 @@ case "$joined" in
             exit 1
         elif [ "${GH_SCENARIO}" = create ]; then
             printf '{"total_count":0,"runner_groups":[]}\n'
+        elif [ "${GH_SCENARIO}" = later_page_group ]; then
+            printf '{"total_count":0,"runner_groups":[]}\n{"total_count":1,"runner_groups":[{"id":777,"name":"redducklabs-private-runners","visibility":"all","allows_public_repositories":true,"restricted_to_workflows":false}]}\n'
         else
             printf '{"total_count":1,"runner_groups":[{"id":777,"name":"redducklabs-private-runners","visibility":"all","allows_public_repositories":true,"restricted_to_workflows":false}]}\n'
         fi
@@ -856,15 +947,17 @@ PY
     fi
 
     local scenario expected
-    for scenario in permission_failure public_allowlist unknown_allowlist readback_drift public_label dynamic_runs_on workflow_schema; do
+    for scenario in permission_failure public_allowlist unknown_allowlist readback_drift public_label mixed_case_label dynamic_runs_on workflow_schema later_page_public_label; do
         case "$scenario" in
             permission_failure) expected='permission' ;;
             public_allowlist) expected='private' ;;
             unknown_allowlist) expected='identity' ;;
             readback_drift) expected='readback' ;;
             public_label) expected='redducklabs-runners' ;;
+            mixed_case_label) expected='runner' ;;
             dynamic_runs_on) expected='dynamic runs-on' ;;
             workflow_schema) expected='schema' ;;
+            later_page_public_label) expected='redducklabs-runners' ;;
         esac
         if run_trust_fixture "$scenario" "$FIXTURE_DIR/trust-output"; then
             fail "Trust boundary accepts ${scenario//_/ }"
@@ -887,6 +980,15 @@ PY
         fi
     else
         fail "Trust boundary read-only ordering fixture could not complete"
+    fi
+
+    if run_trust_fixture later_page_group "$FIXTURE_DIR/trust-output" \
+      && grep -q -- '--paginate orgs/redducklabs/actions/runner-groups?per_page=100' "$FIXTURE_DIR/gh-calls" \
+      && grep -q -- '--method PATCH orgs/redducklabs/actions/runner-groups/777' "$FIXTURE_DIR/gh-calls" \
+      && ! grep -q -- '--method POST orgs/redducklabs/actions/runner-groups' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary reconciles a matching runner group from a later page"
+    else
+        fail "Trust boundary does not paginate runner-group enumeration"
     fi
 
     if run_trust_fixture replacement_failure "$FIXTURE_DIR/trust-output"; then
@@ -987,6 +1089,10 @@ if "needs.validate-inputs.outputs.operation != 'prepare-trust-boundary'" not in 
     raise SystemExit('prepare-trust-boundary does not stop before the deployment job')
 
 steps = deploy.get('steps') or []
+for job in jobs.values():
+    for step in job.get('steps', []):
+        if '${{ github.event.inputs.' in step.get('run', ''):
+            raise SystemExit(f'raw workflow_dispatch input interpolation in shell step: {step.get("name")}')
 preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and preflight candidate')
 deploy_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Deploy runners')
 rollback_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Rollback runners')
@@ -997,6 +1103,8 @@ if preflight.count('helm template ') != 1:
     raise SystemExit('candidate must be rendered exactly once')
 if preflight.count('kubectl apply --server-side --dry-run=server') != 2:
     raise SystemExit('ASRS and representative Pod server dry-runs are required')
+if '--post-renderer "${HASH_GATE}"' not in deploy_shell:
+    raise SystemExit('Helm deployment is not guarded by the preflight manifest hash')
 if preflight_index >= deploy_index:
     raise SystemExit('preflight does not precede Helm deployment')
 if 'helm rollback ' not in rollback:
@@ -1009,7 +1117,10 @@ overlay_patterns = [
     r'--set minRunners=',
     r'--set maxRunners=',
     r'--set-string "template\.spec\.containers\[0\]\.image=',
+    r'--set-string "template\.spec\.initContainers\[0\]\.image=',
     r'--set runnerGroup=',
+    r'--set controllerServiceAccount\.name=arc-gha-rs-controller',
+    r'--set controllerServiceAccount\.namespace=arc-systems',
     r'--version "\$\{ARC_CHART_VERSION\}"',
 ]
 for pattern in overlay_patterns:
@@ -1030,6 +1141,30 @@ PY
     fi
 }
 
+assert_hostile_inputs_are_data() {
+    local script="$FIXTURE_DIR/deploy-hostile-input.sh"
+    local sentinel="$FIXTURE_DIR/hostile-input-executed"
+    local payload='$(touch '"$sentinel"')'
+    : > "$script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Validate and sanitize inputs' "$payload" 4 2 2 "$script" || {
+        fail "Hostile input fixture could not be materialized"
+        return
+      }
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts a hostile expected_sha"
+    elif [ -e "$sentinel" ]; then
+        fail "Deploy executes workflow_dispatch expected_sha as shell code"
+    elif [ -s "$FIXTURE_DIR/mutations" ]; then
+        fail "Deploy reaches mutation while rejecting hostile expected_sha"
+    elif ! grep -Fq 'expected_sha must be a 40-character commit SHA' "$FIXTURE_DIR/output"; then
+        fail "Deploy hostile expected_sha rejection is not diagnostic"
+    else
+        pass "Deploy treats hostile expected_sha as inert data"
+    fi
+}
+
 assert_deploy_requires_cotenancy_acceptance() {
     local script="$FIXTURE_DIR/deploy-cotenancy.sh"
     : > "$script"
@@ -1038,7 +1173,7 @@ assert_deploy_requires_cotenancy_acceptance() {
         fail "Deploy co-tenancy acceptance fixture could not be materialized"
         return
     fi
-    sed -i 's/ACCEPT_CO_TENANCY="true"/ACCEPT_CO_TENANCY="false"/' "$script"
+    sed -i 's/export INPUT_ACCEPT_CO_TENANCY=true/export INPUT_ACCEPT_CO_TENANCY=false/' "$script"
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
         fail "Deploy accepts privileged runner co-tenancy without explicit consent"
@@ -1051,8 +1186,36 @@ assert_deploy_requires_cotenancy_acceptance() {
     fi
 }
 
-run_deploy_preflight_fixture() {  # fail dry-run, system memory Mi, system CPU m, mutate admission, output
-    local fail_dry_run=$1 system_memory_mi=$2 system_cpu_m=$3 admission_mutation=$4 output=$5
+assert_rollback_revision_prevalidation() {
+    local script="$FIXTURE_DIR/deploy-rollback-prevalidation.sh"
+    : > "$script"
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
+        fail "Rollback prevalidation fixture could not be materialized"
+        return
+      }
+
+    local invalid
+    for invalid in chart values manifest; do
+        : > "$FIXTURE_DIR/mutations"
+        FIXTURE_ROLLBACK_INVALID="$invalid"
+        export FIXTURE_ROLLBACK_INVALID
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Rollback accepts invalid revision ${invalid} metadata"
+        elif grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
+            fail "Rollback mutates before rejecting invalid revision ${invalid} metadata"
+        elif ! grep -q '^helm history ' "$FIXTURE_DIR/helm-reads"; then
+            fail "Rollback does not inspect revision history before ${invalid} rejection"
+        else
+            pass "Rollback rejects invalid revision ${invalid} metadata before mutation"
+        fi
+    done
+    unset FIXTURE_ROLLBACK_INVALID
+}
+
+run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mutation, request shape, server major/minor, deploy drift, output
+    local fail_dry_run=$1 system_memory_mi=$2 system_cpu_m=$3 admission_mutation=$4
+    local request_shape=$5 server_major=$6 server_minor=$7 deploy_drift=$8 output=$9
     local script="$FIXTURE_DIR/deploy-preflight.sh"
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
@@ -1068,28 +1231,82 @@ run_deploy_preflight_fixture() {  # fail dry-run, system memory Mi, system CPU m
         export FIXTURE_SYSTEM_MEMORY_MI="$system_memory_mi"
         export FIXTURE_SYSTEM_CPU_M="$system_cpu_m"
         export FIXTURE_ADMISSION_MUTATION="$admission_mutation"
+        export FIXTURE_REQUEST_SHAPE="$request_shape"
+        export FIXTURE_SERVER_MAJOR="$server_major"
+        export FIXTURE_SERVER_MINOR="$server_minor"
+        export FIXTURE_DEPLOY_DRIFT="$deploy_drift"
         export FIXTURE_CALL_LOG="$FIXTURE_DIR/preflight-calls"
         export FIXTURE_RENDER_FILE="$FIXTURE_DIR/preflight-render.yaml"
         export RELEASE_NAME=redducklabs-runners
         export RUNNER_SCALE_SET_NAME=redducklabs-runners
         export ARC_CHART_VERSION=0.14.2
         helm() {
-            printf 'helm %s\n' "$*" >> "$FIXTURE_CALL_LOG"
             if [ "$1" = template ]; then
+                printf 'helm %s\n' "$*" >> "$FIXTURE_CALL_LOG"
                 command cat "$FIXTURE_RENDER_FILE"
+            elif [ "$1" = upgrade ]; then
+                local previous='' post_renderer=''
+                for arg in "$@"; do
+                    if [ "$previous" = --post-renderer ]; then post_renderer=$arg; break; fi
+                    previous=$arg
+                done
+                if [ -z "$post_renderer" ]; then
+                    echo 'missing Helm post-renderer hash gate' >&2
+                    return 90
+                fi
+                if [ "$FIXTURE_DEPLOY_DRIFT" = true ]; then
+                    if ! { command cat "$FIXTURE_RENDER_FILE"; printf '\n# second-render drift\n'; } | "$post_renderer" >/dev/null; then
+                        return 1
+                    fi
+                else
+                    if ! "$post_renderer" < "$FIXTURE_RENDER_FILE" >/dev/null; then
+                        return 1
+                    fi
+                fi
+                printf 'helm %s\n' "$*" >> "$FIXTURE_CALL_LOG"
+            else
+                printf 'helm %s\n' "$*" >> "$FIXTURE_CALL_LOG"
             fi
         }
         kubectl() {
             printf 'kubectl %s\n' "$*" >> "$FIXTURE_CALL_LOG"
             case " $* " in
                 *" version -o json "*)
-                    printf '{"serverVersion":{"major":"1","minor":"36"}}\n'
+                    printf '{"serverVersion":{"major":"%s","minor":"%s"}}\n' "$FIXTURE_SERVER_MAJOR" "$FIXTURE_SERVER_MINOR"
                     ;;
                 *" get nodes "*)
                     printf '{"items":[{"metadata":{"name":"runner-a"},"status":{"allocatable":{"memory":"13639Mi","cpu":"7880m"},"nodeInfo":{"kubeletVersion":"v1.36.3"},"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"runner-b"},"status":{"allocatable":{"memory":"13639Mi","cpu":"7880m"},"nodeInfo":{"kubeletVersion":"v1.36.3"},"conditions":[{"type":"Ready","status":"True"}]}}]}\n'
                     ;;
                 *" get pods -A "*)
-                    printf '{"items":[{"metadata":{"name":"system-a","namespace":"kube-system","labels":{}},"spec":{"nodeName":"runner-a","containers":[{"resources":{"requests":{"memory":"%sMi","cpu":"%sm"}}}]}},{"metadata":{"name":"system-b","namespace":"kube-system","labels":{}},"spec":{"nodeName":"runner-b","containers":[{"resources":{"requests":{"memory":"%sMi","cpu":"%sm"}}}]}}]}\n' "$FIXTURE_SYSTEM_MEMORY_MI" "$FIXTURE_SYSTEM_CPU_M" "$FIXTURE_SYSTEM_MEMORY_MI" "$FIXTURE_SYSTEM_CPU_M"
+                    python3 - <<'PY'
+import json
+import os
+
+shape = os.environ['FIXTURE_REQUEST_SHAPE']
+memory = os.environ['FIXTURE_SYSTEM_MEMORY_MI'] + 'Mi'
+cpu = os.environ['FIXTURE_SYSTEM_CPU_M'] + 'm'
+
+def spec(node):
+    value = {"nodeName": node, "containers": [{"resources": {"requests": {"memory": memory, "cpu": cpu}}}]}
+    if shape == 'pod_level':
+        value = {"nodeName": node, "resources": {"requests": {"memory": "1500Mi", "cpu": "500m"}}, "containers": [{}]}
+    elif shape == 'restartable_sidecar':
+        value = {"nodeName": node, "containers": [{}], "initContainers": [{"restartPolicy": "Always", "resources": {"requests": {"memory": "1500Mi", "cpu": "500m"}}}]}
+    elif shape == 'regular_init_peak':
+        value = {"nodeName": node, "containers": [{}], "initContainers": [{"resources": {"requests": {"memory": "1500Mi", "cpu": "500m"}}}]}
+    elif shape == 'overhead':
+        value["overhead"] = {"memory": "1001Mi", "cpu": "1m"}
+    elif shape == 'alternate_valid':
+        value = {"nodeName": node, "containers": [{"resources": {"requests": {"memory": "536870912", "cpu": "500000u"}}}]}
+    elif shape == 'malformed':
+        value = {"nodeName": node, "containers": [{"resources": {"requests": {"memory": "not-a-quantity", "cpu": "500m"}}}]}
+    return value
+
+print(json.dumps({"items": [
+    {"metadata": {"name": "system-a", "namespace": "kube-system", "labels": {}}, "spec": spec("runner-a")},
+    {"metadata": {"name": "system-b", "namespace": "kube-system", "labels": {}}, "spec": spec("runner-b")},
+]}))
+PY
                     ;;
                 *" apply --server-side --dry-run=server "*)
                     if [ "$FIXTURE_FAIL_DRY_RUN" = true ]; then
@@ -1104,13 +1321,29 @@ run_deploy_preflight_fixture() {  # fail dry-run, system memory Mi, system CPU m
 import json, os, sys, yaml
 with open(sys.argv[1], encoding='utf-8') as source:
     document = yaml.safe_load(source)
-if os.environ.get('FIXTURE_ADMISSION_MUTATION') == 'true':
+mutation = os.environ.get('FIXTURE_ADMISSION_MUTATION')
+if mutation != 'none':
     spec = document.get('spec', {})
     if document.get('kind') == 'AutoscalingRunnerSet':
         spec = spec.get('template', {}).get('spec', {})
-    for container in spec.get('containers', []):
-        if container.get('name') == 'runner':
-            container['resources'] = {'requests': {'cpu': '1'}}
+    containers = spec.get('containers', [])
+    init_containers = spec.get('initContainers', [])
+    if mutation == 'resources':
+        next(item for item in containers if item.get('name') == 'runner')['resources'] = {'requests': {'cpu': '1'}}
+    elif mutation == 'group' and document.get('kind') == 'AutoscalingRunnerSet':
+        document['spec']['runnerGroup'] = 'wrong-group'
+    elif mutation == 'placement':
+        spec['nodeSelector'] = {'node-type': 'worker'}
+    elif mutation == 'image':
+        next(item for item in containers if item.get('name') == 'runner')['image'] = 'untrusted.invalid/runner:latest'
+    elif mutation == 'privileged':
+        next(item for item in init_containers if item.get('name') == 'dind')['securityContext']['privileged'] = False
+    elif mutation == 'unexpected_container':
+        containers.append({'name': 'injected', 'image': 'injected:latest'})
+    elif mutation == 'wiring':
+        next(item for item in containers if item.get('name') == 'runner')['volumeMounts'] = []
+    elif mutation == 'restart':
+        next(item for item in init_containers if item.get('name') == 'dind')['restartPolicy'] = 'Never'
 print(json.dumps(document))
 PY
                     ;;
@@ -1123,7 +1356,7 @@ PY
 }
 
 assert_deploy_preflight_fixtures() {
-    if run_deploy_preflight_fixture true 500 500 false "$FIXTURE_DIR/preflight-output"; then
+    if run_deploy_preflight_fixture true 500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output"; then
         fail "Deploy continues after a server-side dry-run failure"
     elif [ ! -e "$FIXTURE_DIR/preflight-calls" ]; then
         fail "Deploy dry-run failure fixture could not be materialized"
@@ -1133,7 +1366,7 @@ assert_deploy_preflight_fixtures() {
         pass "Server-side dry-run failure prevents Helm deployment"
     fi
 
-    if run_deploy_preflight_fixture false 500 500 false "$FIXTURE_DIR/preflight-output" \
+    if run_deploy_preflight_fixture false 500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output" \
       && [ "$(grep -c '^helm template ' "$FIXTURE_DIR/preflight-calls")" -eq 1 ] \
       && [ "$(grep -c '^kubectl apply --server-side --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
       && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
@@ -1143,7 +1376,7 @@ assert_deploy_preflight_fixtures() {
         fail "Healthy live compatibility preflight does not reach Helm"
     fi
 
-    if run_deploy_preflight_fixture false 1500 500 false "$FIXTURE_DIR/preflight-output"; then
+    if run_deploy_preflight_fixture false 1500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output"; then
         fail "Deploy accepts a node without two-pod memory headroom"
     elif [ ! -e "$FIXTURE_DIR/preflight-calls" ]; then
         fail "Deploy node-headroom fixture could not be materialized"
@@ -1153,7 +1386,7 @@ assert_deploy_preflight_fixtures() {
         pass "Live per-node two-pod plus headroom drift prevents Helm"
     fi
 
-    if run_deploy_preflight_fixture false 500 1000 false "$FIXTURE_DIR/preflight-output"; then
+    if run_deploy_preflight_fixture false 500 1000 none container 1 36 false "$FIXTURE_DIR/preflight-output"; then
         fail "Deploy accepts a node without two-pod CPU headroom"
     elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
         fail "Deploy reaches Helm after live node CPU headroom drift"
@@ -1161,12 +1394,50 @@ assert_deploy_preflight_fixtures() {
         pass "Live per-node CPU headroom drift prevents Helm"
     fi
 
-    if run_deploy_preflight_fixture false 500 500 true "$FIXTURE_DIR/preflight-output"; then
-        fail "Deploy accepts an admission-injected runner resource budget"
-    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
-        fail "Deploy reaches Helm after an unsafe admission mutation"
+    local mutation
+    for mutation in resources group placement image privileged unexpected_container wiring restart; do
+        if run_deploy_preflight_fixture false 500 500 "$mutation" container 1 36 false "$FIXTURE_DIR/preflight-output"; then
+            fail "Deploy accepts unsafe admission mutation: ${mutation}"
+        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+            fail "Deploy reaches Helm after unsafe admission mutation: ${mutation}"
+        else
+            pass "Admission mutation is rejected: ${mutation}"
+        fi
+    done
+
+    local shape
+    for shape in pod_level restartable_sidecar regular_init_peak overhead malformed; do
+        if run_deploy_preflight_fixture false 500 500 none "$shape" 1 36 false "$FIXTURE_DIR/preflight-output"; then
+            fail "Deploy ignores non-runner request shape: ${shape}"
+        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+            fail "Deploy reaches Helm after unsafe request shape: ${shape}"
+        else
+            pass "Capacity gate accounts for request shape: ${shape}"
+        fi
+    done
+
+    if run_deploy_preflight_fixture false 500 500 none alternate_valid 1 36 false "$FIXTURE_DIR/preflight-output" \
+      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+        pass "Capacity gate accepts alternate valid Kubernetes quantities"
     else
-        pass "Admission-injected competing budgets prevent Helm"
+        fail "Capacity gate rejects alternate valid Kubernetes quantities"
+    fi
+
+    if run_deploy_preflight_fixture false 500 500 none container 2 0 false "$FIXTURE_DIR/preflight-output" \
+      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+        pass "API server version gate compares the full major/minor tuple"
+    else
+        fail "API server version gate compares only the minor version"
+    fi
+
+    if run_deploy_preflight_fixture false 500 500 none container 1 36 true "$FIXTURE_DIR/preflight-output"; then
+        fail "Helm accepts a second render that differs from the preflight candidate"
+    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
+        fail "Helm mutation begins despite a preflight candidate hash mismatch"
+    elif ! grep -Fqi 'candidate manifest hash mismatch' "$FIXTURE_DIR/preflight-output"; then
+        fail "Helm post-render hash mismatch is not diagnostic"
+    else
+        pass "Helm post-renderer blocks second-render drift before mutation"
     fi
 }
 
@@ -1185,7 +1456,9 @@ assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.y
 assert_trust_boundary_fixtures
 assert_autoscaler_diagnostic_fixtures
 assert_deploy_operation_and_preflight_contract
+assert_hostile_inputs_are_data
 assert_deploy_requires_cotenancy_acceptance
+assert_rollback_revision_prevalidation
 assert_deploy_preflight_fixtures
 echo ""
 
