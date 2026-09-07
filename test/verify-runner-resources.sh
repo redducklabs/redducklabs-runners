@@ -1034,7 +1034,11 @@ PY
                     local node_extra_taint
                     node_extra_taint=""
                     [ "$FIXTURE_NODE_EXTRA_BLOCKING_TAINT" = true ] && node_extra_taint=',{"key":"maintenance","value":"true","effect":"NoSchedule"}'
-                    if [ "$FIXTURE_READY_NODES" = 2 ]; then
+                    if [ "$FIXTURE_READY_NODES" = 4 ]; then
+                        printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-c-uid"},"spec":{"providerID":"digitalocean://node-c"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-d-uid"},"spec":{"providerID":"digitalocean://node-d"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}\n' "$first_uid"
+                    elif [ "$FIXTURE_READY_NODES" = 3 ]; then
+                        printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-c-uid"},"spec":{"providerID":"digitalocean://node-c"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-d-uid"},"spec":{"providerID":"digitalocean://node-d"},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}\n' "$first_uid"
+                    elif [ "$FIXTURE_READY_NODES" = 2 ]; then
                         printf '{"items":[{"metadata":{"uid":"%s","labels":{"node-type":"github-runner","workload-type":"%s"}},"spec":{"providerID":"digitalocean://node-a","taints":[{"key":"github-runner","value":"%s","effect":"NoSchedule"}%s]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid","labels":{"node-type":"github-runner","workload-type":"%s"}},"spec":{"providerID":"digitalocean://node-b","taints":[{"key":"github-runner","value":"%s","effect":"NoSchedule"}%s]},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}\n' "$first_uid" "$FIXTURE_NODE_WORKLOAD_LABEL" "$FIXTURE_NODE_TAINT_VALUE" "$node_extra_taint" "$FIXTURE_NODE_WORKLOAD_LABEL" "$FIXTURE_NODE_TAINT_VALUE" "$node_extra_taint"
                     else
                         printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}\n' "$first_uid"
@@ -2479,7 +2483,7 @@ PY
         return
     fi
     sed -i 's/export ACTION=fixture/export ACTION=rollout-quiesce/' "$script"
-    local original_max=$FIXTURE_POOL_MAX
+    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT original_ready=${FIXTURE_READY_NODES:-2}
     local case_max case_group
     FIXTURE_FORCE_LEGACY=true
     export FIXTURE_FORCE_LEGACY
@@ -2505,15 +2509,58 @@ PY
 2|redducklabs-private-runners
 CASES
 
+    FIXTURE_POOL_MAX=8
+    FIXTURE_POOL_COUNT=4
+    FIXTURE_READY_NODES=4
+    FIXTURE_HELM_MAX=8
+    FIXTURE_HELM_GROUP=Default
+    export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+      && grep -Eq '^helm upgrade .*--set minRunners=2 .*--set maxRunners=2 .*--set runnerGroup=redducklabs-private-runners' "$FIXTURE_DIR/mutations"; then
+        pass "Rollout-quiesce accepts the live four-node prestate before node-pool reduction"
+    else
+        fail "Rollout-quiesce rejects the live four-node prestate before node-pool reduction"
+    fi
+
+    local scenario variable value
+    while IFS='|' read -r scenario variable value; do
+        FIXTURE_POOL_MAX=8
+        FIXTURE_POOL_COUNT=4
+        FIXTURE_READY_NODES=4
+        FIXTURE_HELM_MAX=8
+        FIXTURE_HELM_GROUP=Default
+        printf -v "$variable" '%s' "$value"
+        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Rollout-quiesce accepts unsafe ${scenario}"
+        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
+            fail "Rollout-quiesce reaches Helm despite unsafe ${scenario}"
+        else
+            pass "Rollout-quiesce rejects unsafe ${scenario} before Helm"
+        fi
+    done <<'CASES'
+nonnumeric provider count|FIXTURE_POOL_COUNT|four
+provider count below minimum|FIXTURE_POOL_COUNT|1
+provider count above maximum|FIXTURE_POOL_COUNT|9
+provider/Kubernetes count mismatch|FIXTURE_READY_NODES|2
+NotReady provider node|FIXTURE_READY_NODES|3
+CASES
+
     local invalid_group
     for invalid_group in arbitrary-runner-group; do
         FIXTURE_POOL_MAX=8
+        FIXTURE_POOL_COUNT=2
+        FIXTURE_READY_NODES=2
         FIXTURE_HELM_MAX=8
         FIXTURE_HELM_GROUP=$invalid_group
-        export FIXTURE_POOL_MAX FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
+        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
         : > "$FIXTURE_DIR/mutations"
         if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
             fail "Rollout-quiesce accepts ${invalid_group/__missing__/missing} prestate runner group"
+        elif ! grep -q '^helm get values ' "$FIXTURE_DIR/helm-reads"; then
+            fail "Rollout-quiesce invalid-group fixture did not reach prestate validation"
         elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
             fail "Rollout-quiesce reaches Helm with ${invalid_group/__missing__/missing} prestate runner group"
         else
@@ -2522,6 +2569,8 @@ CASES
     done
 
     FIXTURE_POOL_MAX=2
+    FIXTURE_POOL_COUNT=2
+    FIXTURE_READY_NODES=2
     FIXTURE_HELM_MAX=2
     FIXTURE_HELM_GROUP=redducklabs-private-runners
     FIXTURE_HELM_POST_GROUP=redducklabs-private-runners
@@ -2531,6 +2580,8 @@ CASES
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
         fail "Rollout-quiesce emits a rollback revision whose exact private poststate was not validated"
+    elif ! grep -q '^helm history ' "$FIXTURE_DIR/helm-reads"; then
+        fail "Rollout-quiesce rollback-revision fixture did not reach revision validation"
     elif grep -q '^rollback_revision=' "$FIXTURE_DIR/github-output"; then
         fail "Rollout-quiesce writes an unvalidated rollback revision output"
     else
@@ -2538,7 +2589,7 @@ CASES
     fi
 
     unset FIXTURE_FORCE_LEGACY
-    FIXTURE_POOL_MAX=$original_max FIXTURE_HELM_MAX=2
+    FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count FIXTURE_READY_NODES=$original_ready FIXTURE_HELM_MAX=2
     unset FIXTURE_HELM_GROUP FIXTURE_HELM_POST_GROUP FIXTURE_REVISION_GROUP
 }
 
