@@ -52,7 +52,7 @@ Helm operation enables the requested runner count after preflight succeeds.
    - **Max runners**: Maximum number of runners (default and ceiling: 4)
    - **Expected SHA**: Exact reviewed commit SHA
    - **Accept privileged runner co-tenancy**: Required for trust preparation or deployment
-   - **Runner image**: Docker image to use (default: `registry.digitalocean.com/redducklabs/github-runner:latest`)
+   - **Runner image**: Fixed canonical value `registry.digitalocean.com/redducklabs/github-runner:latest`; deployment rejects alternatives so ordinary scaling always validates the same lifecycle contract.
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
 

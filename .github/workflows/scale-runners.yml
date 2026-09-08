@@ -342,26 +342,35 @@ jobs:
               exit 1
               ;;
             esac
-          elif [ "${POOL_MAX}" != "2" ]; then
-            echo "❌ Error: runner pool max_nodes must already be 2 for ${ACTION}; found ${POOL_MAX}"
+            case "${POOL_COUNT}" in ''|*[!0-9]*)
+              echo "❌ Error: rollout-quiesce requires a numeric current node count; found ${POOL_COUNT}"
+              exit 1
+              ;;
+            esac
+            if [ "${POOL_COUNT}" -lt 2 ] || [ "${POOL_COUNT}" -gt "${POOL_MAX}" ]; then
+              echo "❌ Error: rollout-quiesce requires 2..${POOL_MAX} current nodes; found ${POOL_COUNT}"
+              exit 1
+            fi
+          elif [ "${POOL_MAX}" != "2" ] || [ "${POOL_COUNT}" != "2" ]; then
+            echo "❌ Error: runner pool max/count must already be 2/2 for ${ACTION}; found ${POOL_MAX}/${POOL_COUNT}"
             exit 1
           fi
-          if [ "${POOL_MIN}" != "2" ] || [ "${POOL_COUNT}" != "2" ] \
+          if [ "${POOL_MIN}" != "2" ] \
              || [ "${POOL_SIZE}" != "s-8vcpu-16gb" ] \
              || [ "${POOL_AUTOSCALE}" != "true" ]; then
-            echo "❌ Error: runner pool must be min/count=2/2, size=s-8vcpu-16gb, autoscaling enabled; found min=${POOL_MIN} count=${POOL_COUNT} size=${POOL_SIZE} auto_scale=${POOL_AUTOSCALE}"
+            echo "❌ Error: runner pool must have min=2, size=s-8vcpu-16gb, and autoscaling enabled; found min=${POOL_MIN} count=${POOL_COUNT} size=${POOL_SIZE} auto_scale=${POOL_AUTOSCALE}"
             exit 1
           fi
 
           NODES=$(kubectl get nodes -l node-type=github-runner -o json)
           TOTAL_NODES=$(jq '.items | length' <<<"${NODES}")
           READY_NODES=$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<<"${NODES}")
-          if [ "${TOTAL_NODES}" != "2" ] || [ "${READY_NODES}" != "2" ]; then
-            echo "❌ Error: runner pool requires exactly two Ready nodes; found ${READY_NODES}/${TOTAL_NODES}"
+          if [ "${TOTAL_NODES}" != "${POOL_COUNT}" ] || [ "${READY_NODES}" != "${POOL_COUNT}" ]; then
+            echo "❌ Error: runner pool requires every provider node to be present and Ready; found ${READY_NODES}/${TOTAL_NODES}, provider count ${POOL_COUNT}"
             exit 1
           fi
 
-          echo "✅ Runner pool capacity is fixed at two Ready nodes"
+          echo "✅ Runner pool has ${READY_NODES}/${POOL_COUNT} Ready nodes within the admitted prestate"
 
       - name: Quiesce rollout and record rollback revision
         id: rollout-quiesce

@@ -205,9 +205,11 @@ jobs:
               and .labels == {
                 "node-type": "github-runner", "workload-type": "ci-cd"
               }
-              and (.taints == [{
+              and ((.taints == [{
                 key: "github-runner", value: "true", effect: "NoSchedule"
-              }])
+              }]) or (.taints == [{
+                Key: "github-runner", Value: "true", Effect: "NoSchedule"
+              }]))
             ' <<<"${state}" >/dev/null || {
               echo "❌ Error: ${stage} pool state violates min/count=2/2, max=${expected_max}, size=s-8vcpu-16gb, autoscale, exact labels, or taint"
               return 1

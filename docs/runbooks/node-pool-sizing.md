@@ -57,8 +57,11 @@ from a workstation. The local `scripts/scale-runners.sh` helper accepts only
 1. Run Deploy GitHub Runners with `operation=prepare-trust-boundary` and explicit
    privileged co-tenancy acceptance. It reconciles and reads back the private
    runner group without Helm, Kubernetes, or DigitalOcean mutation.
-2. Run Scale Runners and Node Pool Sizing from that same SHA. Node Pool Sizing
-   accepts only 2/2. Before lowering `max_nodes`, it performs two complete
+2. Run Scale Runners with `action=rollout-quiesce` from that same SHA. Record
+   the emitted post-quiesce Helm revision before any node-pool mutation. The
+   emitted revision is the private 2/2 legacy-isolated rollback target.
+3. Run Node Pool Sizing from that same SHA. Node Pool Sizing accepts only 2/2.
+   Before lowering `max_nodes`, it performs two complete
    observations of the pool, exact Helm values and manifest plus live ASRS in
    the private 2/2 legacy-isolated state produced by rollout-quiesce, queue
    demand, and two Ready nodes. It verifies that same legacy-isolated state
@@ -69,10 +72,11 @@ from a workstation. The local `scripts/scale-runners.sh` helper accepts only
    labels and that taint, with no additional `NoSchedule`/`NoExecute` taint the
    runner does not tolerate. Cluster ID, pool ID, and sorted node
    UID/providerID pairs must remain identical between observations.
-3. Run Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of
-   the rendered scale set and representative Pod before Helm mutation, and
-   records the post-quiesce pre-density Helm revision as the rollback target.
-4. Use Deploy GitHub Runners with `operation=rollback`, that recorded revision,
+4. Run Deploy GitHub Runners with `operation=deploy` from the same SHA. It runs
+   server-side dry-runs of the rendered scale set and representative Pod before
+   Helm mutation. Deploy does not create a rollback revision; rollback mode
+   consumes the recorded rollback revision from rollout-quiesce.
+5. Use Deploy GitHub Runners with `operation=rollback`, that saved revision,
    and the same SHA to restore the isolated 2/2 runner template. CI reads back
    the runner group and public-workflow scan after rollback.
 
@@ -81,8 +85,10 @@ public access disabled, and exactly `aurolegal.ai`, `autoduck`, `manager`,
 `platform-observability`, `redducklabs`, `redducklaw`, `therapy-link`,
 `zipbot-internal`, and `zipbot-v2`. CI scans all public organization workflows;
 any direct or unresolved dynamic use of `redducklabs-runners` fails closed.
-GitHub's exact managed path `dynamic/agents/copilot-pull-request-reviewer` is
-the only workflow entry skipped without a contents read; every other
+The only workflow entries skipped without a contents read are GitHub's exact
+managed dynamic paths `dynamic/agents/copilot-pull-request-reviewer`,
+`dynamic/dependabot/dependabot-updates`, and
+`dynamic/github-code-scanning/codeql`; every unknown or near-miss
 non-repository path fails closed. Fleet and prerequisite mutation workflows
 share the non-cancelling `runner-fleet-mutation` concurrency group.
 

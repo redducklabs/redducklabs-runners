@@ -750,6 +750,7 @@ PY
         export CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
         export RELEASE_NAME=redducklabs-runners
         export RUNNER_SCALE_SET_NAME=redducklabs-runners
+        export CANONICAL_RUNNER_IMAGE=registry.digitalocean.com/redducklabs/github-runner:latest
         export ARC_CHART_VERSION=0.14.2
         export FIXTURE_ACTUAL_SHA
         export FIXTURE_MUTATION_LOG="$mutation_log"
@@ -764,6 +765,7 @@ PY
         export FIXTURE_POOL_WORKLOAD_LABEL="${FIXTURE_POOL_WORKLOAD_LABEL:-ci-cd}"
         export FIXTURE_POOL_TAINT_VALUE="${FIXTURE_POOL_TAINT_VALUE:-true}"
         export FIXTURE_POOL_TAINT_EFFECT="${FIXTURE_POOL_TAINT_EFFECT:-NoSchedule}"
+        export FIXTURE_PROVIDER_TAINT_STYLE="${FIXTURE_PROVIDER_TAINT_STYLE:-lowercase}"
         export FIXTURE_POOL_EXTRA_LABEL="${FIXTURE_POOL_EXTRA_LABEL:-false}"
         export FIXTURE_POOL_EXTRA_TAINT="${FIXTURE_POOL_EXTRA_TAINT:-false}"
         export FIXTURE_NODE_WORKLOAD_LABEL="${FIXTURE_NODE_WORKLOAD_LABEL:-ci-cd}"
@@ -959,13 +961,18 @@ PY
                         count=$FIXTURE_POOL_RACE_COUNT
                         pool_id=$FIXTURE_SECOND_POOL_ID
                     fi
-                    local extra_label extra_taint
+                    local extra_label extra_taint taint_key taint_value_key taint_effect_key
                     extra_label=""; extra_taint=""
                     [ "$FIXTURE_POOL_EXTRA_LABEL" = true ] && extra_label=',"unexpected":"value"'
-                    [ "$FIXTURE_POOL_EXTRA_TAINT" = true ] && extra_taint=',{"key":"unexpected","value":"true","effect":"NoSchedule"}'
-                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"%s},"taints":[{"key":"github-runner","value":"%s","effect":"%s"}%s]}]\n' \
+                    taint_key=key; taint_value_key=value; taint_effect_key=effect
+                    if [ "$FIXTURE_PROVIDER_TAINT_STYLE" = uppercase ]; then
+                        taint_key=Key; taint_value_key=Value; taint_effect_key=Effect
+                    fi
+                    [ "$FIXTURE_POOL_EXTRA_TAINT" = true ] && extra_taint=",{\"${taint_key}\":\"unexpected\",\"${taint_value_key}\":\"true\",\"${taint_effect_key}\":\"NoSchedule\"}"
+                    printf '[{"id":"%s","name":"github-runners-pool-16g","min_nodes":%s,"max_nodes":%s,"count":%s,"size":"%s","auto_scale":true,"labels":{"node-type":"github-runner","workload-type":"%s"%s},"taints":[{"%s":"github-runner","%s":"%s","%s":"%s"}%s]}]\n' \
                       "$pool_id" "$FIXTURE_POOL_MIN" "$max" "$count" "$FIXTURE_POOL_SIZE" \
-                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$extra_label" "$FIXTURE_POOL_TAINT_VALUE" "$FIXTURE_POOL_TAINT_EFFECT" "$extra_taint" ; return 0 ;;
+                      "$FIXTURE_POOL_WORKLOAD_LABEL" "$extra_label" "$taint_key" "$taint_value_key" \
+                      "$FIXTURE_POOL_TAINT_VALUE" "$taint_effect_key" "$FIXTURE_POOL_TAINT_EFFECT" "$extra_taint" ; return 0 ;;
             esac
             return 0
         }
@@ -1033,7 +1040,11 @@ PY
                     local node_extra_taint
                     node_extra_taint=""
                     [ "$FIXTURE_NODE_EXTRA_BLOCKING_TAINT" = true ] && node_extra_taint=',{"key":"maintenance","value":"true","effect":"NoSchedule"}'
-                    if [ "$FIXTURE_READY_NODES" = 2 ]; then
+                    if [ "$FIXTURE_READY_NODES" = 4 ]; then
+                        printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-c-uid"},"spec":{"providerID":"digitalocean://node-c"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-d-uid"},"spec":{"providerID":"digitalocean://node-d"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}\n' "$first_uid"
+                    elif [ "$FIXTURE_READY_NODES" = 3 ]; then
+                        printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-c-uid"},"spec":{"providerID":"digitalocean://node-c"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-d-uid"},"spec":{"providerID":"digitalocean://node-d"},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}\n' "$first_uid"
+                    elif [ "$FIXTURE_READY_NODES" = 2 ]; then
                         printf '{"items":[{"metadata":{"uid":"%s","labels":{"node-type":"github-runner","workload-type":"%s"}},"spec":{"providerID":"digitalocean://node-a","taints":[{"key":"github-runner","value":"%s","effect":"NoSchedule"}%s]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid","labels":{"node-type":"github-runner","workload-type":"%s"}},"spec":{"providerID":"digitalocean://node-b","taints":[{"key":"github-runner","value":"%s","effect":"NoSchedule"}%s]},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}\n' "$first_uid" "$FIXTURE_NODE_WORKLOAD_LABEL" "$FIXTURE_NODE_TAINT_VALUE" "$node_extra_taint" "$FIXTURE_NODE_WORKLOAD_LABEL" "$FIXTURE_NODE_TAINT_VALUE" "$node_extra_taint"
                     else
                         printf '{"items":[{"metadata":{"uid":"%s"},"spec":{"providerID":"digitalocean://node-a"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"uid":"fixture-node-b-uid"},"spec":{"providerID":"digitalocean://node-b"},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}\n' "$first_uid"
@@ -1345,12 +1356,21 @@ fi
 printf '%s\t%s\n' "$joined" "$body" >> "$GH_CALL_LOG"
 
 repo_json() {
-    local id=$1 name=$2 visibility=private
+    local id=$1 name=$2 visibility=private identity_reads
     if [ "${GH_SCENARIO}" = public_allowlist ] && [ "$name" = manager ]; then
         visibility=public
     fi
     if [ "${GH_SCENARIO}" = unknown_allowlist ] && [ "$name" = manager ]; then
         name=unexpected-repository
+    fi
+    identity_reads=$(grep -c "/repositories/${id}" "$GH_CALL_LOG" || true)
+    if [ "${GH_SCENARIO}" = post_readback_public ] \
+      && [ "$name" = manager ] && [ "$identity_reads" -ge 2 ]; then
+        visibility=public
+    fi
+    if [ "${GH_SCENARIO}" = post_readback_renamed ] \
+      && [ "$name" = manager ] && [ "$identity_reads" -ge 2 ]; then
+        name=renamed-manager
     fi
     printf '{"id":%s,"name":"%s","full_name":"redducklabs/%s","visibility":"%s","private":%s,"owner":{"login":"redducklabs"}}\n' \
         "$id" "$name" "$name" "$visibility" "$([ "$visibility" = private ] && echo true || echo false)"
@@ -1407,6 +1427,9 @@ case "$joined" in
           || [ "${GH_SCENARIO}" = later_page_public_label ] \
           || [ "${GH_SCENARIO}" = later_page_workflow_label ] \
           || [ "${GH_SCENARIO}" = managed_copilot ] \
+          || [ "${GH_SCENARIO}" = managed_dependabot ] \
+          || [ "${GH_SCENARIO}" = managed_codeql ] \
+          || [ "${GH_SCENARIO}" = managed_dynamic_near_miss ] \
           || [ "${GH_SCENARIO}" = unknown_dynamic_path ] \
           || [ "${GH_SCENARIO}" = url_sensitive ] \
           || [ "${GH_SCENARIO}" = default_branch_drift ] \
@@ -1439,6 +1462,12 @@ case "$joined" in
             fi
         elif [ "${GH_SCENARIO}" = managed_copilot ]; then
             printf '{"total_count":1,"workflows":[{"path":"dynamic/agents/copilot-pull-request-reviewer","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = managed_dependabot ]; then
+            printf '{"total_count":1,"workflows":[{"path":"dynamic/dependabot/dependabot-updates","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = managed_codeql ]; then
+            printf '{"total_count":1,"workflows":[{"path":"dynamic/github-code-scanning/codeql","state":"active"}]}\n'
+        elif [ "${GH_SCENARIO}" = managed_dynamic_near_miss ]; then
+            printf '{"total_count":1,"workflows":[{"path":"dynamic/dependabot/dependabot-updates-preview","state":"active"}]}\n'
         elif [ "${GH_SCENARIO}" = unknown_dynamic_path ]; then
             printf '{"total_count":1,"workflows":[{"path":"dynamic/agents/unrecognized","state":"active"}]}\n'
         elif [ "${GH_SCENARIO}" = url_sensitive ]; then
@@ -1494,6 +1523,19 @@ case "$joined" in
     *"orgs/redducklabs/actions/runner-groups/777/repositories?per_page=100"*)
         if [ "${GH_SCENARIO}" = readback_drift ]; then
             printf '{"total_count":1,"repositories":[{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true}]}\n'
+        elif [ "${GH_SCENARIO}" = reduced_membership ]; then
+            printf '{"total_count":9,"repositories":['
+            printf '%s' \
+              '{"id":776507734},' \
+              '{"id":1006277397},' \
+              '{"id":1018231298},' \
+              '{"id":1025075333},' \
+              '{"id":1033531555},' \
+              '{"id":1037651737},' \
+              '{"id":1154788719},' \
+              '{"id":1193238112},' \
+              '{"id":1351028230}'
+            printf ']}\n'
         else
             printf '{"total_count":9,"repositories":['
             printf '%s' \
@@ -1579,19 +1621,27 @@ expected_reads = [
     "/repositories/1208056940",
     "orgs/redducklabs/actions/runner-groups?per_page=100",
 ]
+identity_reads = expected_reads[:9]
 mutation_index = next(
     index for index, call in enumerate(calls)
     if "--method POST orgs/redducklabs/actions/runner-groups" in call
 )
 for endpoint in expected_reads:
     matches = [index for index, call in enumerate(calls) if endpoint in call]
-    if not matches or max(matches) >= mutation_index:
+    if not matches or min(matches) >= mutation_index:
         raise SystemExit(f"required read missing or after mutation: {endpoint}")
 if "--method POST orgs/redducklabs/actions/runner-groups" not in calls[mutation_index]:
     raise SystemExit("creation is not the first mutation")
-if not any("runner-groups/777" in call for call in calls[mutation_index + 1:]) \
-   or not any("runner-groups/777/repositories" in call for call in calls[mutation_index + 1:]):
+membership_index = next(
+    index for index, call in enumerate(calls)
+    if index > mutation_index and "runner-groups/777/repositories?per_page=100" in call
+)
+if not any("runner-groups/777" in call for call in calls[mutation_index + 1:]):
     raise SystemExit("readback calls are missing or reordered")
+for endpoint in identity_reads:
+    matches = [index for index, call in enumerate(calls) if endpoint in call]
+    if len(matches) < 2 or max(matches) <= membership_index:
+        raise SystemExit(f"fresh post-readback identity validation missing: {endpoint}")
 PY
         then
             pass "Trust boundary creates the selected private group atomically with the exact call sequence"
@@ -1713,12 +1763,79 @@ PY
         pass "Trust boundary halts safely after partial reconciliation failure"
     fi
 
+    if run_trust_fixture reduced_membership "$FIXTURE_DIR/trust-output" \
+      && grep -Eq -- '--method (PATCH|PUT)' "$FIXTURE_DIR/gh-calls" \
+      && [ "$(grep -c '/repositories/1351028230' "$FIXTURE_DIR/gh-calls")" -eq 2 ] \
+      && grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+        pass "Trust boundary accepts reduced exact membership only after fresh private identity readback"
+    else
+        fail "Trust boundary cannot validate reduced exact membership with fresh private identity readback"
+    fi
+
+    : > "$FIXTURE_DIR/gh-calls"
+    if (
+        export PATH="$FIXTURE_DIR/fake-bin:$PATH"
+        export GH_SCENARIO=reduced_membership GH_CALL_LOG="$FIXTURE_DIR/gh-calls"
+        bash scripts/verify-runner-trust-boundary.sh \
+          --expected-sha "$(git rev-parse HEAD)" --verify-only
+    ) >"$FIXTURE_DIR/trust-output" 2>&1 \
+      && ! grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls" \
+      && [ "$(grep -c '/repositories/1351028230' "$FIXTURE_DIR/gh-calls")" -eq 2 ] \
+      && grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+        pass "Trust boundary verify-only mode freshly validates reduced exact membership identities"
+    else
+        fail "Trust boundary verify-only mode does not freshly validate reduced exact membership identities"
+    fi
+
+    local post_readback_scenario
+    for post_readback_scenario in post_readback_public post_readback_renamed; do
+        if run_trust_fixture "$post_readback_scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary accepts ${post_readback_scenario//_/ } repository identity drift"
+        elif ! grep -Eq -- '--method (PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+            fail "Trust boundary rejects ${post_readback_scenario//_/ } before reconciliation"
+        elif grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary reports success after ${post_readback_scenario//_/ }"
+        elif ! grep -Fqi 'post-readback repository identity' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary ${post_readback_scenario//_/ } rejection is not diagnostic"
+        else
+            pass "Trust boundary fails closed on ${post_readback_scenario//_/ } after reconciliation"
+        fi
+    done
+
     if run_trust_fixture managed_copilot "$FIXTURE_DIR/trust-output" \
       && ! grep -q 'contents/dynamic/agents/copilot-pull-request-reviewer' "$FIXTURE_DIR/gh-calls" \
       && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
-        pass "Trust boundary skips only GitHub's exact managed Copilot workflow path"
+        pass "Trust boundary skips GitHub's exact managed Copilot workflow path"
     else
         fail "Trust boundary does not safely skip GitHub's exact managed Copilot workflow path"
+    fi
+
+    if run_trust_fixture managed_dependabot "$FIXTURE_DIR/trust-output" \
+      && ! grep -q 'contents/dynamic/dependabot/dependabot-updates' "$FIXTURE_DIR/gh-calls" \
+      && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary skips GitHub's exact managed Dependabot updates workflow path"
+    else
+        fail "Trust boundary does not safely skip GitHub's exact managed Dependabot updates workflow path"
+    fi
+
+    if run_trust_fixture managed_codeql "$FIXTURE_DIR/trust-output" \
+      && ! grep -q 'contents/dynamic/github-code-scanning/codeql' "$FIXTURE_DIR/gh-calls" \
+      && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls"; then
+        pass "Trust boundary skips GitHub's exact managed CodeQL default-setup workflow path"
+    else
+        fail "Trust boundary does not safely skip GitHub's exact managed CodeQL default-setup workflow path"
+    fi
+
+    if run_trust_fixture managed_dynamic_near_miss "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary accepts a near-miss GitHub-managed dynamic workflow path"
+    elif grep -q 'contents/dynamic/dependabot/dependabot-updates-preview' "$FIXTURE_DIR/gh-calls"; then
+        fail "Trust boundary attempts a contents read for a near-miss GitHub-managed dynamic workflow path"
+    elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+        fail "Trust boundary mutates before rejecting a near-miss GitHub-managed dynamic workflow path"
+    elif ! grep -Fqi 'unsupported workflow path' "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary near-miss workflow-path rejection is not diagnostic"
+    else
+        pass "Trust boundary fails closed on near-miss GitHub-managed dynamic workflow paths"
     fi
 
     if run_trust_fixture unknown_dynamic_path "$FIXTURE_DIR/trust-output"; then
@@ -1833,7 +1950,7 @@ rollback_steps = jobs.get('rollback', {}).get('steps', [])
 rollback = next(step for step in rollback_steps if step.get('name') == 'Rollback runners').get('run', '')
 if preflight.count('helm template ') != 1:
     raise SystemExit('candidate must be rendered exactly once')
-if preflight.count('kubectl apply --server-side --dry-run=server') != 2:
+if preflight.count('kubectl apply --server-side --force-conflicts --dry-run=server') != 2:
     raise SystemExit('ASRS and representative Pod server dry-runs are required')
 if '--post-renderer "${HASH_GATE}"' not in deploy_shell:
     raise SystemExit('Helm deployment is not guarded by the preflight manifest hash')
@@ -1947,9 +2064,10 @@ assert_rollback_revision_prevalidation() {
     unset FIXTURE_ROLLBACK_INVALID
 }
 
-run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mutation, request shape, server major/minor, deploy drift, output
+run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mutation, request shape, server major/minor, deploy drift, output, field ownership
     local fail_dry_run=$1 system_memory_mi=$2 system_cpu_m=$3 admission_mutation=$4
     local request_shape=$5 server_major=$6 server_minor=$7 deploy_drift=$8 output=$9
+    local existing_field_ownership=${10:-false}
     local script="$FIXTURE_DIR/deploy-preflight.sh"
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
@@ -1969,6 +2087,7 @@ run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mu
         export FIXTURE_SERVER_MAJOR="$server_major"
         export FIXTURE_SERVER_MINOR="$server_minor"
         export FIXTURE_DEPLOY_DRIFT="$deploy_drift"
+        export FIXTURE_EXISTING_FIELD_OWNERSHIP="$existing_field_ownership"
         export FIXTURE_CALL_LOG="$FIXTURE_DIR/preflight-calls"
         export FIXTURE_RENDER_FILE="$FIXTURE_DIR/preflight-render.yaml"
         export RELEASE_NAME=redducklabs-runners
@@ -2042,7 +2161,11 @@ print(json.dumps({"items": [
 ]}))
 PY
                     ;;
-                *" apply --server-side --dry-run=server "*)
+                *" apply --server-side --dry-run=server "*|*" apply --server-side --force-conflicts --dry-run=server "*)
+                    if [ "$FIXTURE_EXISTING_FIELD_OWNERSHIP" = true ] \
+                      && [[ " $* " != *" --force-conflicts "* ]]; then
+                        return 42
+                    fi
                     if [ "$FIXTURE_FAIL_DRY_RUN" = true ]; then
                         return 1
                     fi
@@ -2056,6 +2179,19 @@ import json, os, sys, yaml
 with open(sys.argv[1], encoding='utf-8') as source:
     document = yaml.safe_load(source)
 mutation = os.environ.get('FIXTURE_ADMISSION_MUTATION')
+if (os.environ.get('FIXTURE_EXISTING_FIELD_OWNERSHIP') == 'true'
+        and document.get('kind') == 'AutoscalingRunnerSet'
+        and document.get('metadata', {}).get('name') == 'redducklabs-runners'):
+    template = document['spec']['template']['spec']
+    by_name = {
+        item.get('name'): item
+        for item in template.get('containers', []) + template.get('initContainers', [])
+    }
+    for name in ('runner', 'dind'):
+        by_name[name]['resources'] = {
+            'requests': {'memory': '5Gi'},
+            'limits': {'memory': '10Gi'},
+        }
 if mutation != 'none':
     spec = document.get('spec', {})
     if document.get('kind') == 'AutoscalingRunnerSet':
@@ -2140,6 +2276,12 @@ if mutation != 'none':
             )
             item['terminationMessagePath'] = '/dev/termination-log'
             item['terminationMessagePolicy'] = 'File'
+        dind_probe = next(
+            item for item in init_containers if item.get('name') == 'dind'
+        )['startupProbe']
+        dind_probe.pop('initialDelaySeconds', None)
+        dind_probe['successThreshold'] = 1
+        dind_probe['timeoutSeconds'] = 1
 print(json.dumps(document))
 PY
                     ;;
@@ -2162,9 +2304,17 @@ assert_deploy_preflight_fixtures() {
         pass "Server-side dry-run failure prevents Helm deployment"
     fi
 
+    if run_deploy_preflight_fixture false 500 500 none container 1 36 false \
+      "$FIXTURE_DIR/preflight-output" true \
+      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+        pass "Existing Helm field ownership does not block a non-persisting server dry-run"
+    else
+        fail "Existing Helm field ownership blocks the deployment preflight"
+    fi
+
     if run_deploy_preflight_fixture false 500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output" \
       && [ "$(grep -c '^helm template ' "$FIXTURE_DIR/preflight-calls")" -eq 1 ] \
-      && [ "$(grep -c '^kubectl apply --server-side --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
+      && [ "$(grep -c '^kubectl apply --server-side --force-conflicts --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
       && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
         pass "Compatible ASRS and Pod dry-runs reach the Helm boundary after one render"
     else
@@ -2372,7 +2522,7 @@ PY
         return
     fi
     sed -i 's/export ACTION=fixture/export ACTION=rollout-quiesce/' "$script"
-    local original_max=$FIXTURE_POOL_MAX
+    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT original_ready=${FIXTURE_READY_NODES:-2}
     local case_max case_group
     FIXTURE_FORCE_LEGACY=true
     export FIXTURE_FORCE_LEGACY
@@ -2398,15 +2548,58 @@ PY
 2|redducklabs-private-runners
 CASES
 
+    FIXTURE_POOL_MAX=8
+    FIXTURE_POOL_COUNT=4
+    FIXTURE_READY_NODES=4
+    FIXTURE_HELM_MAX=8
+    FIXTURE_HELM_GROUP=Default
+    export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
+      && grep -Eq '^helm upgrade .*--set minRunners=2 .*--set maxRunners=2 .*--set runnerGroup=redducklabs-private-runners' "$FIXTURE_DIR/mutations"; then
+        pass "Rollout-quiesce accepts the live four-node prestate before node-pool reduction"
+    else
+        fail "Rollout-quiesce rejects the live four-node prestate before node-pool reduction"
+    fi
+
+    local scenario variable value
+    while IFS='|' read -r scenario variable value; do
+        FIXTURE_POOL_MAX=8
+        FIXTURE_POOL_COUNT=4
+        FIXTURE_READY_NODES=4
+        FIXTURE_HELM_MAX=8
+        FIXTURE_HELM_GROUP=Default
+        printf -v "$variable" '%s' "$value"
+        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Rollout-quiesce accepts unsafe ${scenario}"
+        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
+            fail "Rollout-quiesce reaches Helm despite unsafe ${scenario}"
+        else
+            pass "Rollout-quiesce rejects unsafe ${scenario} before Helm"
+        fi
+    done <<'CASES'
+nonnumeric provider count|FIXTURE_POOL_COUNT|four
+provider count below minimum|FIXTURE_POOL_COUNT|1
+provider count above maximum|FIXTURE_POOL_COUNT|9
+provider/Kubernetes count mismatch|FIXTURE_READY_NODES|2
+NotReady provider node|FIXTURE_READY_NODES|3
+CASES
+
     local invalid_group
     for invalid_group in arbitrary-runner-group; do
         FIXTURE_POOL_MAX=8
+        FIXTURE_POOL_COUNT=2
+        FIXTURE_READY_NODES=2
         FIXTURE_HELM_MAX=8
         FIXTURE_HELM_GROUP=$invalid_group
-        export FIXTURE_POOL_MAX FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
+        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
         : > "$FIXTURE_DIR/mutations"
         if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
             fail "Rollout-quiesce accepts ${invalid_group/__missing__/missing} prestate runner group"
+        elif ! grep -q '^helm get values ' "$FIXTURE_DIR/helm-reads"; then
+            fail "Rollout-quiesce invalid-group fixture did not reach prestate validation"
         elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
             fail "Rollout-quiesce reaches Helm with ${invalid_group/__missing__/missing} prestate runner group"
         else
@@ -2415,6 +2608,8 @@ CASES
     done
 
     FIXTURE_POOL_MAX=2
+    FIXTURE_POOL_COUNT=2
+    FIXTURE_READY_NODES=2
     FIXTURE_HELM_MAX=2
     FIXTURE_HELM_GROUP=redducklabs-private-runners
     FIXTURE_HELM_POST_GROUP=redducklabs-private-runners
@@ -2424,6 +2619,8 @@ CASES
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
         fail "Rollout-quiesce emits a rollback revision whose exact private poststate was not validated"
+    elif ! grep -q '^helm history ' "$FIXTURE_DIR/helm-reads"; then
+        fail "Rollout-quiesce rollback-revision fixture did not reach revision validation"
     elif grep -q '^rollback_revision=' "$FIXTURE_DIR/github-output"; then
         fail "Rollout-quiesce writes an unvalidated rollback revision output"
     else
@@ -2431,7 +2628,7 @@ CASES
     fi
 
     unset FIXTURE_FORCE_LEGACY
-    FIXTURE_POOL_MAX=$original_max FIXTURE_HELM_MAX=2
+    FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count FIXTURE_READY_NODES=$original_ready FIXTURE_HELM_MAX=2
     unset FIXTURE_HELM_GROUP FIXTURE_HELM_POST_GROUP FIXTURE_REVISION_GROUP
 }
 
@@ -2451,10 +2648,12 @@ assert_node_pool_no_removal_contract() {
     FIXTURE_SECOND_NODE_UID=fixture-node-a-uid
     FIXTURE_SECOND_HELM_GROUP=redducklabs-private-runners
     FIXTURE_SECOND_ASRS_GROUP=redducklabs-private-runners
+    FIXTURE_PROVIDER_TAINT_STYLE=uppercase
     FIXTURE_FORCE_LEGACY=true
     export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
     export FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
     export FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
+    export FIXTURE_PROVIDER_TAINT_STYLE
     export FIXTURE_FORCE_LEGACY
     : > "$FIXTURE_DIR/mutations"
     if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
@@ -2533,6 +2732,7 @@ live ASRS state drift|FIXTURE_SECOND_ASRS_GROUP|foreign-runner-group
 CASES
     FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count
     unset FIXTURE_FORCE_LEGACY
+    unset FIXTURE_PROVIDER_TAINT_STYLE
     unset FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
     unset FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
 }
@@ -3283,6 +3483,97 @@ assert_rollback_ignores_deploy_only_inputs() {
     fi
 }
 
+assert_final_review_regressions() {
+    if python3 - <<'PY'
+from pathlib import Path
+
+expected = [
+    "776507734:zipbot-internal",
+    "1006277397:therapy-link",
+    "1018231298:redducklabs",
+    "1025075333:autoduck",
+    "1033531555:platform-observability",
+    "1037651737:zipbot-v2",
+    "1154788719:redducklaw",
+    "1193238112:aurolegal.ai",
+    "1351028230:manager",
+]
+manifest = Path("deploy/trusted-runner-repositories.txt").read_text(encoding="utf-8").splitlines()
+if manifest != expected:
+    raise SystemExit("trusted repository manifest is not the exact nine identity-bearing entries")
+script = Path("scripts/verify-runner-trust-boundary.sh").read_text(encoding="utf-8")
+for token in (
+    "TRUSTED_REPOSITORIES_FILE=",
+    "deploy/trusted-runner-repositories.txt",
+    "read_trusted_repositories",
+):
+    if token not in script:
+        raise SystemExit(f"trust verifier does not consume the committed manifest ({token})")
+if "'776507734:zipbot-internal'" in script:
+    raise SystemExit("trust verifier retains an independent hard-coded trusted repository list")
+PY
+    then
+        pass "Trust verifier consumes the exact committed identity-bearing repository manifest"
+    else
+        fail "Trusted repository manifest is not the enforced trust source of truth"
+    fi
+
+    local image_script="$FIXTURE_DIR/deploy-noncanonical-runner-image.sh"
+    : > "$image_script"
+    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$image_script"; then
+        fail "Deploy canonical-image regression fixture could not be materialized"
+    else
+        sed -i 's#export INPUT_RUNNER_IMAGE=registry.digitalocean.com/redducklabs/github-runner:latest#export INPUT_RUNNER_IMAGE=registry.digitalocean.com/redducklabs/github-runner:alternate#' "$image_script"
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$image_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            fail "Deploy accepts a noncanonical runner image that ordinary scaling rejects"
+        elif [ -s "$FIXTURE_DIR/mutations" ]; then
+            fail "Deploy rejects a noncanonical runner image only after mutation"
+        elif ! grep -Fq 'fixed canonical image' "$FIXTURE_DIR/output"; then
+            fail "Deploy noncanonical-image rejection is not diagnostic"
+        else
+            pass "Deploy rejects a noncanonical runner image before mutation"
+        fi
+    fi
+
+    if python3 - <<'PY'
+from pathlib import Path
+
+runbook = " ".join(Path("docs/runbooks/node-pool-sizing.md").read_text(encoding="utf-8").split())
+required = [
+    "Run Deploy GitHub Runners with `operation=prepare-trust-boundary`",
+    "Run Scale Runners with `action=rollout-quiesce`",
+    "Record the emitted post-quiesce Helm revision",
+    "Run Node Pool Sizing",
+    "Run Deploy GitHub Runners with `operation=deploy`",
+    "consumes the recorded rollback revision",
+    "operation=rollback`, that saved revision",
+]
+positions = []
+for text in required:
+    position = runbook.find(text)
+    if position < 0:
+        raise SystemExit(f"runbook is missing required rollout instruction: {text}")
+    positions.append(position)
+if positions != sorted(positions):
+    raise SystemExit("runbook rollout instructions are not ordered trust -> quiesce/capture -> pool -> deploy -> rollback")
+if "Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of the rendered scale set and representative Pod before Helm mutation, and records" in runbook:
+    raise SystemExit("runbook incorrectly assigns rollback-revision capture to Deploy")
+
+values = Path("deploy/dind-values.yaml").read_text(encoding="utf-8")
+if "the cluster is 1.33" in values:
+    raise SystemExit("values file retains stale Kubernetes 1.33 statement")
+if "Kubernetes API server and eligible runner nodes must be 1.36 or newer" not in values:
+    raise SystemExit("values file does not state the supported Kubernetes version invariant")
+PY
+    then
+        pass "Runbook sequencing and Kubernetes-version documentation match the executable rollout contract"
+    else
+        fail "Runbook sequencing or Kubernetes-version documentation is stale"
+    fi
+}
+
 assert_final_workflow_graph_and_prerequisites() {
     if python3 - <<'PY'
 import pathlib
@@ -3423,6 +3714,7 @@ assert_exact_deploy_namespace
 assert_rollback_recovery_route
 assert_rollback_live_asrs_contract
 assert_rollback_ignores_deploy_only_inputs
+assert_final_review_regressions
 assert_final_workflow_graph_and_prerequisites
 echo ""
 

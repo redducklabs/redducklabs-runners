@@ -47,7 +47,7 @@ on:
         required: true
         type: string
       runner_image:
-        description: 'Runner image to deploy'
+        description: 'Fixed canonical runner image; noncanonical values are rejected'
         required: false
         default: 'registry.digitalocean.com/redducklabs/github-runner:latest'
         type: string
@@ -74,6 +74,7 @@ env:
   RUNNER_SCALE_SET_NAME: ${{ vars.RUNNER_SCALE_SET_NAME || 'redducklabs-runners' }}
   REGISTRY: ${{ vars.REGISTRY || 'registry.digitalocean.com' }}
   REPOSITORY: ${{ vars.REPOSITORY || 'redducklabs/github-runner' }}
+  CANONICAL_RUNNER_IMAGE: 'registry.digitalocean.com/redducklabs/github-runner:latest'
   # Single pin for BOTH ARC charts. The controller chart
   # (gha-runner-scale-set-controller) and the scale set chart
   # (gha-runner-scale-set) are released together and are expected to run at the
@@ -209,9 +210,10 @@ jobs:
             exit 1
           fi
           
-          # Validate runner image format
-          if ! [[ "${RUNNER_IMAGE}" =~ ^[a-z0-9._/-]+:[a-z0-9._-]+$ ]]; then
-            echo "❌ Error: runner_image must be a valid container image reference"
+          # Scale Runners validates the fixed density contract against this
+          # exact image, so deployment must reject alternatives before mutation.
+          if [ "${RUNNER_IMAGE}" != "${CANONICAL_RUNNER_IMAGE}" ]; then
+            echo "❌ Error: runner_image must be the fixed canonical image ${CANONICAL_RUNNER_IMAGE}"
             exit 1
           fi
           
@@ -558,6 +560,7 @@ jobs:
           echo "🔬 Rendering and validating the exact deployment candidate..."
           CANDIDATE="${RUNNER_TEMP}/runner-candidate.yaml"
           ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
+          PREFLIGHT_ASRS="${RUNNER_TEMP}/runner-preflight-asrs.yaml"
           ADMITTED_ASRS="${RUNNER_TEMP}/runner-admitted-asrs.json"
           REPRESENTATIVE_POD="${RUNNER_TEMP}/runner-representative-pod.json"
           ADMITTED_POD="${RUNNER_TEMP}/runner-admitted-pod.json"
@@ -599,11 +602,12 @@ jobs:
           SH
           chmod 0700 "${HASH_GATE}"
 
-          python3 - "${CANDIDATE}" "${ASRS}" <<'PY'
+          python3 - "${CANDIDATE}" "${ASRS}" "${PREFLIGHT_ASRS}" <<'PY'
+          from copy import deepcopy
           import sys
           import yaml
 
-          source, target = sys.argv[1:]
+          source, target, preflight_target = sys.argv[1:]
           with open(source, encoding="utf-8") as stream:
               matches = [doc for doc in yaml.safe_load_all(stream)
                          if isinstance(doc, dict) and doc.get("kind") == "AutoscalingRunnerSet"]
@@ -611,9 +615,14 @@ jobs:
               raise SystemExit(f"expected one AutoscalingRunnerSet, found {len(matches)}")
           with open(target, "w", encoding="utf-8") as stream:
               yaml.safe_dump(matches[0], stream, sort_keys=False)
+          preflight = deepcopy(matches[0])
+          preflight["metadata"]["name"] = "redducklabs-runners-compatibility-preflight"
+          with open(preflight_target, "w", encoding="utf-8") as stream:
+              yaml.safe_dump(preflight, stream, sort_keys=False)
           PY
 
-          kubectl apply --server-side --dry-run=server -f "${ASRS}" -o json > "${ADMITTED_ASRS}"
+          kubectl apply --server-side --force-conflicts --dry-run=server \
+            -f "${PREFLIGHT_ASRS}" -o json > "${ADMITTED_ASRS}"
 
           python3 - "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${NAMESPACE}" <<'PY'
           import json
@@ -636,7 +645,8 @@ jobs:
               json.dump(pod, stream)
           PY
 
-          kubectl apply --server-side --dry-run=server -f "${REPRESENTATIVE_POD}" -o json > "${ADMITTED_POD}"
+          kubectl apply --server-side --force-conflicts --dry-run=server \
+            -f "${REPRESENTATIVE_POD}" -o json > "${ADMITTED_POD}"
 
           python3 - "${ASRS}" "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${ADMITTED_POD}" "${RUNNER_IMAGE}" <<'PY'
           from copy import deepcopy
@@ -746,6 +756,18 @@ jobs:
                       }
                       for key, value in container_defaults.items():
                           strip_default(admitted_item, expected_item, key, value)
+                      expected_probe = expected_item.get("startupProbe")
+                      admitted_probe = admitted_item.get("startupProbe")
+                      if isinstance(expected_probe, dict) and isinstance(admitted_probe, dict):
+                          if (expected_probe.get("initialDelaySeconds") == 0
+                                  and "initialDelaySeconds" not in admitted_probe):
+                              expected_probe.pop("initialDelaySeconds")
+                          strip_default(
+                              admitted_probe, expected_probe, "successThreshold", 1
+                          )
+                          strip_default(
+                              admitted_probe, expected_probe, "timeoutSeconds", 1
+                          )
               return expected, admitted
 
           expected_asrs_spec = deepcopy(expected_asrs.get("spec", {}))
@@ -1128,6 +1150,7 @@ jobs:
           rm -f \
             "${RUNNER_TEMP}/runner-candidate.yaml" \
             "${RUNNER_TEMP}/runner-candidate-asrs.yaml" \
+            "${RUNNER_TEMP}/runner-preflight-asrs.yaml" \
             "${RUNNER_TEMP}/runner-admitted-asrs.json" \
             "${RUNNER_TEMP}/runner-representative-pod.json" \
             "${RUNNER_TEMP}/runner-admitted-pod.json" \

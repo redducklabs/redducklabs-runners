@@ -94,7 +94,7 @@ template:
         mountPath: /home/runner/tmpDir
 
     # Docker daemon, run as a native sidecar (restartPolicy: Always on an init
-    # container). Requires Kubernetes >= 1.29; the cluster is 1.33.
+    # container). Requires Kubernetes >= 1.29. Kubernetes API server and eligible runner nodes must be 1.36 or newer, as enforced by deployment preflight.
     #
     # Image is pinned. The chart used the floating `docker:dind` tag, which
     # resolved to 29.7.2 at the time of this change - this pin is that same
