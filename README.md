@@ -190,8 +190,11 @@ These are the current pins in `docker/Dockerfile.custom-runner`.
 
 **Package pinning policy**: third-party apt repos (NodeSource was dropped;
 HashiCorp, Docker, GitHub CLI) install via an explicit keyring whose full
-fingerprint is asserted before use. Node and Terraform are exact-version sources
-(Node via nodejs.org tarball + SHA256; Terraform via apt exact pin). Docker
+fingerprint is asserted before use. The HashiCorp source and keyring are removed
+after the exact Terraform package is installed so unrelated runtime apt updates
+do not depend on future HashiCorp signing-key rotations. Node and Terraform are
+exact-version sources (Node via nodejs.org tarball + SHA256; Terraform via apt
+exact pin). Docker
 CLI/Compose-plugin and GitHub CLI **float** (key-verified; Docker CLI has a smoke
 floor of 28.3.3). Ubuntu-archive packages (`postgresql-client`, `redis-tools`,
 `bc`, `libmagic1`, `gettext-base`, `libpq-dev`, the WeasyPrint native libs

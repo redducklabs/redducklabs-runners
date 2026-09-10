@@ -129,6 +129,11 @@ jobs:
             bc --version | head -1
             python3 -c "import pytest_mock"
             echo ALL_TOOLS_OK'
+          docker run --rm "$IMG" bash -c '
+            set -e
+            terraform version >/dev/null
+            test ! -e /etc/apt/sources.list.d/hashicorp.list
+            test ! -e /usr/share/keyrings/hashicorp-archive-keyring.gpg'
           # Assert the image ships the versions the Dockerfile pins. Read the
           # expected values out of the Dockerfile rather than hardcoding them:
           # these assertions used to be `grep -q 1.160` and
@@ -419,6 +424,11 @@ jobs:
             gh --version | head -1; psql --version; redis-cli --version
             bc --version | head -1
             python3 -c "import pytest_mock"'
+          docker run --rm "$IMG" bash -c '
+            set -e
+            terraform version >/dev/null
+            test ! -e /etc/apt/sources.list.d/hashicorp.list
+            test ! -e /usr/share/keyrings/hashicorp-archive-keyring.gpg'
           # Same ARG-derived assertions as the PR smoke test above - see the
           # comment there. This job runs only on main, so a stale hardcoded pin
           # here survives every PR and fails only after the image is published.

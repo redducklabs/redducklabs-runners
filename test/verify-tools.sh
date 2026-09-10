@@ -45,6 +45,8 @@ test_tool "npm" "npm --version"
 test_tool "pnpm" "pnpm --version"
 test_tool "uv" "uv --version"
 test_tool "Terraform 1.15.9" "terraform version -json | jq -r .terraform_version"
+test_tool "Terraform without retained HashiCorp apt state" \
+    "terraform version >/dev/null && test ! -e /etc/apt/sources.list.d/hashicorp.list && test ! -e /usr/share/keyrings/hashicorp-archive-keyring.gpg"
 test_tool "kubectl 1.36.3" "kubectl version --client -o json | jq -r .clientVersion.gitVersion"
 test_tool "Helm 3.21.4" "helm version --short"
 test_tool "doctl 1.167.0" "doctl version"

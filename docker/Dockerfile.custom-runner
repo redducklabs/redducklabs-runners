@@ -296,14 +296,18 @@ RUN set -eux && \
     helm version --short
 
 # Install Terraform (exact pin) from HashiCorp apt with key fingerprint assertion.
+# The source and keyring are build-only: leaving them enabled makes unrelated
+# runtime apt updates depend on later HashiCorp signing-key rotations.
 RUN set -eux && \
     wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
     gpg --show-keys --with-colons /usr/share/keyrings/hashicorp-archive-keyring.gpg | \
-        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "798AEC654E5C15428C8E42EEAA16FCBCA621E701" && \
+        awk -F: '/^fpr:/{print $10; exit}' | grep -qx "D55C0D1AC78A8D8126CB631CFC9CA96ACA026560" && \
     echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends terraform=${TERRAFORM_VERSION} && \
     terraform version && \
+    rm -f /etc/apt/sources.list.d/hashicorp.list \
+        /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
     rm -rf /var/lib/apt/lists/*
 
 # Database tools (Ubuntu archive), Docker CLI + Compose (floating, key-verified),
