@@ -10,9 +10,15 @@ name: Emergency Stop Runners
 # Concurrency (Ruling 28): Emergency Stop uses its own non-cancelling group,
 # runner-emergency-stop, so it runs immediately instead of waiting behind a
 # multi-hour Deploy drain or Scale Runners Phase C in runner-fleet-mutation.
-# A fleet mutation that is in flight when it runs fails closed at its next
-# identity comparison or admission: the ARC identity changed and the stopped
-# state is not admitted for the in-flight operation.
+#
+# Stop fence (Ruling 33): BEFORE its Helm write it writes the marker ConfigMap
+# runner-fleet-emergency-stop (run id and time) in the stopped namespace
+# (arc-runners). While the marker exists the pool-state gate refuses every
+# fleet mutator except Deploy `deploy`/`rollback` dispatched with
+# acknowledge_emergency_stop=true, and every fleet Helm write re-reads it
+# afterwards: a write from an older run that lands after this stop sees the
+# marker, re-applies 0/0 and fails. A failed marker write does not delay the
+# stop; the run fails afterwards so the missing fence is visible.
 
 on:
   workflow_dispatch:
@@ -250,6 +256,36 @@ jobs:
           echo "  Max runners: ${CURRENT_MAX}"
           echo "  Runner pods: ${POD_COUNT}"
 
+      - name: Write stop marker
+        id: marker
+        if: steps.backup.outputs.deployment_exists == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # Ruling 33: the marker precedes the Helm write, so any fleet Helm
+          # write that lands after this stop sees it in its post-write fence.
+          # No secret or free text: only the run id and the time.
+          MARKER=$(jq -n --arg namespace "${NAMESPACE}" --arg run "${RUN_ID}" \
+            --arg time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '{
+              apiVersion: "v1", kind: "ConfigMap",
+              metadata: {name: "runner-fleet-emergency-stop", namespace: $namespace,
+                         labels: {"app.kubernetes.io/managed-by": "redducklabs-emergency-stop"}},
+              data: {"run-id": $run, time: $time}}')
+          for attempt in 1 2 3; do
+            if kubectl apply --server-side --force-conflicts \
+              --field-manager=redducklabs-emergency-stop -f - <<<"${MARKER}"; then
+              echo "✅ Stop marker ${NAMESPACE}/runner-fleet-emergency-stop written (run ${RUN_ID})"
+              exit 0
+            fi
+            echo "⚠️ Writing the stop marker failed (attempt ${attempt}/3)"
+            [ "${attempt}" = 3 ] || sleep 2
+          done
+          # The stop must not wait on the marker: record the failure and fail
+          # the run after the stop (Report marker failure).
+          echo "❌ Error: could not write the stop marker; in-flight fleet mutations are not fenced"
+          echo "marker_failed=true" >> "${GITHUB_OUTPUT}"
+
       - name: Scale to zero
         if: steps.backup.outputs.deployment_exists == 'true'
         env:
@@ -261,7 +297,7 @@ jobs:
 
           # Scale to zero with retry logic. --reuse-values keeps the base
           # template; the chart version stays pinned; 100 revisions are kept
-          # so the recorded density rollback revision is not pruned.
+          # (Ruling 27).
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Scaling to zero..."
             if helm upgrade "${RELEASE_NAME}" \
@@ -335,17 +371,30 @@ jobs:
       - name: Read back stopped state
         id: readback
         if: steps.backup.outputs.deployment_exists == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           # Read-only pool-state gate: the release must now be one of the
-          # stopped states the recovery paths admit.
-          STATE_LINE=$(./scripts/verify-runner-pool-state.sh \
+          # stopped states the recovery paths admit, with the stop marker.
+          GATE_OUT=$(./scripts/verify-runner-pool-state.sh \
             --cluster-name "${CLUSTER_NAME}" --operation status)
-          echo "${STATE_LINE}"
+          echo "${GATE_OUT}"
+          STATE_LINE=$(grep -E '^STATE: ' <<<"${GATE_OUT}" || true)
+          if [ "${NAMESPACE}" = arc-runners ] && ! grep -qE '^STOP: Emergency Stop marker ' <<<"${GATE_OUT}"; then
+            echo "❌ Error: the stop marker did not read back; in-flight fleet mutations are not fenced"
+            exit 1
+          fi
           if ! [[ "${STATE_LINE}" =~ ^STATE:\ arc=(burst|density|drain)-stopped\ pools=(none|primary|fallback|both)\ burst=(open|closed)$ ]]; then
             echo "❌ Error: the stopped release is not a stopped state the recovery paths admit: ${STATE_LINE}"
             exit 1
           fi
           echo "state=${STATE_LINE#STATE: }" >> "${GITHUB_OUTPUT}"
+
+      - name: Report marker failure
+        if: always() && steps.marker.outputs.marker_failed == 'true'
+        run: |
+          echo "❌ Error: the stop was applied but its marker was not written; an older fleet run could reopen runners. Re-dispatch Emergency Stop."
+          exit 1
 
       - name: Report read failures
         if: steps.backup.outputs.read_failed == 'true'
@@ -397,18 +446,18 @@ jobs:
               echo ""
               echo "### Recovery Instructions"
               echo ""
-              echo "Restore runners only through the reviewed CI path (\`docs/runbooks/node-pool-sizing.md\`, \"Emergency Stop\"). Each workflow admits the stopped state below:"
+              echo "Restore runners only through the reviewed CI path (\`docs/runbooks/node-pool-sizing.md\`, \"Emergency Stop\"). While the stop marker \`${NAMESPACE}/runner-fleet-emergency-stop\` exists, every fleet workflow refuses to run except Deploy \`deploy\` and \`rollback\` dispatched with \`acknowledge_emergency_stop=true\` (and Node Pool Sizing \`remove-burst\`, which only deletes empty closed pools). The acknowledging run deletes the marker before its Helm write:"
               echo ""
               case "${STOPPED_STATE}" in
                 arc=burst-stopped*)
-                  echo "- **Resume burst**: Deploy GitHub Runners \`operation=deploy\` with the reviewed commit's \`expected_sha\` restores \`burst\` (2/20)."
-                  echo "- **Leave burst instead**: Deploy GitHub Runners \`operation=drain\` with the recorded density \`rollback_revision\`, then Node Pool Sizing \`remove-burst\`, then Deploy \`operation=rollback\`."
+                  echo "- **Resume burst**: Deploy GitHub Runners \`operation=deploy\`, \`acknowledge_emergency_stop=true\`, with the reviewed commit's \`expected_sha\` restores \`burst\` (2/20)."
+                  echo "- **Leave burst instead**: after that, Deploy \`operation=drain\`, then Node Pool Sizing \`remove-burst\`, then Deploy \`operation=rollback\`."
                   ;;
                 arc=drain-stopped*)
-                  echo "- Node Pool Sizing \`remove-burst\` (when the burst pools have zero nodes), then Deploy GitHub Runners \`operation=rollback\` with the recorded density \`rollback_revision\`."
+                  echo "- Node Pool Sizing \`remove-burst\` (when the burst pools have zero nodes), then Deploy GitHub Runners \`operation=rollback\`, \`acknowledge_emergency_stop=true\` (restores the committed \`deploy/density-values.yaml\`)."
                   ;;
                 arc=density-stopped*)
-                  echo "- If closed burst pools exist, Node Pool Sizing \`remove-burst\` first; then Deploy GitHub Runners \`operation=rollback\` with a density \`rollback_revision\` (revision ${PREVIOUS_REVISION} was the release before this stop; the rollback validates it as density)."
+                  echo "- If closed burst pools exist, Node Pool Sizing \`remove-burst\` first; then Deploy GitHub Runners \`operation=rollback\`, \`acknowledge_emergency_stop=true\` (restores the committed \`deploy/density-values.yaml\`)."
                   ;;
                 *)
                   echo "- The stopped state was not read back. Run **Runner Status**, then follow the runbook's Emergency Stop section."

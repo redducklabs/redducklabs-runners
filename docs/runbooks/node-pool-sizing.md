@@ -35,7 +35,7 @@ pool-state gate (cluster not `running`, or more registered nodes than a pool's
 
 | Contract | min/max | Placement | Reached by |
 |---|---|---|---|
-| `density` | 2/4 | no pool preference | the pre-burst release; Deploy `rollback` |
+| `density` | 2/4 | no pool preference | the pre-burst release, committed as `deploy/density-values.yaml`; Deploy `rollback` |
 | `burst` | 2/20 | preferred baseline, safe-to-evict | Deploy `deploy` |
 | `burst-acceptance` | 8/20 or 4/20 | as `burst` | only inside Scale Runners `acceptance-phase-c` |
 | `drain` | 2/4 | **required** baseline, safe-to-evict | Deploy `drain` |
@@ -57,25 +57,27 @@ the live state with
 `scripts/verify-runner-pool-state.sh --operation <op>`, and bracket every
 mutation with the identity contract (cluster ID, baseline pool ID and baseline
 node UID/providerID pairs never change; only the declared transition may).
-Every `helm upgrade` and `helm rollback` passes `--history-max 100`, so the
-`density` revision recorded in rollout step 1 is still in `helm history` when
-`drain` and `rollback` need it (Helm's default keeps only 10).
+Every Helm write passes `--history-max 100`. Rollback does not depend on Helm
+history: it upgrades to the committed `deploy/density-values.yaml` (the
+reviewed values of the pre-burst release), so no revision has to survive the
+rollout. While an Emergency Stop marker exists, every workflow below refuses to
+run except as described in "Emergency Stop".
 
 | Workflow / input | Operation | Admits | Effect |
 |---|---|---|---|
 | Deploy GitHub Runners `operation=prepare-trust-boundary` (co-tenancy accepted) | trust boundary | admission evidence committed | runner group readback equals `deploy/trusted-runner-repositories.txt` |
-| Scale Runners `action=record-density` | read-only | `density` | prints the `density` Helm revision (`rollback_revision`) after reading `helm history` back |
+| Scale Runners `action=record-density` | read-only | `density` | verifies the live release is density 2/4 and equals the render of `deploy/density-values.yaml` (the rollback target) |
 | Node Pool Sizing `create-burst` (`apply`) | create pools closed | `density`/`burst`, 0–2 closed pools | both burst pools at `min=max=count=0` |
 | Node Pool Sizing `configure-expander` (`apply`) | expander | both pools present | `--expanders priority,random` and the priority ConfigMap |
-| Deploy GitHub Runners `operation=deploy` (co-tenancy accepted) | runner NetworkPolicy, then Helm to `burst` | `density`/`burst`/`burst-stopped`, pools present, expander configured | runner network policy set valid (checked before Helm); ASRS, values and manifest equal `burst` |
+| Deploy GitHub Runners `operation=deploy` (co-tenancy accepted; `acknowledge_emergency_stop` to recover from a stop) | runner NetworkPolicy, then Helm to `burst` | `density`/`burst`/`burst-stopped`, pools present, expander configured | runner network policy set valid (checked before Helm); ASRS, values and manifest equal `burst` |
 | Node Pool Sizing `enable-burst` (`apply`) | open pools | `burst`; stages 0/0+0/0, 0/6+0/0, 0/6+0/2; runner network policy set valid | primary 0/6, then fallback 0/2 |
 | Node Pool Sizing `set-burst-maxima` (`primary_max`, `fallback_max`, `apply`) | move allowance | `burst`, both pools | lowers the donor first, reads back, then raises |
-| Rebalance Runners (hourly; dispatch with `expected_sha`) | retire idle burst runners | `burst`, `drain`; the stopped states (notice only); runner network policy set valid | deletes idle burst-node EphemeralRunners only; skips with a notice while any fleet mutator is queued or running |
+| Rebalance Runners (hourly; dispatch with `expected_sha`) | retire idle burst runners | `burst`, `drain`; the stopped states or the Emergency Stop marker (notice only); runner network policy set valid | deletes idle burst-node EphemeralRunners only; skips with a notice while any fleet mutator is queued or running |
 | Scale Runners `action=acceptance-phase-c` | acceptance Phase C | `burst` (or interrupted `burst-acceptance`), burst enabled, runner network policy set valid | one lock-owning run; ends at `burst`; uploads `phase-c-evidence` |
-| Deploy GitHub Runners `operation=drain` (`rollback_revision`) | verify the rollback target, Helm to `drain`, wait | `burst`, `burst-acceptance`, `drain`, `burst-stopped`; `rollback_revision` exists in `helm history` and validates as `density` | no runner pod on a burst node; burst pools at zero nodes |
-| Node Pool Sizing `remove-burst` (`apply`) | delete pools | `drain`/`drain-stopped`, or `density`/`density-stopped` with closed empty pools | expanders reset; only baseline remains |
-| Deploy GitHub Runners `operation=rollback` (`rollback_revision`) | Helm rollback | `drain`/`drain-stopped`/`density-stopped`/`density`, burst pools absent | `density` readback, trust readback |
-| Emergency Stop Runners (`confirm=STOP-RUNNERS`) | Helm `--reuse-values` to 0/0 | any release (runs immediately, own group) | a `stopped` state readback and the recovery to use |
+| Deploy GitHub Runners `operation=drain` | Helm to `drain`, wait | `burst`, `burst-acceptance`, `drain`, `burst-stopped` (no stop marker) | no runner pod on a burst node; burst pools at zero nodes |
+| Node Pool Sizing `remove-burst` (`apply`) | delete pools | `drain`/`drain-stopped`, or `density`/`density-stopped` with closed empty pools (also while the stop marker exists) | expanders reset; only baseline remains |
+| Deploy GitHub Runners `operation=rollback` (`acknowledge_emergency_stop` to recover from a stop) | Helm upgrade to `deploy/density-values.yaml` | `drain`/`drain-stopped`/`density-stopped`/`density`, burst pools absent, the committed values validate as `density` | `density` readback, trust readback |
+| Emergency Stop Runners (`confirm=STOP-RUNNERS`) | stop marker, then Helm `--reuse-values` to 0/0 | any release (runs immediately, own group) | a `stopped` state and marker readback and the recovery to use |
 | Runner Acceptance Evidence (`phase`, run IDs, `expected_sha`) | read-only evidence | any | acceptance verdict; cancels only its verified probe |
 | Runner Status | read-only | any | pools, burst node count per pool, ARC state |
 
@@ -90,6 +92,10 @@ the period (DigitalOcean does not itemize per pool).
 - **No Helm retry.** A failed Helm upgrade inside the identity bracket fails
   the run. Read the failure, then re-dispatch the same operation: the re-run
   re-admits the live state and is a no-op on its own postcondition.
+- **`STOP_FENCE`.** A Deploy, drain, Phase C or rollback run whose Helm write
+  found an Emergency Stop in effect (or could not read the stop marker)
+  re-applied 0/0 and failed. The fleet is stopped; recover as in "Emergency
+  Stop". Do not re-dispatch the failed operation without the acknowledgement.
 - **`SCALE_TO_ZERO_REJECTED`.** If DigitalOcean refuses a closed (`0/0`) burst
   pool, `create-burst` stops and creates nothing further. Stop the rollout and
   re-plan. Never work around it with `min_nodes=1`: that is a permanent cost
@@ -117,9 +123,10 @@ the period (DigitalOcean does not itemize per pool).
 Run every step from the same reviewed `main` commit and record it in the
 Rollout record below.
 
-1. **Record rollback target.** Scale Runners `action=record-density`. Save
-   `rollback_revision` from the job output; Deploy `drain` and `rollback` both
-   require it.
+1. **Verify the rollback target.** Scale Runners `action=record-density`. It
+   verifies that the live release equals the render of
+   `deploy/density-values.yaml`, the target Deploy `rollback` restores; if it
+   fails, stop and reconcile that file by a reviewed commit first.
 2. **Trust boundary.** Deploy GitHub Runners `operation=prepare-trust-boundary`,
    co-tenancy accepted.
 3. **Pools.** Node Pool Sizing `create-burst` (dry run, then `apply`), then
@@ -249,8 +256,7 @@ Phase D (drain under continuing load):
 
 ```bash
 probe continuous    # then set PROBE as above; wait until about 12 entries run
-gh workflow run deploy-runners.yml -R "$FLEET" -f operation=drain -f rollback_revision="$ROLLBACK_REVISION" \
-  -f expected_sha="$SHA"
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=drain -f expected_sha="$SHA"
 DRAIN=$(latest deploy-runners.yml)
 gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=D \
   -f probe_run_id="$PROBE" -f drain_run_id="$DRAIN" -f dispatch_tag="$TAG" \
@@ -261,8 +267,7 @@ Phase E (restore and ready-for-migration): after Phase D, run Node Pool Sizing
 `remove-burst` (`apply=true`), Deploy `rollback`, then rollout steps 3–4.
 
 ```bash
-gh workflow run deploy-runners.yml -R "$FLEET" -f operation=rollback \
-  -f rollback_revision="$ROLLBACK_REVISION" -f expected_sha="$SHA"
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=rollback -f expected_sha="$SHA"
 ROLLBACK=$(latest deploy-runners.yml)   # wait for it to succeed, then rollout steps 3-4
 BASELINE_RUN=<the passing Phase A Runner Acceptance Evidence run ID>
 probe batch 8    # then set PROBE as above
@@ -282,11 +287,14 @@ anchor runs; a rejected anchor run still cancels the verified probe.
 | D. Drain under continuing load | after C | `continuous` | start the probe, wait until about 12 entries run, dispatch Deploy `drain`, then `phase=D`, probe, `drain_run_id` | drain run is this repository's Deploy `drain` at `$SHA`, success; ≥ 8 entries in progress when its "Drain runners" step started; ≥ 1 in progress throughout until it completed; entries still queued or running when it completed; every entry succeeded; every scheduled runner pod created after the drain READBACK is on baseline (pods never seen scheduled are reported, not failed); no `TriggeredScaleUp` for a runner pod after it; burst pools at zero nodes; ARC `drain` |
 | E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` | `phase=E`, probe, `rollback_run_id`, `baseline_run_id` | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline; smoke run passes; prints `READY_FOR_MIGRATION=true` |
 
-Phase B note: if DigitalOcean rejects `max_nodes=0` for the primary, use
-`primary_max=1 fallback_max=2` with `jobs=10` and require two fallback nodes;
-record the deviation. A provider 422/backoff is not reproduced live; that path is
-covered by fixtures and the documented autoscaler behavior and is recorded as
-untested live.
+Phase B note: there is no alternate Phase B shape. `create-burst` already
+created both pools at `max_nodes=0`, so DigitalOcean accepts a closed primary. If
+the `set-burst-maxima primary_max=0` run is nevertheless rejected, stop
+acceptance: Phase B needs a reviewed change to this procedure and to
+`scripts/acceptance-verdict.py` (which accepts only primary 0/0, eight jobs and
+4 baseline + 4 fallback runners) before it is re-run. A provider 422/backoff is
+not reproduced live; that path is covered by fixtures and the documented
+autoscaler behavior and is recorded as untested live.
 
 Phase C note: ARC chooses which surplus runners to remove. If no idle runner is
 left on a burst node in three cycles, the result is `fixture-only`; record it
@@ -307,10 +315,7 @@ fails, run Rollback before any migration PR merges.
 
 Ordered CI recovery; each step reads back its postcondition before the next.
 
-1. Deploy GitHub Runners `operation=drain` with the recorded `rollback_revision`.
-   Before any change it verifies that the revision exists in `helm history` and
-   that its values and manifest are the `density` contract; without a usable
-   rollback target the fleet never enters `drain`. It moves ARC to `drain` (max 4,
+1. Deploy GitHub Runners `operation=drain`. It moves ARC to `drain` (max 4,
    required baseline affinity), retires idle burst runners every 2 minutes and
    waits until no runner pod is on a burst node and both burst pools report zero
    nodes. Busy jobs are never interrupted. A run waits at most 300 minutes; on
@@ -318,38 +323,60 @@ Ordered CI recovery; each step reads back its postcondition before the next.
 2. Node Pool Sizing `remove-burst` with `apply`. It observes zero nodes and no
    runner pods in both burst pools twice, resets the expanders to the default
    and deletes the pools.
-3. Deploy GitHub Runners `operation=rollback` with the recorded
-   `rollback_revision`. With the burst pools gone, the `density` template can
-   only schedule on baseline.
+3. Deploy GitHub Runners `operation=rollback`. It validates the committed
+   `deploy/density-values.yaml` as the `density` contract (values and rendered
+   manifest) and upgrades the release to exactly that render, independent of
+   Helm history. With the burst pools gone, the `density` template can only
+   schedule on baseline.
 
 Migrated repositories revert their `runs-on` PRs.
 
 ## Emergency Stop
 
-**Emergency Stop Runners** (`confirm=STOP-RUNNERS`) sets the release to
-`minRunners=maxRunners=0` with `--reuse-values` on the pinned chart, so the
-template is unchanged and the gate classifies the result as `burst-stopped`,
-`density-stopped` or `drain-stopped`. ARC deletes idle runners at once; a busy
-runner finishes its job first. The run reads the stopped state back and its
-summary names the recovery below.
+**Emergency Stop Runners** (`confirm=STOP-RUNNERS`) first writes the stop
+marker, the ConfigMap `arc-runners/runner-fleet-emergency-stop` (the run id and
+the time), then sets the release to `minRunners=maxRunners=0` with
+`--reuse-values` on the pinned chart, so the template is unchanged and the gate
+classifies the result as `burst-stopped`, `density-stopped` or `drain-stopped`.
+ARC deletes idle runners at once; a busy runner finishes its job first. The run
+reads the stopped state and the marker back and its summary names the recovery
+below. If the marker write fails, the stop is still applied and the run fails;
+re-dispatch Emergency Stop.
 
 It uses its own non-cancelling concurrency group, `runner-emergency-stop`, and
 does not wait for a running Deploy `drain` or Scale Runners Phase C (both hold
-`runner-fleet-mutation` for hours). The interrupted run fails closed at its next
-identity comparison or admission and reports an identity difference or a
-rejected state; it changes nothing further. Its always-run Phase C cleanup also
-refuses (a stopped state is not a Phase C state). Treat those failures as
-expected and recover from the stopped state:
+`runner-fleet-mutation` for hours). The marker fences them (Ruling 33):
+
+- While the marker exists, every fleet workflow is refused at admission,
+  except Runner Status and Rebalance (both report the stop; Rebalance retires
+  nothing), Node Pool Sizing `remove-burst` (it deletes only empty closed pools
+  and is the first recovery step from `drain-stopped`), and Deploy `deploy` or
+  `rollback` dispatched with `acknowledge_emergency_stop=true`.
+- An acknowledging run deletes the marker inside its identity bracket before
+  its first write; if a newer stop rewrote the marker in between, the delete
+  fails and the fleet stays stopped.
+- Every fleet Helm write re-reads the marker afterwards. A run interrupted by
+  the stop that still reaches Helm sees it, re-applies 0/0 and fails with
+  `STOP_FENCE`. A run that reaches its next identity comparison or admission
+  first fails there and changes nothing further; its always-run Phase C cleanup
+  also refuses.
+
+Treat those failures as expected and recover from the stopped state:
 
 | Stopped state | Recovery (CI only, reviewed `expected_sha`) |
 |---|---|
-| `burst-stopped` | Deploy `operation=deploy` restores `burst` (2/20). To leave burst instead: Deploy `operation=drain` with the recorded `rollback_revision`, then `remove-burst`, then Deploy `rollback`. |
-| `drain-stopped` (stopped during a drain) | Node Pool Sizing `remove-burst` once both burst pools have zero nodes (busy jobs finish first), then Deploy `operation=rollback` with the recorded `rollback_revision`. Deploy `drain` does not admit `drain-stopped`. |
-| `density-stopped` | `remove-burst` if closed burst pools exist, then Deploy `operation=rollback` with a `density` revision: the recorded one, or the revision the Emergency Stop summary shows as "before the stop" (rollback validates it as `density`). |
+| `burst-stopped` | Deploy `operation=deploy`, `acknowledge_emergency_stop=true`, restores `burst` (2/20). To leave burst afterwards: Deploy `operation=drain`, then `remove-burst`, then Deploy `rollback`. |
+| `drain-stopped` (stopped during a drain) | Node Pool Sizing `remove-burst` once both burst pools have zero nodes (busy jobs finish first), then Deploy `operation=rollback`, `acknowledge_emergency_stop=true`. Deploy `drain` does not admit `drain-stopped`. |
+| `density-stopped` | `remove-burst` if closed burst pools exist, then Deploy `operation=rollback`, `acknowledge_emergency_stop=true` (restores `deploy/density-values.yaml`). |
 
-Rebalance treats a stopped state as nothing to rebalance. Every other operation
-rejects it. If the stop itself fails part-way, re-dispatch Emergency Stop; it is
-idempotent on a stopped release.
+```bash
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=rollback \
+  -f acknowledge_emergency_stop=true -f expected_sha="$SHA"
+```
+
+Rebalance treats a stopped state or the marker as nothing to rebalance. Every
+other operation rejects them. If the stop itself fails part-way, re-dispatch
+Emergency Stop; it is idempotent on a stopped release.
 
 Rebalance Runners uses its own group, `runner-rebalance`, so an hourly run never
 queues behind (or displaces a pending run of) a fleet mutation. Each run first
@@ -380,7 +407,7 @@ starting the next step.
 
 | Date (UTC) | Step | Workflow / operation | `expected_sha` | Run URL | Result / notes |
 |---|---|---|---|---|---|
-| | 1 | Scale Runners `record-density` | | | `rollback_revision` = |
+| | 1 | Scale Runners `record-density` | | | live release equals `deploy/density-values.yaml` |
 | | 2 | Deploy `prepare-trust-boundary` | | | |
 | | 3 | Node Pool Sizing `create-burst` | | | |
 | | 3 | Node Pool Sizing `configure-expander` | | | |

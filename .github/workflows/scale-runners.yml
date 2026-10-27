@@ -5,9 +5,11 @@ name: Scale GitHub Runners
 # commit to deploy/dind-values.yaml followed by Deploy. This workflow keeps
 # two actions:
 #
-#   record-density      read-only; validates the live release as the density
-#                       contract (2/4) and emits its Helm revision as the
-#                       rollback target (output rollback_revision)
+#   record-density      read-only; verifies that the live release is the
+#                       density contract (2/4) and equals the render of the
+#                       committed deploy/density-values.yaml, the target Deploy
+#                       `rollback` upgrades to (Ruling 34; no Helm revision is
+#                       recorded or needed)
 #   acceptance-phase-c  acceptance Phase C as one lock-owning run
 #                       (scripts/acceptance-phase-c.sh); a final always-run
 #                       step returns ARC to burst whether the run succeeded,
@@ -59,8 +61,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    outputs:
-      rollback_revision: ${{ steps.record.outputs.rollback_revision }}
 
     steps:
       - name: Checkout repository
@@ -158,61 +158,35 @@ jobs:
             echo "cleanup_eligible=true" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Record density rollback revision
+      - name: Verify the live release is the committed density release
         id: record
         if: steps.validate.outputs.action == 'record-density'
+        env:
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
-          validate_density() {
-            python3 scripts/validate-runner-isolation-contract.py \
-              --contract density --kind "$1" \
-              --min-runners 2 --max-runners 4 --runner-group private
-          }
-          helm get values "${RELEASE_NAME}" -n arc-runners -o json | validate_density values
-          helm get manifest "${RELEASE_NAME}" -n arc-runners | validate_density manifest
-          kubectl get autoscalingrunnersets.actions.github.com -n arc-runners -o json \
-            | validate_density asrs-list
-
-          HISTORY=$(helm history "${RELEASE_NAME}" -n arc-runners -o json)
-          REVISION=$(jq -r --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(.status == "deployed")] as $deployed
-            | if ($deployed | length) == 1
-                and $deployed[0].chart == ("gha-runner-scale-set-" + $version)
-              then $deployed[0].revision | tostring else empty end
-          ' <<<"${HISTORY}")
-          if ! [[ "${REVISION}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "❌ Error: could not identify exactly one deployed ${ARC_CHART_VERSION} revision"
+          # Read-only (Ruling 34): the live values, manifest and
+          # AutoscalingRunnerSet must be density 2/4, and the live manifest
+          # (Secret payloads excluded) must equal the render of
+          # deploy/density-values.yaml with the production overlays, so Deploy
+          # `rollback` returns the fleet to exactly the release running now.
+          if [ -z "${RUNNER_TOKEN}" ]; then
+            echo "❌ Error: RUNNER_TOKEN secret is not set!"
             exit 1
           fi
-          helm get values "${RELEASE_NAME}" --revision "${REVISION}" -n arc-runners -o json \
-            | validate_density values
-          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" -n arc-runners \
-            | validate_density manifest
-          # Nothing changed while the revision was read.
+          ./scripts/rollback-density.sh --verify-live
+          # Nothing changed while the release was read.
           ./scripts/verify-runner-pool-state.sh \
             --cluster-name "${CLUSTER_NAME}" \
             --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
             --transition none
-          # Readback (Ruling 27): the recorded revision must still be in helm
-          # history. Every Helm write keeps 100 revisions (--history-max 100),
-          # so it survives the rollout until Deploy drain and rollback use it.
-          HISTORY_AFTER=$(helm history "${RELEASE_NAME}" -n arc-runners -o json)
-          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(
-              (.revision | tostring) == $revision
-              and .chart == ("gha-runner-scale-set-" + $version))] | length == 1
-          ' <<<"${HISTORY_AFTER}" >/dev/null; then
-            echo "❌ Error: recorded revision ${REVISION} is not in helm history; nothing was recorded"
-            exit 1
-          fi
-          echo "rollback_revision=${REVISION}" >> "${GITHUB_OUTPUT}"
           {
-            echo "## Density rollback target recorded"
+            echo "## Density release verified"
             echo ""
-            echo "Validated density (2/4) Helm revision: **${REVISION}**"
+            echo "The live release is density (2/4) and equals the render of \`deploy/density-values.yaml\`."
             echo ""
-            echo "Pass it as \`rollback_revision\` to Deploy GitHub Runners \`operation=drain\` and \`operation=rollback\`."
+            echo "Deploy GitHub Runners \`operation=rollback\` upgrades to that file; no Helm revision is needed."
           } >> "${GITHUB_STEP_SUMMARY}"
-          echo "✅ Recorded density rollback revision ${REVISION}"
+          echo "✅ The live release is the committed density release"
 
       - name: Run acceptance Phase C
         if: steps.validate.outputs.action == 'acceptance-phase-c'

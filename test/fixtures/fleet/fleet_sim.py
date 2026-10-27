@@ -32,12 +32,24 @@ Mutations handled here (each appended to mutations.log as one token):
   helm upgrade ... --reuse-values --set minRunners=N  -> 8/4 or 2   "helm-upgrade:min=N"
   helm upgrade ... --reuse-values --set minRunners=0 --set maxRunners=0
                                      -> <base>-stopped (Emergency Stop)  "helm-upgrade:stopped"
+  helm upgrade ... --values deploy/density-values.yaml -> density   "helm-upgrade:density"
   helm rollback redducklabs-runners REV ...           -> that rev   "helm-rollback:REV"
 Every Helm write keeps at most --history-max revisions (Helm's default, 10,
 when the flag is absent), pruning the oldest, as Helm's release storage does.
 knobs.prune_on_history_read N: from the Nth "helm history" read on, the
 deployed revision is missing from the history (pruned by a concurrent write).
   kubectl delete ephemeralrunner -n arc-runners NAME  -> gone       "delete-er:<suffix>"
+  Emergency Stop marker ConfigMap arc-runners/runner-fleet-emergency-stop
+  (Ruling 33): "kubectl apply --server-side -f -" writes it ("stop-marker:set"),
+  "kubectl delete --raw <path> -f <DeleteOptions>" deletes it only when the
+  uid/resourceVersion preconditions match ("stop-marker:delete"), and
+  "kubectl get configmap ... --ignore-not-found -o json" reads it (scenario
+  "stop_marker" starts with one). knobs.marker_read / marker_write "fail"
+  fail those calls (marker_read "fail-after-write": every read after the
+  first applied Helm write); knobs.marker_bump_before_delete rewrites the marker (a
+  newer stop) just before a delete; knobs.stop_before <token> runs a complete
+  Emergency Stop (marker, then 0/0; "injected-stop-marker,injected-stop")
+  immediately before the Helm write that would log <token>.
   kubectl apply --server-side -f deploy/runner-network-policy.yaml   "apply-netpol"
     (rewrites networkpolicies.json; knobs.netpol_dry_run "fail" fails the
     server dry run, "defaulted" returns a spec with an extra field;
@@ -83,6 +95,8 @@ STOP_LAYER = {
 HELM_DEFAULT_HISTORY_MAX = 10
 BURST_FAMILY = ("arc-burst", "arc-burst-acceptance-8", "arc-burst-acceptance-4")
 MIN_LAYER = {"8": "arc-burst-acceptance-8", "4": "arc-burst-acceptance-4", "2": "arc-burst"}
+DENSITY_VALUES = "deploy/density-values.yaml"
+STOP_MARKER = "runner-fleet-emergency-stop"
 
 
 def p(directory, name):
@@ -304,6 +318,7 @@ def finish_write(directory, world, token, apply):
         log(directory, f"{token}:failed")
         return 1
     apply()
+    world["helm_writes"] = world.get("helm_writes", 0) + 1
     log(directory, token)
     write_world(directory, world)
     if knobs.get("cancel_after") == token:
@@ -336,7 +351,55 @@ def stop(world, history_max):
     world["runners"] = [r for r in world["runners"] if r["busy"]]
 
 
+def write_token(args):
+    """The mutation token a Helm write would log, before it is applied."""
+    if args[:2] == ["rollback", "redducklabs-runners"]:
+        return f"helm-rollback:{args[2]}"
+    if args[:2] != ["upgrade", "redducklabs-runners"]:
+        return None
+    if "--reuse-values" in args and "maxRunners=0" in args:
+        return "helm-upgrade:stopped"
+    if "--reuse-values" in args:
+        values = [a for a in args if a.startswith("minRunners=")]
+        return f"helm-upgrade:min={values[0][11:]}" if len(values) == 1 else None
+    if option(args, "--values") == "deploy/dind-values.yaml":
+        return "helm-upgrade:burst"
+    if option(args, "--values") == DENSITY_VALUES:
+        return "helm-upgrade:density"
+    return "helm-upgrade:drain" if option(args, "-f") else None
+
+
+def marker_document(marker):
+    return {"apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": STOP_MARKER, "namespace": "arc-runners", "uid": marker["uid"],
+                         "resourceVersion": str(marker["resourceVersion"])},
+            "data": dict(marker["data"])}
+
+
+def set_marker(world, data):
+    """Emergency Stop's marker write (an update keeps the uid, bumps the resourceVersion)."""
+    world["rv"] = world.get("rv", 100) + 1
+    marker = world.get("stop_marker")
+    uid = marker["uid"] if marker else f"stop-marker-uid-{world['rv']}"
+    world["stop_marker"] = {"uid": uid, "resourceVersion": world["rv"], "data": data}
+
+
+def inject_stop(directory, world):
+    """knobs.stop_before: a complete Emergency Stop (marker, then 0/0) that lands
+    after the run's final admission and immediately before its Helm write."""
+    set_marker(world, {"run-id": "injected", "time": "2026-10-27T00:00:00Z"})
+    log(directory, "injected-stop-marker")
+    stop(world, 100)
+    log(directory, "injected-stop")
+    world["injected"] = True
+    write_world(directory, world)
+
+
 def helm(directory, world, args):
+    token = write_token(args)
+    if token is not None and token != "helm-upgrade:stopped" and world["knobs"].get("stop_before") == token \
+            and not world.get("injected"):
+        inject_stop(directory, world)
     if args[:2] == ["upgrade", "redducklabs-runners"]:
         history_max = history_max_of(args)
         if "--reuse-values" in args and "maxRunners=0" in args:
@@ -359,6 +422,16 @@ def helm(directory, world, args):
                 return 1
             return finish_write(directory, world, "helm-upgrade:burst",
                                 lambda: new_revision(world, "arc-burst", history_max))
+        if option(args, "--values") == DENSITY_VALUES:
+            # Ruling 34: rollback upgrades to the committed density values.
+            if world["arc"] not in ("arc-drain", "arc-drain-stopped", "arc-density-stopped") \
+                    or option(args, "--version") != "0.14.2":
+                print(f"fake helm: unexpected density upgrade from {world['arc']}: {args}", file=sys.stderr)
+                return 1
+            if not post_render(directory, args, "template-density.yaml"):
+                return 1
+            return finish_write(directory, world, "helm-upgrade:density",
+                                lambda: new_revision(world, "arc-density", history_max))
         drain_file = option(args, "-f")
         if drain_file:
             with open(drain_file, encoding="utf-8") as stream:
@@ -392,7 +465,8 @@ def helm(directory, world, args):
         print(json.dumps(history_document(entries)))
         return 0
     if args[:1] == ["template"]:
-        name = "template-burst.yaml" if option(args, "--values") == "deploy/dind-values.yaml" else "template-drain.yaml"
+        name = {"deploy/dind-values.yaml": "template-burst.yaml",
+                DENSITY_VALUES: "template-density.yaml"}.get(option(args, "--values"), "template-drain.yaml")
         with open(p(directory, name), encoding="utf-8") as stream:
             sys.stdout.write(stream.read())
         return 0
@@ -444,7 +518,60 @@ def network_policy(directory, world, args, document):
     return 0
 
 
+def stop_marker_command(directory, world, args):
+    """The Emergency Stop marker ConfigMap (Ruling 33): read, write, guarded delete."""
+    knobs = world["knobs"]
+    marker = world.get("stop_marker")
+    if args[:3] == ["get", "configmap", STOP_MARKER]:
+        if args[3:] != ["-n", "arc-runners", "--ignore-not-found", "-o", "json"]:
+            print(f"fake kubectl: unexpected marker read {args}", file=sys.stderr)
+            return 1
+        if knobs.get("marker_read") == "fail" or (
+                knobs.get("marker_read") == "fail-after-write" and world.get("helm_writes", 0) > 0):
+            print("fake kubectl: injected marker read failure", file=sys.stderr)
+            return 1
+        if marker:
+            print(json.dumps(marker_document(marker)))
+        return 0
+    if args[:1] == ["apply"] and option(args, "-f") == "-":
+        document = json.loads(sys.stdin.read())
+        if document.get("kind") != "ConfigMap" or document["metadata"].get("name") != STOP_MARKER \
+                or "--server-side" not in args:
+            print(f"fake kubectl: unexpected apply from stdin {args}", file=sys.stderr)
+            return 1
+        if knobs.get("marker_write") == "fail":
+            print("fake kubectl: injected marker write failure", file=sys.stderr)
+            return 1
+        set_marker(world, document.get("data") or {})
+        log(directory, "stop-marker:set")
+        write_world(directory, world)
+        print(f"configmap/{STOP_MARKER} serverside-applied")
+        return 0
+    if args[:2] == ["delete", "--raw"] and args[2] == f"/api/v1/namespaces/arc-runners/configmaps/{STOP_MARKER}":
+        with open(option(args, "-f"), encoding="utf-8") as stream:
+            preconditions = json.load(stream).get("preconditions") or {}
+        if knobs.get("marker_bump_before_delete") and marker:
+            # A newer Emergency Stop rewrote the marker after this run read it.
+            set_marker(world, {"run-id": "newer", "time": "2026-10-27T00:00:01Z"})
+            marker = world["stop_marker"]
+            write_world(directory, world)
+        if not marker:
+            print("Error from server (NotFound): configmaps not found", file=sys.stderr)
+            return 1
+        if preconditions != {"uid": marker["uid"], "resourceVersion": str(marker["resourceVersion"])}:
+            print("Error from server (Conflict): Precondition failed", file=sys.stderr)
+            return 1
+        world["stop_marker"] = None
+        log(directory, "stop-marker:delete")
+        write_world(directory, world)
+        return 0
+    return NOT_HANDLED
+
+
 def kubectl(directory, world, args):
+    handled = stop_marker_command(directory, world, args)
+    if handled != NOT_HANDLED:
+        return handled
     if args[:1] == ["apply"] and option(args, "-f") == "deploy/runner-network-policy.yaml":
         with open(option(args, "-f"), encoding="utf-8") as stream:
             return network_policy(directory, world, args, yaml.safe_load(stream))
@@ -521,6 +648,9 @@ def init(directory, scenario):
                                  "created": clock - 3600 + index})
     shutil.copyfile(os.path.join(LAYERS, "arc-burst", "helm-manifest.yaml"), p(directory, "template-burst.yaml"))
     shutil.copyfile(os.path.join(LAYERS, "arc-drain", "helm-manifest.yaml"), p(directory, "template-drain.yaml"))
+    shutil.copyfile(os.path.join(LAYERS, "arc-density", "helm-manifest.yaml"), p(directory, "template-density.yaml"))
+    if scenario.get("stop_marker"):
+        set_marker(world, scenario["stop_marker"])
     write_world(directory, world)
     return 0
 

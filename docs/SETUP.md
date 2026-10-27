@@ -53,8 +53,9 @@ design (Ruling 15 in the burst autoscaling design record).
    - **Operation**: `deploy` (also `prepare-trust-boundary`, `drain`, `rollback`)
    - **Expected SHA**: Exact reviewed commit SHA
    - **Accept privileged runner co-tenancy**: Required for trust preparation or deployment
-   - **Rollback revision**: For `drain` and `rollback` only - the `density`
-     Helm revision recorded by Scale Runners `record-density`
+   - **Acknowledge emergency stop**: For `deploy` and `rollback` only - recover
+     from an Emergency Stop; the run deletes the stop marker before its Helm
+     write (see `docs/runbooks/node-pool-sizing.md`, "Emergency Stop")
    - **Runner image**: Fixed canonical value `registry.digitalocean.com/redducklabs/github-runner:latest`; deployment rejects alternatives so every deploy validates the same lifecycle contract.
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
@@ -76,12 +77,16 @@ and public-workflow checks without Helm, Kubernetes, or DigitalOcean mutation.
 Ordinary min/max scaling is retired: runner bounds change only through a
 reviewed commit to `deploy/dind-values.yaml` followed by Deploy, which renders
 and reads back exactly the `burst` contract. Scale Runners keeps only
-`record-density` (records the `density` rollback revision) and
-`acceptance-phase-c`. Recovery is Deploy `drain` (with the recorded `density`
-revision as `rollback_revision`, verified before the drain upgrade), Node Pool
-Sizing `remove-burst`, then Deploy `rollback` to that revision; the
-legacy-isolated rollback target is retired. Every Helm write keeps 100
-revisions (`--history-max 100`), so the recorded revision is not pruned. Every
+`record-density` (read-only: verifies the live release equals the render of
+the committed `deploy/density-values.yaml`) and `acceptance-phase-c`. Recovery
+is Deploy `drain`, Node Pool Sizing `remove-burst`, then Deploy `rollback`,
+which upgrades to `deploy/density-values.yaml` (validated as `density`;
+independent of Helm history); the legacy-isolated rollback target is retired.
+Every Helm write keeps 100 revisions (`--history-max 100`). Emergency Stop
+writes the marker `arc-runners/runner-fleet-emergency-stop` before its Helm
+write; while it exists the fleet workflows refuse to run (except recovery with
+`acknowledge_emergency_stop=true`), and every fleet Helm write re-checks it
+afterwards and re-applies the stop. Every
 operation is admitted by `scripts/verify-runner-pool-state.sh` under its own
 name. Deploy also installs the runner NetworkPolicy
 (`deploy/runner-network-policy.yaml`) before its Helm upgrade, and
@@ -313,10 +318,9 @@ dynamic self-hosted runner selector.
    pod budget. Use Runner Status aggregate and per-container diagnostics.
 
 4. **Rollback**
-   Run Deploy GitHub Runners `drain` with the `density` revision recorded by
-   Scale Runners `record-density` as `rollback_revision` (verified before the
-   drain upgrade), then Node Pool Sizing `remove-burst`, then Deploy GitHub
-   Runners `rollback` with that revision and the reviewed `expected_sha`. CI
+   Run Deploy GitHub Runners `drain`, then Node Pool Sizing `remove-burst`,
+   then Deploy GitHub Runners `rollback` with the reviewed `expected_sha`; it
+   upgrades to the committed `deploy/density-values.yaml`. CI
    verifies the restored `density` (2/4) template and the private runner-group
    boundary.
 

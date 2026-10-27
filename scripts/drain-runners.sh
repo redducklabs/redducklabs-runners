@@ -17,10 +17,11 @@
 #    scripts/render-drain-values.py, render the candidate manifest and check it
 #    against the drain contract, then run "helm upgrade" with that single -f
 #    file inside the identity bracket (compare none, re-admit `drain`, upgrade
-#    behind a manifest-hash post-renderer, compare arc:drain:2/4). The upgrade
-#    keeps 100 Helm revisions (--history-max 100), so the density revision
-#    the calling workflow validated as rollback_revision is not pruned. If ARC
-#    is already `drain`, the upgrade is skipped and the wait resumes.
+#    behind a manifest-hash post-renderer, the Emergency Stop fence, compare
+#    arc:drain:2/4) with --history-max 100. Rollback does not depend on Helm
+#    history (Ruling 34). If ARC is already `drain`, the upgrade is skipped and
+#    the wait resumes. While the Emergency Stop marker exists the bracket and
+#    the gate refuse to write (Ruling 33).
 # 2. Read back the drain contract from Helm values, manifest and the live
 #    AutoscalingRunnerSet.
 # 3. Every 120 s: stop when no runner pod is on a burst node, no burst node is

@@ -1,6 +1,11 @@
-# Test fixture: density contract (2/4, no burst metadata or affinity). This is
-# the pre-burst deploy/dind-values.yaml, kept to prove the density and burst
-# contracts stay distinct.
+# Density contract (2/4, no burst metadata or affinity): the reviewed values of
+# the pre-burst release, byte-for-byte the deploy/dind-values.yaml that is live
+# before the burst rollout (main at 0a1e7a8). Deploy GitHub Runners
+# `operation=rollback` upgrades to exactly this file (rendered and validated as
+# density 2/4) instead of a Helm history revision (Ruling 34 in
+# docs/specs/2026-10-26-runner-burst-autoscaling-design.md), and Scale Runners
+# `record-density` checks that the live release equals its render. The test
+# suites use it as the density fixture. Change it only by a reviewed commit.
 
 # GitHub Actions Runner Controller - Docker-in-Docker Configuration
 # Production configuration for redducklabs

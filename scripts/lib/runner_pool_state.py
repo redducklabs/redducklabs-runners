@@ -77,6 +77,17 @@ SCALE_SET_LABEL = "actions.github.com/scale-set-name"
 EXPANDERS = ["priority", "random"]
 EXPANDER_CONFIGMAP = ("kube-system", "cluster-autoscaler-priority-expander")
 EXPANDER_MANAGED_LABEL = "doks.digitalocean.com/managed"
+# Ruling 33: Emergency Stop writes this ConfigMap before its Helm write. While
+# it exists every fleet mutator is refused; only Deploy `deploy` and
+# `rollback` dispatched with acknowledge_emergency_stop=true are admitted (they
+# delete it, bracketed, before their Helm write). Node Pool Sizing
+# `remove-burst` is also admitted: it deletes only empty, closed burst pools,
+# cannot start a runner, and is the first step of the documented recovery from
+# drain-stopped (without it that recovery could not run). Status and Rebalance
+# report it as a stopped condition.
+STOP_MARKER = "runner-fleet-emergency-stop"
+STOP_ACKNOWLEDGED = {"deploy", "rollback"}
+STOP_TOLERATED = {"status", "rebalance", "remove-burst"}
 
 # (contract, minRunners, maxRunners) states the gate can classify.
 ARC_STATES = (
@@ -200,6 +211,38 @@ def read_live(cluster_name, with_pods):
 def read_expander_configmap():
     namespace, name = EXPANDER_CONFIGMAP
     return run_json(["kubectl", "get", "configmap", name, "-n", namespace, "-o", "json"])
+
+
+def read_stop_marker():
+    """The Emergency Stop marker ConfigMap, or None when absent. Raises ReadError."""
+    text = run(["kubectl", "get", "configmap", STOP_MARKER, "-n", NAMESPACE, "--ignore-not-found", "-o", "json"])
+    if not text.strip():
+        return None
+    try:
+        marker = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ReadError(f"the Emergency Stop marker {NAMESPACE}/{STOP_MARKER} is not JSON: {error}") from error
+    if not isinstance(marker, dict) or (marker.get("metadata") or {}).get("name") != STOP_MARKER:
+        raise ReadError(f"the Emergency Stop marker read did not return {NAMESPACE}/{STOP_MARKER}")
+    return marker
+
+
+def stop_line(marker):
+    data = marker.get("data") or {}
+    run_id = re.sub(r"[^0-9A-Za-z._:-]", "", str(data.get("run-id", "unknown")))[:40] or "unknown"
+    stamp = re.sub(r"[^0-9A-Za-z._:-]", "", str(data.get("time", "unknown")))[:40] or "unknown"
+    return f"STOP: Emergency Stop marker {NAMESPACE}/{STOP_MARKER} present (run {run_id} at {stamp})"
+
+
+def stop_errors(operation, marker, acknowledged):
+    """Ruling 33: operations refused while the Emergency Stop marker exists."""
+    if marker is None or operation in STOP_TOLERATED:
+        return []
+    if operation in STOP_ACKNOWLEDGED and acknowledged:
+        return []
+    hint = ("dispatch it with acknowledge_emergency_stop=true to recover" if operation in STOP_ACKNOWLEDGED
+            else "recover first with Deploy `deploy` or `rollback` and acknowledge_emergency_stop=true")
+    return [f"operation '{operation}' is refused while the Emergency Stop marker {NAMESPACE}/{STOP_MARKER} exists; {hint}"]
 
 
 def verify_release_identity():
@@ -706,11 +749,14 @@ def expander_errors(cluster, primary_id, fallback_id, operation):
     return errors
 
 
-def admission_errors(operation, live, facts):
+def admission_errors(operation, live, facts, marker=None):
     """Operation-specific admission (spec table 'ARC states admitted per operation')."""
     errors = []
     arc = facts["arc"]
-    if arc is not None and arc[0] not in ADMITTED_ARC[operation]:
+    # While the Emergency Stop marker exists Rebalance treats the fleet as
+    # stopped whatever the release reads (Ruling 33): notice only.
+    marker_rebalance = operation == "rebalance" and marker is not None
+    if arc is not None and arc[0] not in ADMITTED_ARC[operation] and not marker_rebalance:
         errors.append(f"operation '{operation}' does not admit ARC state '{arc[0]}' ({arc[1]}/{arc[2]})")
     pools, present = facts["pools"], facts["present"]
     # Ruling 8: a burst-named pool with the wrong size, labels, taint or
@@ -726,7 +772,7 @@ def admission_errors(operation, live, facts):
                   "enable-burst", "drain"}
     # A stopped fleet runs no runners, so Rebalance has nothing to retire and
     # skips with a notice whatever the burst pools are (Ruling 26).
-    stopped_rebalance = operation == "rebalance" and arc is not None and arc[0] in STOPPED
+    stopped_rebalance = operation == "rebalance" and (marker is not None or (arc is not None and arc[0] in STOPPED))
     if operation in needs_both and not both and not stopped_rebalance:
         errors.append(f"operation '{operation}' requires both burst pools present; found {present or 'none'}")
     if operation in ("record-density", "rollback") and present:
@@ -894,9 +940,15 @@ def expected_after(snapshot, transition, live_snapshot):
 # --------------------------------------------------------------------------
 
 def admit(args):
+    if args.acknowledge_emergency_stop and args.operation not in STOP_ACKNOWLEDGED:
+        raise UsageError("--acknowledge-emergency-stop is valid only for deploy and rollback")
     live = read_live(args.cluster_name, with_pods=True)
+    marker = read_stop_marker()
     errors, facts = evaluate(live, now_seconds())
-    errors += admission_errors(args.operation, live, facts)
+    errors += stop_errors(args.operation, marker, args.acknowledge_emergency_stop)
+    errors += admission_errors(args.operation, live, facts, marker)
+    if marker is not None:
+        print(stop_line(marker), file=sys.stderr if errors else sys.stdout)
     if errors:
         for error in errors:
             print(f"REJECTED: {error}", file=sys.stderr)
@@ -991,6 +1043,9 @@ def main():
     admit_parser.add_argument("--operation", required=True, choices=OPERATIONS)
     admit_parser.add_argument("--cluster-name", required=True)
     admit_parser.add_argument("--emit-identities")
+    admit_parser.add_argument("--acknowledge-emergency-stop", action="store_true")
+    digest_parser = sub.add_parser("manifest-digest")
+    digest_parser.add_argument("--cluster-name", default="redducklabs-cluster")
     report_parser = sub.add_parser("report")
     report_parser.add_argument("--cluster-name", required=True)
     compare_parser = sub.add_parser("compare")
@@ -1004,6 +1059,9 @@ def main():
     try:
         if not CLUSTER_NAME_RE.match(args.cluster_name):
             raise UsageError(f"invalid cluster name '{args.cluster_name}'")
+        if args.mode == "manifest-digest":
+            print(manifest_digest(sys.stdin.read()))
+            return 0
         if args.mode == "report":
             return report(args)
         if args.mode == "compare":

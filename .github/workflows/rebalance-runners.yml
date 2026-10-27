@@ -33,7 +33,8 @@ name: Rebalance Runners
 # rebalance" notice only when the read-only status shows ARC density (any
 # burst pools) or drain with no burst pools. Every other state goes to the
 # rebalance gate, and a rejection fails the run. Dispatch runs always take the
-# gate. When the gate admits a stopped state (Emergency Stop, Ruling 26), the
+# gate. When the gate admits a stopped state (Emergency Stop, Ruling 26) or
+# reports the Emergency Stop marker (Ruling 33), the
 # run ends with a notice and retires nothing.
 
 on:
@@ -214,16 +215,23 @@ jobs:
         id: admit
         if: steps.inflight.outputs.busy != 'true' && steps.probe.outputs.skip != 'true'
         run: |
-          STATE_LINE=$(./scripts/verify-runner-pool-state.sh \
+          GATE_OUT=$(./scripts/verify-runner-pool-state.sh \
             --cluster-name "${CLUSTER_NAME}" \
             --operation rebalance \
             --emit-identities "${RUNNER_TEMP}/pool-identities.json")
-          echo "${STATE_LINE}"
-          # Emergency Stop's stopped states are admitted (Ruling 26): there
-          # are no runners to retire, so the run ends with a notice.
+          echo "${GATE_OUT}"
+          STATE_LINE=$(grep -E '^STATE: ' <<<"${GATE_OUT}")
+          # Emergency Stop's stopped states are admitted (Ruling 26), and the
+          # stop marker counts as stopped whatever the release reads (Ruling
+          # 33): there is nothing to retire, so the run ends with a notice.
+          NOTICE=""
           if [[ "${STATE_LINE}" =~ ^STATE:\ arc=(burst|density|drain)-stopped\  ]]; then
-            echo "stopped=true" >> "${GITHUB_OUTPUT}"
             NOTICE="nothing to rebalance: ARC is stopped (${STATE_LINE#STATE: }); Emergency Stop is in effect"
+          elif grep -qE '^STOP: ' <<<"${GATE_OUT}"; then
+            NOTICE="nothing to rebalance: the Emergency Stop marker is present (${STATE_LINE#STATE: }); Emergency Stop is in effect"
+          fi
+          if [ -n "${NOTICE}" ]; then
+            echo "stopped=true" >> "${GITHUB_OUTPUT}"
             {
               echo "## Rebalance Runners"
               echo ""

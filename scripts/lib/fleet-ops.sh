@@ -3,7 +3,8 @@
 #
 # Shared helpers for the scripts that change the ARC runner release while a
 # fleet workflow holds the runner-fleet-mutation lock
-# (scripts/drain-runners.sh, scripts/acceptance-phase-c.sh). Source this file.
+# (scripts/drain-runners.sh, scripts/acceptance-phase-c.sh,
+# scripts/rollback-density.sh) and by Deploy GitHub Runners. Source this file.
 #
 # Every Helm write goes through fleet_helm_bracket, which applies the identity
 # contract from docs/specs/2026-10-26-runner-burst-autoscaling-design.md:
@@ -11,8 +12,13 @@
 #      the caller's pre-transition when it must accept a known ARC state);
 #   2. re-run full admission for the operation;
 #   3. the Helm command;
-#   4. compare again, allowing only the declared ARC transition.
-# A difference stops with exit 3 (identity drift) and no further write.
+#   4. the Emergency Stop fence (Ruling 33): re-read the marker ConfigMap
+#      arc-runners/runner-fleet-emergency-stop; if it exists (or cannot be
+#      read), immediately re-apply 0/0 with --reuse-values and fail;
+#   5. compare again, allowing only the declared ARC transition.
+# A difference stops with exit 3 (identity drift) and no further write. The
+# bracket also refuses to write while the marker exists, including for the
+# cleanup paths that skip re-admission (operation "-").
 #
 # Clocks are injectable for tests: NOW_CMD (default "date +%s") prints epoch
 # seconds and SLEEP_CMD (default "sleep") is called with a number of seconds.
@@ -26,6 +32,11 @@ FLEET_CHART_VERSION="0.14.2"
 FLEET_RUNNER_IMAGE="registry.digitalocean.com/redducklabs/github-runner:latest"
 FLEET_GATE="${FLEET_SCRIPTS_DIR}/verify-runner-pool-state.sh"
 FLEET_VALIDATOR="${FLEET_SCRIPTS_DIR}/validate-runner-isolation-contract.py"
+# Ruling 33: written by Emergency Stop before its Helm write.
+FLEET_STOP_MARKER="runner-fleet-emergency-stop"
+# Ruling 34: the reviewed density values Deploy `rollback` upgrades to
+# (relative to the repository root, where the workflows run).
+FLEET_DENSITY_VALUES="deploy/density-values.yaml"
 # Every ARC state the fleet workflows can classify, as contract:min/max.
 # The stopped states (Ruling 26) are what Emergency Stop leaves: a base
 # template with minRunners=maxRunners=0.
@@ -49,9 +60,10 @@ fleet_sleep() {
     "${cmd[@]}" "$1"
 }
 
-# fleet_admit <operation>: full pool-state admission; prints the STATE line.
+# fleet_admit <operation> [--acknowledge-emergency-stop]: full pool-state
+# admission; prints the STATE line (after a STOP line while the marker exists).
 fleet_admit() {
-    bash "$FLEET_GATE" --cluster-name "$CLUSTER_NAME" --operation "$1"
+    bash "$FLEET_GATE" --cluster-name "$CLUSTER_NAME" --operation "$@"
 }
 
 # fleet_compare <identities> <transition>: returns the gate's exit code
@@ -121,8 +133,11 @@ fleet_current_state() {
 # and contracts themselves). Returns 3 on identity drift, 1 on any other
 # failure, 0 when the post-transition comparison holds.
 fleet_helm_bracket() {
-    local identities=$1 operation=$2 pre=$3 post=$4 rc
+    local identities=$1 operation=$2 pre=$3 post=$4 rc helm_rc
     shift 4
+    if ! fleet_refuse_if_stopped; then
+        return 1
+    fi
     fleet_compare "$identities" "$pre" >/dev/null
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -135,7 +150,14 @@ fleet_helm_bracket() {
         return 1
     fi
     echo "HELM: $1 ${post}"
-    if ! helm "$@"; then
+    helm_rc=0
+    helm "$@" || helm_rc=$?
+    # The fence runs whether or not Helm reported success: a failed write may
+    # still have changed the release.
+    if ! fleet_stop_fence; then
+        return 1
+    fi
+    if [ "$helm_rc" -ne 0 ]; then
         echo "ERROR: helm $1 failed" >&2
         return 1
     fi
@@ -144,6 +166,148 @@ fleet_helm_bracket() {
     if [ "$rc" -ne 0 ]; then
         echo "ERROR: identity check after the Helm write failed (exit ${rc}); stopping" >&2
         [ "$rc" -eq 3 ] && return 3
+        return 1
+    fi
+}
+
+# fleet_stop_marker: prints the Emergency Stop marker ConfigMap as JSON, or
+# nothing when it is absent; returns 1 when the read fails.
+fleet_stop_marker() {
+    kubectl get configmap "$FLEET_STOP_MARKER" -n "$FLEET_NAMESPACE" --ignore-not-found -o json
+}
+
+# fleet_restop: Emergency Stop's own write, 0/0 on the pinned chart with
+# --reuse-values (the template is kept, so the gate classifies a stopped state).
+fleet_restop() {
+    echo "HELM: upgrade stopped:0/0 (re-applying the Emergency Stop)" >&2
+    helm upgrade "$FLEET_RELEASE" "$FLEET_CHART" --namespace "$FLEET_NAMESPACE" --version "$FLEET_CHART_VERSION" \
+        --reuse-values --set minRunners=0 --set maxRunners=0 --history-max 100 >&2
+}
+
+# fleet_stop_fence: runs immediately after every Helm write (Ruling 33). The
+# marker is written before Emergency Stop's Helm write, so a write of this run
+# that landed after a stop began (or completed) sees it here. A marker this run
+# acknowledged was deleted before the write, so any marker present now belongs
+# to a newer stop. Present or unreadable: re-apply 0/0 and return 1.
+fleet_stop_fence() {
+    local marker
+    if ! marker=$(fleet_stop_marker); then
+        echo "ERROR: STOP_FENCE: the Emergency Stop marker ${FLEET_NAMESPACE}/${FLEET_STOP_MARKER} could not be read after the Helm write; re-applying 0/0 (fail closed)" >&2
+        fleet_restop || echo "ERROR: STOP_FENCE: re-applying 0/0 failed; dispatch Emergency Stop now" >&2
+        return 1
+    fi
+    if [ -n "$marker" ]; then
+        echo "ERROR: STOP_FENCE: an Emergency Stop (marker ${FLEET_NAMESPACE}/${FLEET_STOP_MARKER}) is in effect after this run's Helm write; re-applied 0/0 and failing" >&2
+        fleet_restop || echo "ERROR: STOP_FENCE: re-applying 0/0 failed; dispatch Emergency Stop now" >&2
+        return 1
+    fi
+}
+
+# fleet_refuse_if_stopped: returns 1 (nothing written) while the marker exists
+# or cannot be read.
+fleet_refuse_if_stopped() {
+    local marker
+    if ! marker=$(fleet_stop_marker); then
+        echo "ERROR: the Emergency Stop marker could not be read; nothing was written" >&2
+        return 1
+    fi
+    if [ -n "$marker" ]; then
+        echo "ERROR: an Emergency Stop (marker ${FLEET_NAMESPACE}/${FLEET_STOP_MARKER}) is in effect; nothing was written" >&2
+        return 1
+    fi
+}
+
+# fleet_acknowledge_stop <identities> <operation>: Deploy `deploy`/`rollback`
+# dispatched with acknowledge_emergency_stop=true (Ruling 33). Deletes the
+# marker inside the identity bracket: compare none, admission with the
+# acknowledgement, the delete, compare none. The delete carries the uid and
+# resourceVersion that were read, so a newer Emergency Stop that rewrote the
+# marker in between makes it fail (HTTP 409) instead of being acknowledged
+# unseen. No marker: a no-op.
+fleet_acknowledge_stop() {
+    local identities=$1 operation=$2 marker uid version run_id body rc
+    if ! marker=$(fleet_stop_marker); then
+        echo "ERROR: the Emergency Stop marker could not be read; nothing was changed" >&2
+        return 1
+    fi
+    if [ -z "$marker" ]; then
+        echo "STOP_MARKER: none (no Emergency Stop to acknowledge)"
+        return 0
+    fi
+    if ! uid=$(jq -er '.metadata.uid | strings' <<<"$marker") \
+        || ! version=$(jq -er '.metadata.resourceVersion | strings' <<<"$marker"); then
+        echo "ERROR: the Emergency Stop marker has no uid or resourceVersion; nothing was changed" >&2
+        return 1
+    fi
+    run_id=$(jq -r '.data["run-id"] // "unknown" | tostring | gsub("[^0-9A-Za-z._:-]"; "")' <<<"$marker")
+    fleet_compare "$identities" none >/dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: identity check before deleting the Emergency Stop marker failed (exit ${rc}); nothing was changed" >&2
+        [ "$rc" -eq 3 ] && return 3
+        return 1
+    fi
+    if ! fleet_admit "$operation" --acknowledge-emergency-stop >/dev/null; then
+        echo "ERROR: ${operation} is no longer admitted; the Emergency Stop marker was kept" >&2
+        return 1
+    fi
+    body=$(umask 077 && mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/stop-ack.XXXXXX") || return 1
+    jq -n --arg uid "$uid" --arg version "$version" \
+        '{kind: "DeleteOptions", apiVersion: "v1", preconditions: {uid: $uid, resourceVersion: $version}}' > "$body"
+    if ! kubectl delete --raw "/api/v1/namespaces/${FLEET_NAMESPACE}/configmaps/${FLEET_STOP_MARKER}" -f "$body" >/dev/null; then
+        rm -f "$body"
+        echo "ERROR: could not delete the Emergency Stop marker of run ${run_id} (a newer stop changed it, or the delete failed); the fleet stays stopped" >&2
+        return 1
+    fi
+    rm -f "$body"
+    fleet_compare "$identities" none >/dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: identity check after deleting the Emergency Stop marker failed (exit ${rc}); stopping" >&2
+        [ "$rc" -eq 3 ] && return 3
+        return 1
+    fi
+    echo "STOP_MARKER: acknowledged and deleted the marker of Emergency Stop run ${run_id}"
+}
+
+# fleet_density_overlays <values-file> <token>: the fixed overlays the
+# production release is rendered with (as Deploy and drain), one per line.
+fleet_density_overlays() {
+    printf '%s\n' \
+        --namespace "$FLEET_NAMESPACE" \
+        --values "$1" \
+        --set "githubConfigSecret.github_token=$2" \
+        --set "runnerScaleSetName=${FLEET_RELEASE}" \
+        --set-string "template.spec.containers[0].image=${FLEET_RUNNER_IMAGE}" \
+        --set-string "template.spec.initContainers[0].image=${FLEET_RUNNER_IMAGE}" \
+        --set runnerGroup=redducklabs-private-runners \
+        --set controllerServiceAccount.name=arc-gha-rs-controller \
+        --set controllerServiceAccount.namespace=arc-systems \
+        --version "$FLEET_CHART_VERSION"
+}
+
+# fleet_render_density <work-dir>: validates deploy/density-values.yaml as the
+# density contract (2/4), renders it with the production overlays (RUNNER_TOKEN
+# is required, as for Deploy) into <work-dir>/density-candidate.yaml and
+# validates that manifest as density 2/4. Run from the repository root.
+# Returns 1, having written nothing to the cluster, on any failure.
+fleet_render_density() {
+    local work=$1 overlays
+    if [ -z "${RUNNER_TOKEN:-}" ]; then
+        echo "ERROR: RUNNER_TOKEN is required to render ${FLEET_DENSITY_VALUES}; nothing was changed" >&2
+        return 1
+    fi
+    if ! fleet_validate density 2 4 values < "$FLEET_DENSITY_VALUES"; then
+        echo "ERROR: ${FLEET_DENSITY_VALUES} is not the density contract (2/4); nothing was changed" >&2
+        return 1
+    fi
+    mapfile -t overlays < <(fleet_density_overlays "$FLEET_DENSITY_VALUES" "$RUNNER_TOKEN")
+    if ! helm template "$FLEET_RELEASE" "$FLEET_CHART" "${overlays[@]}" > "${work}/density-candidate.yaml"; then
+        echo "ERROR: helm template of ${FLEET_DENSITY_VALUES} failed; nothing was changed" >&2
+        return 1
+    fi
+    if ! fleet_validate density 2 4 manifest < "${work}/density-candidate.yaml"; then
+        echo "ERROR: the rendered ${FLEET_DENSITY_VALUES} manifest is not the density contract (2/4); nothing was changed" >&2
         return 1
     fi
 }

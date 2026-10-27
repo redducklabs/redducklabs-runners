@@ -6,19 +6,22 @@ name: Deploy GitHub Runners
 #                           deploy/dind-values.yaml (admits ARC density or burst)
 #   prepare-trust-boundary  runner group reconciliation only
 #   drain                   Helm upgrade to the `drain` contract, then retire idle
-#                           burst runners until both burst pools reach zero nodes;
-#                           requires rollback_revision (the density revision
-#                           recorded by Scale Runners record-density), which must
-#                           exist in helm history and validate as density first
-#   rollback                Helm rollback to a recorded `density` revision once the
-#                           burst pools are gone (a no-op on `density`)
+#                           burst runners until both burst pools reach zero nodes
+#   rollback                Helm upgrade to the committed density values
+#                           deploy/density-values.yaml (rendered and validated as
+#                           density 2/4; independent of Helm history, Ruling 34)
+#                           once the burst pools are gone (a no-op on `density`)
 #
-# Emergency Stop leaves a `stopped` state (a base template at 0/0, Ruling 26):
-# `deploy` restores burst from burst-stopped, `drain` starts from
-# burst-stopped, and `rollback` restores density from drain-stopped or
-# density-stopped once the burst pools are gone. Every Helm write keeps 100
-# revisions (--history-max 100) so the recorded density revision survives a
-# full rollout (Ruling 27).
+# Emergency Stop leaves a `stopped` state (a base template at 0/0, Ruling 26)
+# and the marker ConfigMap arc-runners/runner-fleet-emergency-stop (Ruling 33).
+# While the marker exists the gate refuses every operation here except
+# `deploy` and `rollback` dispatched with acknowledge_emergency_stop=true:
+# they delete the marker, inside the identity bracket, before their first
+# write. `deploy` restores burst from burst-stopped and `rollback` restores
+# density from drain-stopped or density-stopped once the burst pools are gone.
+# After every Helm write the run re-reads the marker; if a stop is in effect
+# it immediately re-applies 0/0 with --reuse-values and fails. Every Helm write
+# keeps 100 revisions (--history-max 100).
 #
 # Every run verifies expected_sha first, admits the live state with
 # scripts/verify-runner-pool-state.sh --operation <op>, and brackets each Helm
@@ -46,11 +49,11 @@ on:
         required: true
         default: false
         type: boolean
-      rollback_revision:
-        description: 'Density Helm revision recorded by Scale Runners record-density (required for drain and rollback)'
+      acknowledge_emergency_stop:
+        description: 'deploy/rollback only: recover from an Emergency Stop (deletes its marker before the Helm write)'
         required: false
-        default: ''
-        type: string
+        default: false
+        type: boolean
       expected_sha:
         description: 'Exact commit SHA to deploy'
         required: true
@@ -107,7 +110,7 @@ jobs:
     outputs:
       operation: ${{ steps.validate.outputs.operation }}
       expected_sha: ${{ steps.validate.outputs.expected_sha }}
-      rollback_revision: ${{ steps.validate.outputs.rollback_revision }}
+      acknowledge_emergency_stop: ${{ steps.validate.outputs.acknowledge_emergency_stop }}
       runner_image: ${{ steps.validate.outputs.runner_image }}
       namespace: ${{ steps.validate.outputs.namespace }}
 
@@ -123,7 +126,7 @@ jobs:
           INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
           INPUT_OPERATION: ${{ inputs.operation }}
           INPUT_ACCEPT_CO_TENANCY: ${{ inputs.accept_privileged_runner_co_tenancy }}
-          INPUT_ROLLBACK_REVISION: ${{ inputs.rollback_revision }}
+          INPUT_ACKNOWLEDGE_STOP: ${{ inputs.acknowledge_emergency_stop }}
         run: |
           echo "🔍 Validating deployment inputs..."
 
@@ -132,7 +135,7 @@ jobs:
           EXPECTED_SHA="${INPUT_EXPECTED_SHA}"
           OPERATION="${INPUT_OPERATION}"
           ACCEPT_CO_TENANCY="${INPUT_ACCEPT_CO_TENANCY}"
-          ROLLBACK_REVISION="${INPUT_ROLLBACK_REVISION}"
+          ACKNOWLEDGE_STOP="${INPUT_ACKNOWLEDGE_STOP:-false}"
 
           ACTUAL_SHA=$(git rev-parse HEAD)
           if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -161,21 +164,31 @@ jobs:
                 exit 1
               fi
               ;;
-            drain|rollback)
-              # Drain is entered only with a usable rollback target (Ruling 27).
-              if ! [[ "${ROLLBACK_REVISION}" =~ ^[1-9][0-9]*$ ]]; then
-                echo "❌ Error: rollback_revision must be a positive Helm revision (required for ${OPERATION})"
-                exit 1
-              fi
-              ;;
+            drain|rollback) ;;
             *)
               echo "❌ Error: operation must be deploy, prepare-trust-boundary, drain, or rollback"
               exit 1
               ;;
           esac
 
+          # Ruling 33: only deploy and rollback may acknowledge an Emergency Stop.
+          case "${ACKNOWLEDGE_STOP}" in
+            false) ;;
+            true)
+              if [ "${OPERATION}" != deploy ] && [ "${OPERATION}" != rollback ]; then
+                echo "❌ Error: acknowledge_emergency_stop is valid only for deploy and rollback"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "❌ Error: acknowledge_emergency_stop must be true or false"
+              exit 1
+              ;;
+          esac
+
           write_output operation "${OPERATION}"
           write_output expected_sha "${EXPECTED_SHA}"
+          write_output acknowledge_emergency_stop "${ACKNOWLEDGE_STOP}"
 
           if [ "${OPERATION}" = "prepare-trust-boundary" ]; then
             echo "✅ Trust-boundary operation and SHA validated"
@@ -190,8 +203,7 @@ jobs:
           fi
           write_output namespace "${NAMESPACE}"
           if [ "${OPERATION}" = "rollback" ] || [ "${OPERATION}" = "drain" ]; then
-            write_output rollback_revision "${ROLLBACK_REVISION}"
-            echo "✅ ${OPERATION} SHA, revision, and namespace validated"
+            echo "✅ ${OPERATION} SHA and namespace validated"
             exit 0
           fi
 
@@ -320,13 +332,18 @@ jobs:
           echo "✅ kubectl context is ${CURRENT_CONTEXT}"
 
       - name: Admit pool state and record identities
+        env:
+          ACKNOWLEDGE_STOP: ${{ needs.validate-inputs.outputs.acknowledge_emergency_stop }}
         run: |
-          # Deploy admits ARC density or burst with both burst pools present and
-          # the priority expander configured; node headroom is evaluated over
-          # every Ready eligible node.
+          # Deploy admits ARC density, burst or burst-stopped with both burst
+          # pools present and the priority expander configured; node headroom
+          # is evaluated over every Ready eligible node. While the Emergency
+          # Stop marker exists it is admitted only with the acknowledgement.
+          ACK=()
+          [ "${ACKNOWLEDGE_STOP}" != true ] || ACK=(--acknowledge-emergency-stop)
           ./scripts/verify-runner-pool-state.sh \
             --cluster-name "${CLUSTER_NAME}" \
-            --operation deploy \
+            --operation deploy "${ACK[@]}" \
             --emit-identities "${RUNNER_TEMP}/pool-identities.json"
 
       - name: Verify prepared platform prerequisites
@@ -907,6 +924,23 @@ jobs:
           echo "✅ Live API compatibility and admitted-request preflight passed"
 
 
+      - name: Acknowledge Emergency Stop
+        if: needs.validate-inputs.outputs.acknowledge_emergency_stop == 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          # Ruling 33: delete the Emergency Stop marker, bracketed (compare,
+          # acknowledged admission, delete with the read uid/resourceVersion as
+          # preconditions, compare), before the first write. Later admissions
+          # run without the acknowledgement, so a newer stop refuses them.
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA"
+            exit 1
+          fi
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_acknowledge_stop "${RUNNER_TEMP}/pool-identities.json" deploy
+
       - name: Dry-run runner network policy
         run: |
           # Runner network isolation (spec "Runner network isolation"): the
@@ -1018,7 +1052,12 @@ jobs:
           # via --set. The post-renderer refuses any manifest other than the
           # preflighted candidate. There is no retry: a second attempt would run
           # outside the identity bracket, so a failure stops here for review.
-          if ! helm upgrade "${RELEASE_NAME}" \
+          # The Emergency Stop fence (Ruling 33) runs after the write whether
+          # or not Helm reported success.
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          HELM_RC=0
+          helm upgrade "${RELEASE_NAME}" \
             oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
             --namespace "${NAMESPACE}" \
             --values deploy/dind-values.yaml \
@@ -1033,7 +1072,12 @@ jobs:
             --post-renderer "${HASH_GATE}" \
             --history-max 100 \
             --wait \
-            --timeout 300s; then
+            --timeout 300s || HELM_RC=$?
+          if ! fleet_stop_fence; then
+            echo "❌ Error: an Emergency Stop is in effect; the stop was re-applied (0/0) and this deploy failed"
+            exit 1
+          fi
+          if [ "${HELM_RC}" -ne 0 ]; then
             echo "❌ Error: Failed to deploy runners"
             helm status "${RELEASE_NAME}" -n "${NAMESPACE}" || true
             exit 1
@@ -1188,41 +1232,6 @@ jobs:
             --operation drain \
             --emit-identities "${RUNNER_TEMP}/pool-identities.json"
 
-      - name: Validate rollback revision
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
-        run: |
-          # Ruling 27: drain is never entered without a usable rollback target.
-          # The target must be a deployable revision of the pinned chart whose
-          # values and manifest are exactly the density contract (2/4).
-          validate_density() {
-            python3 scripts/validate-runner-isolation-contract.py \
-              --contract density --kind "$1" \
-              --min-runners 2 --max-runners 4 --runner-group private
-          }
-          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(
-              (.revision | tostring) == $revision
-              and .chart == ("gha-runner-scale-set-" + $version)
-              and (.status == "deployed" or .status == "superseded"))] | length == 1
-          ' <<<"${HISTORY}" >/dev/null; then
-            echo "❌ Error: rollback revision is missing, not chart ${ARC_CHART_VERSION}, or not deployable"
-            exit 1
-          fi
-          if ! helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" -o json | validate_density values; then
-            echo "❌ Error: rollback revision values are not the density contract (2/4)"
-            exit 1
-          fi
-          if ! helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" | validate_density manifest; then
-            echo "❌ Error: rollback revision manifest is not the density contract (2/4)"
-            exit 1
-          fi
-          echo "✅ Revision ${REVISION} is the density contract"
-
       - name: Drain runners
         env:
           EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
@@ -1240,14 +1249,13 @@ jobs:
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
         run: |
           LOG="${RUNNER_TEMP}/drain.log"
           {
             if [ "${JOB_STATUS}" = "success" ]; then
               echo "## ✅ Runner drain complete"
               echo "ARC is \`drain\` (maxRunners 4, required baseline affinity); no runner pod is on a burst node and both burst pools are at zero nodes."
-              echo "Next: Node Pool Sizing \`remove-burst\`, then Deploy \`rollback\` with \`rollback_revision=${REVISION}\` (validated as density before the drain)."
+              echo "Next: Node Pool Sizing \`remove-burst\`, then Deploy \`rollback\` (upgrades to the committed \`deploy/density-values.yaml\`)."
             else
               echo "## ❌ Runner drain did not finish"
               echo "The fleet is left in its current state (\`drain\` once the Helm upgrade succeeded); re-run \`drain\` to resume the wait."
@@ -1255,7 +1263,7 @@ jobs:
             if [ -f "${LOG}" ]; then
               echo ""
               echo '```'
-              grep -E '^(PLAN|NOOP|HELM|READBACK|WAIT|DRAIN_COMPLETE|ERROR):' "${LOG}" | tail -n 20 || true
+              grep -E '^(PLAN|NOOP|HELM|READBACK|WAIT|DRAIN_COMPLETE|ERROR|STOP_MARKER):' "${LOG}" | tail -n 20 || true
               echo '```'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -1297,17 +1305,45 @@ jobs:
           fi
           echo "✅ kubectl context is ${CURRENT_CONTEXT}"
 
+      - name: Validate GitHub Token
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          # The density release is rendered with RUNNER_TOKEN exactly as Deploy
+          # renders burst (githubConfigSecret.github_token).
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "❌ Error: RUNNER_TOKEN secret is not set!"
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if gh api user >/dev/null 2>&1; then
+              echo "✅ GitHub token validated successfully"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: RUNNER_TOKEN is invalid, expired, or lacks API access"
+              exit 1
+            else
+              sleep 5
+            fi
+          done
+
       - name: Admit rollback state and record identities
         id: admit
+        env:
+          ACKNOWLEDGE_STOP: ${{ needs.validate-inputs.outputs.acknowledge_emergency_stop }}
         run: |
           # Rollback admits ARC drain or density, or the stopped states
           # drain-stopped and density-stopped that Emergency Stop leaves, and
-          # only with every burst pool already removed.
+          # only with every burst pool already removed. While the Emergency
+          # Stop marker exists it is admitted only with the acknowledgement.
+          ACK=()
+          [ "${ACKNOWLEDGE_STOP}" != true ] || ACK=(--acknowledge-emergency-stop)
           STATE=$(./scripts/verify-runner-pool-state.sh \
             --cluster-name "${CLUSTER_NAME}" \
-            --operation rollback \
+            --operation rollback "${ACK[@]}" \
             --emit-identities "${RUNNER_TEMP}/pool-identities.json")
           echo "${STATE}"
+          STATE=$(grep -E '^STATE: ' <<<"${STATE}")
           case "${STATE}" in
             "STATE: arc=density "*) printf 'arc_state=density\n' >> "${GITHUB_OUTPUT}" ;;
             "STATE: arc=drain "*) printf 'arc_state=drain\n' >> "${GITHUB_OUTPUT}" ;;
@@ -1319,71 +1355,24 @@ jobs:
               ;;
           esac
 
-      - name: Validate rollback revision
-        if: steps.admit.outputs.arc_state != 'density'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
-        run: |
-          # The target must be a deployable revision of the pinned chart whose
-          # values and manifest are exactly the density contract (2/4).
-          validate_density() {
-            python3 scripts/validate-runner-isolation-contract.py \
-              --contract density --kind "$1" \
-              --min-runners 2 --max-runners 4 --runner-group private
-          }
-          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(
-              (.revision | tostring) == $revision
-              and .chart == ("gha-runner-scale-set-" + $version)
-              and (.status == "deployed" or .status == "superseded"))] | length == 1
-          ' <<<"${HISTORY}" >/dev/null; then
-            echo "❌ Error: rollback revision is missing, not chart ${ARC_CHART_VERSION}, or not deployable"
-            exit 1
-          fi
-          if ! helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" -o json | validate_density values; then
-            echo "❌ Error: rollback revision values are not the density contract (2/4)"
-            exit 1
-          fi
-          if ! helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" | validate_density manifest; then
-            echo "❌ Error: rollback revision manifest is not the density contract (2/4)"
-            exit 1
-          fi
-          echo "✅ Revision ${REVISION} is the density contract"
-
-      - name: Re-admit immediately before Helm rollback
-        if: steps.admit.outputs.arc_state != 'density'
-        run: |
-          ./scripts/verify-runner-pool-state.sh \
-            --cluster-name "${CLUSTER_NAME}" \
-            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
-            --transition none
-          ./scripts/verify-runner-pool-state.sh \
-            --cluster-name "${CLUSTER_NAME}" \
-            --operation rollback
-
-      - name: Rollback runners
+      - name: Roll back to committed density values
         env:
           EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
-          ARC_STATE: ${{ steps.admit.outputs.arc_state }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          ACKNOWLEDGE_STOP: ${{ needs.validate-inputs.outputs.acknowledge_emergency_stop }}
         run: |
           ACTUAL_SHA=$(git rev-parse HEAD)
           if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
             echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
             exit 1
           fi
-          if [ "${ARC_STATE}" = "density" ]; then
-            echo "✅ ARC is already density with no burst pools; rollback is a no-op"
-            exit 0
-          fi
-          helm rollback "${RELEASE_NAME}" "${REVISION}" \
-            --namespace "${NAMESPACE}" --history-max 100 --wait --timeout 300s
-          echo "✅ Helm rolled back to revision ${REVISION}"
+          # Ruling 34: the target is deploy/density-values.yaml, validated as
+          # density 2/4 (values and rendered manifest) before the bracketed
+          # Helm upgrade; the Emergency Stop fence runs after the write.
+          ACK=()
+          [ "${ACKNOWLEDGE_STOP}" != true ] || ACK=(--acknowledge-emergency-stop)
+          ./scripts/rollback-density.sh --identities "${RUNNER_TEMP}/pool-identities.json" "${ACK[@]}" \
+            2>&1 | tee "${RUNNER_TEMP}/rollback.log"
 
       - name: Verify rollback transition and density readback
         env:
@@ -1436,7 +1425,6 @@ jobs:
       - name: Rollback summary
         if: always()
         env:
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
           ARC_STATE: ${{ steps.admit.outputs.arc_state }}
           JOB_STATUS: ${{ job.status }}
         run: |
@@ -1445,10 +1433,10 @@ jobs:
               echo "## ✅ Runner rollback: already density (no-op)"
             elif [ "${JOB_STATUS}" = "success" ]; then
               echo "## ✅ Runner rollback complete"
-              echo "- **Revision**: ${REVISION}"
+              echo "- **Values**: \`deploy/density-values.yaml\` (density 2/4)"
               echo "- **Runner Group**: \`redducklabs-private-runners\`"
             else
               echo "## ❌ Runner rollback or post-rollback verification failed"
-              echo "Review the logs: Helm rollback may have completed before a verification failure."
+              echo "Review the logs: the Helm upgrade may have completed before a verification failure. A \`STOP_FENCE\` error means an Emergency Stop is in effect and 0/0 was re-applied."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"

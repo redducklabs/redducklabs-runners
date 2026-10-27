@@ -8,6 +8,7 @@
 #
 # Usage:
 #   verify-runner-pool-state.sh --cluster-name NAME --operation OP [--emit-identities FILE]
+#                               [--acknowledge-emergency-stop]
 #   verify-runner-pool-state.sh --cluster-name NAME --compare-identities FILE --transition T
 #
 # OP is one of: status, rebalance, acceptance-phase-c, record-density,
@@ -27,6 +28,16 @@
 # Emergency Stop leaves (burst-stopped, density-stopped, drain-stopped: the
 # base template at minRunners=maxRunners=0).
 #
+# Emergency Stop fence (Ruling 33): admission also reads the ConfigMap
+# arc-runners/runner-fleet-emergency-stop that Emergency Stop writes before its
+# Helm write. While it exists every operation is refused except status and
+# rebalance (both report it, rebalance as a stopped condition), remove-burst
+# (deletes only empty closed pools), and deploy or rollback with
+# --acknowledge-emergency-stop (they then delete the marker, bracketed, before
+# their Helm write). When present on an admitted run the gate prints
+#   STOP: Emergency Stop marker arc-runners/runner-fleet-emergency-stop present (run <id> at <time>)
+# before the STATE line. A failed marker read fails closed.
+#
 # --compare-identities compares live identities with FILE. T is "none" (exact
 # equality) or exactly one declared transition:
 #   pool-created:<name>:<size>:<min>/<max>   pool-deleted:<name>
@@ -44,14 +55,15 @@ OPERATIONS="status rebalance acceptance-phase-c record-density set-burst-maxima 
 
 usage() {
     echo "ERROR: $1" >&2
-    echo "usage: $0 --cluster-name NAME --operation OP [--emit-identities FILE]" >&2
+    echo "usage: $0 --cluster-name NAME --operation OP [--emit-identities FILE] [--acknowledge-emergency-stop]" >&2
     echo "       $0 --cluster-name NAME --compare-identities FILE --transition T" >&2
     exit 2
 }
 
-CLUSTER_NAME="" OPERATION="" EMIT="" COMPARE="" TRANSITION=""
+CLUSTER_NAME="" OPERATION="" EMIT="" COMPARE="" TRANSITION="" ACKNOWLEDGE=false
 while [ $# -gt 0 ]; do
     case "$1" in
+        --acknowledge-emergency-stop) ACKNOWLEDGE=true; shift; continue ;;
         --cluster-name | --operation | --emit-identities | --compare-identities | --transition)
             [ $# -ge 2 ] || usage "$1 requires a value"
             case "$1" in
@@ -71,7 +83,7 @@ done
 [[ "$CLUSTER_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || usage "invalid cluster name '${CLUSTER_NAME}'"
 
 if [ -n "$COMPARE" ]; then
-    [ -z "$OPERATION" ] && [ -z "$EMIT" ] || usage "--compare-identities cannot be combined with --operation or --emit-identities"
+    [ -z "$OPERATION" ] && [ -z "$EMIT" ] && [ "$ACKNOWLEDGE" = false ] || usage "--compare-identities cannot be combined with --operation, --emit-identities or --acknowledge-emergency-stop"
     [ -n "$TRANSITION" ] || usage "--compare-identities requires --transition"
     exec python3 "${SCRIPT_DIR}/lib/runner_pool_state.py" compare \
         --cluster-name "$CLUSTER_NAME" --compare-identities "$COMPARE" --transition "$TRANSITION"
@@ -79,6 +91,9 @@ fi
 
 [ -n "$OPERATION" ] || usage "--operation or --compare-identities is required"
 [ -z "$TRANSITION" ] || usage "--transition is only valid with --compare-identities"
+if [ "$ACKNOWLEDGE" = true ] && [ "$OPERATION" != deploy ] && [ "$OPERATION" != rollback ]; then
+    usage "--acknowledge-emergency-stop is valid only for deploy and rollback"
+fi
 case " ${OPERATIONS} " in
     *" ${OPERATION} "*) ;;
     *) usage "unknown operation '${OPERATION}'" ;;
@@ -106,4 +121,5 @@ esac
 
 ARGS=(admit --operation "$OPERATION" --cluster-name "$CLUSTER_NAME")
 [ -z "$EMIT" ] || ARGS+=(--emit-identities "$EMIT")
+[ "$ACKNOWLEDGE" = false ] || ARGS+=(--acknowledge-emergency-stop)
 exec python3 "${SCRIPT_DIR}/lib/runner_pool_state.py" "${ARGS[@]}"

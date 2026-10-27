@@ -327,7 +327,7 @@ available for investigation and explicitly requested operations.
 |----------|-------------|---------|
 | **Prepare Runner Platform** | Explicit initial namespace, CRD, controller, and registry preparation | Manual (`workflow_dispatch`) |
 | **Deploy GitHub Runners** | CI-only trust preparation, deployment, and rollback | Manual (`workflow_dispatch`) |
-| **Scale GitHub Runners** | `record-density` (read-only rollback target) and acceptance `acceptance-phase-c` | Manual (`workflow_dispatch`) |
+| **Scale GitHub Runners** | `record-density` (read-only check of the committed density rollback target) and acceptance `acceptance-phase-c` | Manual (`workflow_dispatch`) |
 | **Node Pool Sizing** | Burst pools: `create-burst`, `configure-expander`, `enable-burst`, `set-burst-maxima`, `remove-burst` | Manual (`workflow_dispatch`) |
 | **Rebalance Runners** | Retires idle runners stranded on burst nodes | Hourly + manual |
 | **Runner Acceptance Evidence** | Read-only acceptance controller for phases A-E; cancels only its verified probe | Manual (`workflow_dispatch`) |
@@ -344,11 +344,15 @@ run only through GitHub Actions with the reviewed commit supplied as
 read-only public-workflow checks and runner-group reconciliation without Helm,
 Kubernetes, or DigitalOcean mutation. A deployment or rollback uses the same
 recorded SHA. Recovery is Deploy `drain`, Node Pool Sizing `remove-burst`, then
-Deploy `rollback` to the `density` Helm revision recorded by Scale Runners
-`record-density`, retaining the private runner group. Deploy `drain` takes that
-revision as `rollback_revision` and verifies it before the drain upgrade, and
-every Helm write keeps 100 revisions (`--history-max 100`), so the recorded
-revision is not pruned during a rollout.
+Deploy `rollback`, which upgrades to the committed
+`deploy/density-values.yaml` (validated as `density`, retaining the private
+runner group; independent of Helm history). Scale Runners `record-density`
+verifies that the live release equals that render before a rollout. Every Helm
+write keeps 100 revisions (`--history-max 100`). Emergency Stop writes the
+marker `arc-runners/runner-fleet-emergency-stop` before its Helm write; while it
+exists the fleet workflows refuse to run, except Deploy `deploy`/`rollback`
+with `acknowledge_emergency_stop=true`, and every fleet Helm write re-checks it
+afterwards and re-applies the stop.
 The workflows that mutate fleet capacity or its prerequisites (Deploy, Scale
 Runners, Node Pool Sizing, Prepare Runner Platform, Deploy Cluster Addons)
 share the non-cancelling `runner-fleet-mutation` concurrency group, so their

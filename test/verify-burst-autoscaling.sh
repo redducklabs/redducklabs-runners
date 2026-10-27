@@ -218,7 +218,7 @@ assert_burst_contracts() {
     local burst="${FIXTURES}/arc-burst-values.yaml"
     local drain="${FIXTURES}/arc-drain-values.yaml"
     local legacy="${FIXTURES}/arc-legacy-isolated-values.yaml"
-    local density="${FIXTURES}/arc-density-values.yaml"
+    local density="${REPO_ROOT}/deploy/density-values.yaml"
     local tmp="${WORK_DIR}/mutated.yaml"
 
     expect_accept "burst fixture as burst 2/20 private" burst 2 20 private "$burst"
@@ -451,7 +451,10 @@ get networkpolicies.networking.k8s.io -n arc-runners -o json|networkpolicies.jso
 get ciliumnetworkpolicies.cilium.io -n arc-runners -o json|cnp.json
 get ciliumclusterwidenetworkpolicies.cilium.io -o json|ccnp.json
 get pods -n arc-runners -o json|pods.json
+get configmap runner-fleet-emergency-stop -n arc-runners --ignore-not-found -o json|stop-marker.json
 ROUTES
+        # No Emergency Stop marker (Ruling 33): the read prints nothing.
+        : > "${dir}/stop-marker.json"
         cat > "${dir}/helm.routes" <<'ROUTES'
 list -n arc-runners -a -o json|helm-releases.json
 list -n arc-systems -a -o json|controller-releases.json
@@ -1784,7 +1787,7 @@ assert_deploy_ops() {
     # Mismatched SHA: no doctl/kubectl/helm call at all, for every operation.
     for op in deploy prepare-trust-boundary drain rollback; do
         dir=$(fleet_dir '{"arc": "arc-burst"}' base arc-burst pools-open)
-        inputs="{\"operation\":\"${op}\",\"accept_privileged_runner_co_tenancy\":\"true\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_OTHER_SHA}\"}"
+        inputs="{\"operation\":\"${op}\",\"accept_privileged_runner_co_tenancy\":\"true\",\"expected_sha\":\"${FLEET_OTHER_SHA}\"}"
         run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$inputs"
         rc=$?
         if [ "$rc" -ne 0 ] && [ "$(fleet_mutations "$dir")" = - ] && ! ls "$dir"/*.calls >/dev/null 2>&1 \
@@ -1829,58 +1832,94 @@ assert_deploy_ops() {
         expect_fleet "drain from interrupted ${layers#arc-}" $? 0 helm-upgrade:drain arc-drain - - "$dir"
     done
 
-    # Ruling 27: drain is entered only with a rollback_revision that exists in
-    # helm history and validates as density (values and manifest).
+    # Ruling 34: drain no longer takes rollback_revision. The input is not
+    # declared, so a dispatch that names it is rejected before anything runs
+    # (GitHub answers "Unexpected inputs provided"), and the drain job has no
+    # rollback-revision step.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"drain\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "drain without rollback_revision" $? 1 - arc-burst "JOB validate-inputs: failure" - "$dir"
-    for label in "99|rollback revision is missing" "14|not the density contract"; do
-        dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
-        run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"drain\",\"rollback_revision\":\"${label%%|*}\",\"expected_sha\":\"${FLEET_SHA}\"}"
-        expect_fleet "drain with rollback_revision ${label%%|*}" $? 1 - arc-burst "STEP Validate rollback revision: failure" "${label#*|}" "$dir"
-        if grep -q '^upgrade' "${dir}/helm.calls" 2>/dev/null || ! grep -qx 'STEP Drain runners: skipped' "$FLEET_OUT"; then
-            fail "drain with rollback_revision ${label%%|*} reached the drain upgrade"
-        else
-            pass "drain with rollback_revision ${label%%|*} stops before the drain upgrade"
-        fi
-    done
-
-    # Ruling 27: more than ten revisions. The density revision recorded before
-    # the rollout (3) survives the drain upgrade and is still the rollback
-    # target; Helm's default history (10) would have pruned it.
-    local long_history
-    long_history=$(jq -nc '[{"revision": 3, "arc": "arc-density", "status": "superseded"}]
-        + [range(4; 14) | {"revision": ., "arc": (if . % 2 == 0 then "arc-burst" else "arc-burst-acceptance-8" end), "status": "superseded"}]
-        + [{"revision": 14, "arc": "arc-burst", "status": "deployed"}]')
-    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"history\": ${long_history}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-burst pools-open)
-    if [ "$(jq '.history | length' "${dir}/fleet.json")" -gt 10 ]; then
-        pass "history-retention fixture starts with more than ten revisions"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"drain\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$(fleet_mutations "$dir")" = - ] && ! ls "$dir"/*.calls >/dev/null 2>&1 \
+        && grep -q '^DISPATCH REJECTED: Unexpected inputs provided' "$FLEET_OUT"; then
+        pass "drain with rollback_revision: rejected as an undeclared input before any call"
     else
-        fail "history-retention fixture has $(jq '.history | length' "${dir}/fleet.json") revisions"
+        fail "drain with rollback_revision: exit ${rc}, mutations $(fleet_mutations "$dir") ($(fleet_steps))"
     fi
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"drain\",\"rollback_revision\":\"3\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "drain with the recorded revision 3 among 12 revisions" $? 0 helm-upgrade:drain arc-drain "STEP Validate rollback revision: success" "DRAIN_COMPLETE" "$dir"
+    if python3 - "$DEPLOY_WORKFLOW" <<'PY'
+import sys
+
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+assert "rollback_revision" not in workflow[True]["workflow_dispatch"]["inputs"]
+assert "rollback_revision" not in workflow["jobs"]["validate-inputs"]["outputs"]
+for job in ("drain", "rollback"):
+    for step in workflow["jobs"][job]["steps"]:
+        assert "rollback_revision" not in str(step), (job, step.get("name"))
+        assert step.get("name") != "Validate rollback revision", job
+PY
+    then
+        pass "Deploy declares no rollback_revision input and drain/rollback never read one"
+    else
+        fail "Deploy still declares or reads rollback_revision"
+    fi
+
+    # Ruling 34: the rollback target is independent of Helm history. More than
+    # 100 revisions, none of them density: drain and rollback still complete,
+    # and rollback upgrades to deploy/density-values.yaml.
+    local long_history
+    long_history=$(jq -nc '[range(21; 120) | {"revision": ., "arc": (if . % 2 == 0 then "arc-burst" else "arc-burst-acceptance-8" end), "status": "superseded"}]
+        + [{"revision": 120, "arc": "arc-burst", "status": "deployed"}]')
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"history\": ${long_history}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-burst pools-open)
+    if [ "$(jq '[.history[] | select(.arc == "arc-density")] | length' "${dir}/fleet.json")" = 0 ] \
+        && [ "$(jq '.history | max_by(.revision) | .revision' "${dir}/fleet.json")" -gt 100 ]; then
+        pass "history fixture: revisions past 100 and no density revision left in helm history"
+    else
+        fail "history fixture: $(jq -c '[.history[] | .revision] | [min, max, length]' "${dir}/fleet.json")"
+    fi
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
+    expect_fleet "drain with no density revision in a >100-revision history" $? 0 helm-upgrade:drain arc-drain "STEP Drain runners: success" "DRAIN_COMPLETE" "$dir"
     remove_burst_pools "$dir"
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"3\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback to revision 3 after a drain on a 12-revision history" $? 0 helm-rollback:3 arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "rollback after more than 100 revisions" $? 0 helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    if grep -q -- '--values deploy/density-values.yaml' "${dir}/helm.calls" \
+        && grep -E '^upgrade .*--values deploy/density-values.yaml' "${dir}/helm.calls" | grep -q -- '--history-max 100' \
+        && grep -E '^upgrade .*--values deploy/density-values.yaml' "${dir}/helm.calls" | grep -q -- '--post-renderer' \
+        && ! grep -q '^rollback' "${dir}/helm.calls" && [ "$(jq '.history | length' "${dir}/fleet.json")" -le 100 ]; then
+        pass "rollback: helm upgrade to deploy/density-values.yaml behind the hash post-renderer, --history-max 100, no helm rollback"
+    else
+        fail "rollback Helm calls: $(grep -E '^(upgrade|rollback|template)' "${dir}/helm.calls" | cut -c1-160 | tr '\n' ' ')"
+    fi
 
     # rollback.
     dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}}" base arc-drain pools-closed)
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
     expect_fleet "rollback with burst pools present" $? 1 - arc-drain "STEP Admit rollback state and record identities: failure" "requires no burst pools" "$dir"
+    # Ruling 34: committed density values that fail validation never reach Helm.
+    for label in "2/10|doc['maxRunners'] = 10" "burst affinity|doc['template']['spec']['affinity'] = {'nodeAffinity': {}}" "private group|doc['runnerGroup'] = 'default'"; do
+        repo=$(mktemp -d "${WORK_DIR}/repo.XXXXXX")
+        (cd "$REPO_ROOT" && tar --exclude=.git -cf - .) | (cd "$repo" && tar -xf -)
+        mutate "${REPO_ROOT}/deploy/density-values.yaml" "${repo}/deploy/density-values.yaml" "${label#*|}" \
+            || { fail "rollback ${label%%|*}: repo copy failed"; continue; }
+        dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}}" base arc-drain)
+        run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}" "$FLEET_SHA" "$repo"
+        expect_fleet "rollback with committed density values (${label%%|*})" $? 1 - arc-drain "STEP Roll back to committed density values: failure" "is not the density contract (2/4)" "$dir"
+        if grep -Eq '^(upgrade|rollback|template)' "${dir}/helm.calls"; then
+            fail "rollback with invalid density values (${label%%|*}) reached helm template/upgrade"
+        else
+            pass "rollback with invalid density values (${label%%|*}) stops before any Helm render or write"
+        fi
+        rm -rf "$repo"
+    done
     dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}}" base arc-drain)
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"13\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback to a non-density revision" $? 1 - arc-drain "STEP Validate rollback revision: failure" "not the density contract" "$dir"
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"99\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback to a missing revision" $? 1 - arc-drain "STEP Validate rollback revision: failure" "rollback revision is missing" "$dir"
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback from drain without pools" $? 0 helm-rollback:12 arc-density "STEP Verify pool state after rollback: success" - "$dir"
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback re-run on density" $? 0 - arc-density "STEP Validate rollback revision: skipped" "rollback is a no-op" "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "rollback from drain without pools" $? 0 helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "rollback re-run on density" $? 0 - arc-density "STEP Roll back to committed density values: success" "rollback is a no-op" "$dir"
 
     # A momentarily Pending runner pod does not fail the density postcondition.
     dir=$(fleet_dir "{\"arc\": \"arc-density\", \"history\": ${FLEET_DENSITY_HISTORY}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"pending0\", \"node\": \"\"}]}" valid-density-no-burst)
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
     rc=$?
     if [ "$rc" -eq 0 ] && [ "$(fleet_mutations "$dir")" = - ] && ! grep -Eq '^(rollback|upgrade)' "${dir}/helm.calls" \
         && [ "$(jq '[.items[] | select(.status.phase == "Pending")] | length' "${dir}/runner-pods.json")" = 1 ]; then
@@ -1897,8 +1936,8 @@ assert_deploy_ops() {
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS" "$FLEET_SHA" "$REPO_ROOT" "$FLEET_OTHER_SHA"
     expect_fleet "drain with the checkout moved after validation" $? 1 - arc-burst "STEP Drain runners: failure" "checked-out SHA changed" "$dir"
     dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}}" base arc-drain)
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}" "$FLEET_SHA" "$REPO_ROOT" "$FLEET_OTHER_SHA"
-    expect_fleet "rollback with the checkout moved after validation" $? 1 - arc-drain "STEP Rollback runners: failure" "does not match checked-out SHA" "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}" "$FLEET_SHA" "$REPO_ROOT" "$FLEET_OTHER_SHA"
+    expect_fleet "rollback with the checkout moved after validation" $? 1 - arc-drain "STEP Roll back to committed density values: failure" "does not match checked-out SHA" "$dir"
 }
 
 assert_rebalance_workflow() {
@@ -2142,6 +2181,21 @@ if "fixed-capacity checks" in aor2 or "fixes the fleet at two $96 nodes and four
 for required in ("up to eight burst nodes", "at most 10 runner nodes and 20 runners", "pool-state gate", "identity bracket"):
     if required not in aor2:
         problems.append(f"AOR-2 lacks: {required}")
+# Rulings 33-34 and PR #35 review finding 3.
+spec = flat("docs/specs/2026-10-26-runner-burst-autoscaling-design.md")
+for name, text in (("README.md", readme), ("docs/SETUP.md", setup), ("runbook", runbook)):
+    if "rollback_revision" in text or "ROLLBACK_REVISION" in text:
+        problems.append(f"{name} still passes a rollback_revision (Ruling 34)")
+for name, text in (("runbook", runbook), ("spec", spec)):
+    for required in ("runner-fleet-emergency-stop", "acknowledge_emergency_stop=true", "deploy/density-values.yaml",
+                     "no alternate Phase B shape", "--reuse-values"):
+        if required not in text:
+            problems.append(f"{name} lacks: {required}")
+    for retired in ("primary_max=1", "`max_nodes=1` with N=10", "jobs=10"):
+        if retired in text:
+            problems.append(f"{name} still documents the alternate Phase B shape: {retired}")
+if "STOP_FENCE" not in runbook:
+    problems.append("runbook does not explain a STOP_FENCE failure")
 for problem in problems:
     print(problem)
 assert not problems
@@ -2268,9 +2322,11 @@ PY
 # ---------------------------------------------------------------------------
 
 EMERGENCY_WORKFLOW="${REPO_ROOT}/.github/workflows/emergency-stop.yml"
-EMERGENCY_CTX="{\"event_name\":\"workflow_dispatch\",\"sha\":\"${FLEET_SHA}\",\"ref\":\"refs/heads/main\",\"actor\":\"fixture-operator\"}"
-DRAIN_INPUTS="{\"operation\":\"drain\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
+EMERGENCY_CTX="{\"event_name\":\"workflow_dispatch\",\"sha\":\"${FLEET_SHA}\",\"ref\":\"refs/heads/main\",\"actor\":\"fixture-operator\",\"run_id\":\"9876543210\"}"
+DRAIN_INPUTS="{\"operation\":\"drain\",\"expected_sha\":\"${FLEET_SHA}\"}"
 DEPLOY_INPUTS="{\"operation\":\"deploy\",\"accept_privileged_runner_co_tenancy\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
+DEPLOY_ACK_INPUTS="{\"operation\":\"deploy\",\"accept_privileged_runner_co_tenancy\":\"true\",\"acknowledge_emergency_stop\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
+ROLLBACK_ACK_INPUTS="{\"operation\":\"rollback\",\"acknowledge_emergency_stop\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
 
 # run_emergency_stop <dir>: dispatches Emergency Stop with the confirmation text.
 run_emergency_stop() {
@@ -2323,37 +2379,55 @@ PY
         fail "Emergency Stop static contract is violated"
     fi
 
-    # Emergency Stop from burst -> burst-stopped; Deploy `deploy` restores burst.
+    # Emergency Stop from burst -> burst-stopped. Ruling 33: the marker is
+    # written before the Helm write; Deploy `deploy` restores burst only with
+    # acknowledge_emergency_stop=true, deleting the marker first.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open) || { fail "emergency fixture could not be built"; return; }
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop from burst" $? 0 helm-upgrade:stopped arc-burst-stopped "STEP Read back stopped state: success" - "$dir"
+    expect_fleet "emergency stop from burst (marker before the Helm write)" $? 0 stop-marker:set,helm-upgrade:stopped arc-burst-stopped "STEP Read back stopped state: success" - "$dir"
     if [ "$(jq '.runners | length' "${dir}/fleet.json")" = 0 ] \
         && fleet_summary | grep -q 'arc=burst-stopped' \
-        && fleet_summary | grep -q 'operation=deploy'; then
-        pass "emergency stop from burst: no runners left; the summary names burst-stopped and the Deploy recovery"
+        && fleet_summary | grep -q 'operation=deploy' && fleet_summary | grep -q 'acknowledge_emergency_stop=true' \
+        && ! fleet_summary | grep -q 'rollback_revision' \
+        && [ "$(jq -r '.stop_marker.data["run-id"] // empty' "${dir}/fleet.json")" != "" ]; then
+        pass "emergency stop from burst: no runners left; marker written; the summary names burst-stopped and the acknowledged Deploy recovery"
     else
-        fail "emergency stop from burst: runners $(jq -c '.runners' "${dir}/fleet.json"), summary $(fleet_summary | tr '\n' ' ' | head -c 400)"
+        fail "emergency stop from burst: runners $(jq -c '.runners' "${dir}/fleet.json"), marker $(jq -c '.stop_marker' "${dir}/fleet.json"), summary $(fleet_summary | tr '\n' ' ' | head -c 400)"
     fi
     run_gate "$dir" --operation status
-    if [ "$?" -eq 0 ] && grep -qx 'STATE: arc=burst-stopped pools=both burst=open' "$GATE_OUT"; then
-        pass "after Emergency Stop the gate classifies burst-stopped"
+    if [ "$?" -eq 0 ] && grep -qx 'STATE: arc=burst-stopped pools=both burst=open' "$GATE_OUT" \
+        && grep -q '^STOP: Emergency Stop marker arc-runners/runner-fleet-emergency-stop present' "$GATE_OUT"; then
+        pass "after Emergency Stop the gate classifies burst-stopped and reports the stop marker"
     else
-        fail "after Emergency Stop the gate did not classify burst-stopped ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+        fail "after Emergency Stop the gate did not report burst-stopped with the marker ($(cat "$GATE_OUT" | tr '\n' ' ') $(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
     fi
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
-    expect_fleet "deploy recovers burst-stopped to burst" $? 0 apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" - "$dir"
+    expect_fleet "deploy without the acknowledgement is refused while the marker exists" $? 1 - arc-burst-stopped \
+        "STEP Admit pool state and record identities: failure" "refused while the Emergency Stop marker" "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
+    expect_fleet "deploy with acknowledge_emergency_stop recovers burst-stopped to burst" $? 0 stop-marker:delete,apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" "STOP_MARKER: acknowledged and deleted" "$dir"
+    if [ "$(jq -c '.stop_marker' "${dir}/fleet.json")" = null ]; then
+        pass "the acknowledged deploy deleted the stop marker"
+    else
+        fail "the acknowledged deploy left the stop marker $(jq -c '.stop_marker' "${dir}/fleet.json")"
+    fi
 
-    # Emergency Stop from burst, then Deploy `drain` starts the rollback path.
+    # Emergency Stop from burst: Deploy `drain` is refused while the marker exists.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop before a drain" $? 0 helm-upgrade:stopped arc-burst-stopped - - "$dir"
+    expect_fleet "emergency stop before a drain" $? 0 stop-marker:set,helm-upgrade:stopped arc-burst-stopped - - "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
-    expect_fleet "drain from burst-stopped" $? 0 helm-upgrade:drain arc-drain "STEP Drain runners: success" "DRAIN_COMPLETE" "$dir"
+    expect_fleet "drain is refused while the marker exists" $? 1 - arc-burst-stopped "STEP Admit pool state and record identities: failure" "refused while the Emergency Stop marker" "$dir"
+    # Without a marker (Ruling 26 unchanged), drain still starts from burst-stopped.
+    dir=$(fleet_dir '{"arc": "arc-burst-stopped"}' base arc-burst-stopped pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
+    expect_fleet "drain from burst-stopped without a marker" $? 0 helm-upgrade:drain arc-drain "STEP Drain runners: success" "DRAIN_COMPLETE" "$dir"
 
-    # Emergency Stop during drain -> drain-stopped; remove-burst and rollback still work.
+    # Emergency Stop during drain -> drain-stopped; remove-burst and an
+    # acknowledged rollback still work.
     dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-drain pools-open)
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop during drain" $? 0 helm-upgrade:stopped arc-drain-stopped "STEP Read back stopped state: success" - "$dir"
+    expect_fleet "emergency stop during drain" $? 0 stop-marker:set,helm-upgrade:stopped arc-drain-stopped "STEP Read back stopped state: success" - "$dir"
     if fleet_summary | grep -q 'arc=drain-stopped' && fleet_summary | grep -q 'remove-burst' \
         && fleet_summary | grep -q 'operation=rollback'; then
         pass "emergency stop during drain: the summary names drain-stopped and the remove-burst/rollback recovery"
@@ -2362,22 +2436,26 @@ PY
     fi
     run_gate "$dir" --operation remove-burst
     if [ "$?" -eq 0 ] && grep -qx 'STATE: arc=drain-stopped pools=both burst=open' "$GATE_OUT"; then
-        pass "remove-burst admits drain-stopped with empty burst pools"
+        pass "remove-burst admits drain-stopped with empty burst pools while the marker exists"
     else
         fail "remove-burst does not admit drain-stopped ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
     fi
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
     expect_fleet "drain is not admitted from drain-stopped" $? 1 - arc-drain-stopped - "does not admit ARC state 'drain-stopped'" "$dir"
     remove_burst_pools "$dir"
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback from drain-stopped" $? 0 helm-rollback:12 arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "rollback without the acknowledgement is refused while the marker exists" $? 1 - arc-drain-stopped \
+        "STEP Admit rollback state and record identities: failure" "refused while the Emergency Stop marker" "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$ROLLBACK_ACK_INPUTS"
+    expect_fleet "acknowledged rollback from drain-stopped" $? 0 stop-marker:delete,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
 
-    # Emergency Stop on density without pools -> density-stopped; rollback restores density.
+    # Emergency Stop on density without pools -> density-stopped; an
+    # acknowledged rollback restores density.
     dir=$(fleet_dir '{"arc": "arc-density", "history": [{"revision": 12, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop on density" $? 0 helm-upgrade:stopped arc-density-stopped - - "$dir"
-    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"rollback_revision\":\"12\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback from density-stopped" $? 0 helm-rollback:12 arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    expect_fleet "emergency stop on density" $? 0 stop-marker:set,helm-upgrade:stopped arc-density-stopped - - "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$ROLLBACK_ACK_INPUTS"
+    expect_fleet "acknowledged rollback from density-stopped" $? 0 stop-marker:delete,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
 
     # Rebalance on a stopped fleet: admitted, notice, nothing retired.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
@@ -2419,7 +2497,7 @@ PY
     echo 1 > "${dir}/runner-pods.json.rc"
     run_emergency_stop "$dir"
     rc=$?
-    if [ "$rc" -ne 0 ] && [ "$(fleet_mutations "$dir")" = helm-upgrade:stopped ] \
+    if [ "$rc" -ne 0 ] && [ "$(fleet_mutations "$dir")" = stop-marker:set,helm-upgrade:stopped ] \
         && grep -qx 'STEP Verify shutdown: failure' "$FLEET_OUT" \
         && ! grep -q 'All runner pods have been terminated' "$FLEET_ERR"; then
         pass "emergency stop: failed runner-pod reads fail the run (stop still applied, never counted as 0 pods)"
@@ -2443,24 +2521,39 @@ rebalance_rejected() {
 
 assert_phase_c() {
     info "Checking Scale Runners record-density and acceptance-phase-c against the fleet fake..."
-    local dir rc case_label
+    local dir rc case_label repo
 
-    dir=$(fleet_dir '{"arc": "arc-density", "history": [{"revision": 13, "arc": "arc-burst", "status": "superseded"}, {"revision": 14, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
-    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "{\"action\":\"record-density\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "record-density on density" $? 0 - arc-density "OUTPUT scale.rollback_revision=14" - "$dir"
-    # Ruling 27: the readback re-reads helm history and fails when the recorded
-    # revision is no longer there.
-    dir=$(fleet_dir '{"arc": "arc-density", "knobs": {"prune_on_history_read": 2}, "history": [{"revision": 13, "arc": "arc-burst", "status": "superseded"}, {"revision": 14, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
-    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "{\"action\":\"record-density\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "record-density when the revision disappears before readback" $? 1 - arc-density "STEP Record density rollback revision: failure" "is not in helm history" "$dir"
-    if grep -q '^OUTPUT scale.rollback_revision=14' "$FLEET_OUT"; then
-        fail "record-density emitted a revision that is no longer in helm history"
+    # Ruling 34: record-density is a read-only check that the live release is
+    # density 2/4 and equals the render of deploy/density-values.yaml. It no
+    # longer reads or emits a Helm revision.
+    local record="{\"action\":\"record-density\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    dir=$(fleet_dir '{"arc": "arc-density", "history": [{"revision": 14, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
+    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "$record"
+    expect_fleet "record-density on the committed density release" $? 0 - arc-density \
+        "STEP Verify the live release is the committed density release: success" "DENSITY_RELEASE: the live release is density 2/4" "$dir"
+    if no_mutating_calls "$dir" && grep -q -- '^template .*--values deploy/density-values.yaml' "${dir}/helm.calls" \
+        && ! grep -q '^history' "${dir}/helm.calls" && ! grep -q 'rollback_revision' "$FLEET_OUT"; then
+        pass "record-density: renders deploy/density-values.yaml, reads no helm history, emits no revision, mutates nothing"
     else
-        pass "record-density emits no revision when its readback cannot find it"
+        fail "record-density calls: $(cut -c1-120 "${dir}/helm.calls" | tr '\n' ' ')"
     fi
+    # The live release differs from the committed render: fail, read-only.
+    dir=$(fleet_dir '{"arc": "arc-density", "history": [{"revision": 14, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
+    sed -i '0,/app.kubernetes.io\/instance: redducklabs-runners/s//&\n    fixture.example\/drift: "true"/' "${dir}/template-density.yaml"
+    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "$record"
+    expect_fleet "record-density when the live release differs from the committed render" $? 1 - arc-density \
+        "STEP Verify the live release is the committed density release: failure" "differs from the render of deploy/density-values.yaml" "$dir"
+    # Committed density values that fail validation fail the check.
+    repo=$(mktemp -d "${WORK_DIR}/repo.XXXXXX")
+    (cd "$REPO_ROOT" && tar --exclude=.git -cf - .) | (cd "$repo" && tar -xf -)
+    mutate "${REPO_ROOT}/deploy/density-values.yaml" "${repo}/deploy/density-values.yaml" "doc['maxRunners'] = 10"
+    dir=$(fleet_dir '{"arc": "arc-density", "history": [{"revision": 14, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
+    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "$record" "$FLEET_SHA" "$repo"
+    expect_fleet "record-density with invalid committed density values" $? 1 - arc-density - "is not the density contract (2/4)" "$dir"
+    rm -rf "$repo"
     dir=$(fleet_dir '{"arc": "arc-burst"}' base arc-burst pools-open)
-    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "{\"action\":\"record-density\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "record-density on burst" $? 1 - arc-burst "OUTPUT scale.rollback_revision=" - "$dir"
+    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "$record"
+    expect_fleet "record-density on burst" $? 1 - arc-burst "STEP Admit pool state and record identities: failure" - "$dir"
 
     local phase_c="{\"action\":\"acceptance-phase-c\",\"expected_sha\":\"${FLEET_SHA}\"}"
     local two='"runners": [{"name": "base0", "node": "baseline-a"}, {"name": "base1", "node": "baseline-b"}]'
@@ -2599,7 +2692,8 @@ for workflow in (deploy, scale):
 
 inputs = deploy[True]["workflow_dispatch"]["inputs"]
 assert inputs["operation"]["options"] == ["deploy", "prepare-trust-boundary", "drain", "rollback"]
-assert "min_runners" not in inputs and "max_runners" not in inputs and "rollback_revision" in inputs
+assert "min_runners" not in inputs and "max_runners" not in inputs and "rollback_revision" not in inputs
+assert inputs["acknowledge_emergency_stop"]["type"] == "boolean" and inputs["acknowledge_emergency_stop"]["default"] is False
 jobs = deploy["jobs"]
 assert jobs["drain"]["timeout-minutes"] == 330
 
@@ -2633,14 +2727,26 @@ assert "get nodes" not in preflight and "get pods -A" not in preflight, "headroo
 
 rsteps = jobs["rollback"]["steps"]
 rnames = [step["name"] for step in rsteps]
-i = rnames.index("Rollback runners")
-assert rnames[i - 1] == "Re-admit immediately before Helm rollback"
-assert "--transition none" in rsteps[i - 1]["run"]
+i = rnames.index("Roll back to committed density values")
+assert "./scripts/rollback-density.sh --identities" in rsteps[i]["run"]
+assert rsteps[i]["run"].index("git rev-parse HEAD") < rsteps[i]["run"].index("rollback-density.sh")
 assert "arc:density:2/4" in rsteps[i + 1]["run"]
+assert not any(re.search(r"helm (upgrade|rollback)", step.get("run", "")) for step in rsteps), "rollback writes only through scripts/rollback-density.sh"
+rollback_script = open("scripts/rollback-density.sh", encoding="utf-8").read()
+assert 'fleet_helm_bracket "$IDENTITIES" rollback none arc:density:2/4' in rollback_script
+assert "helm rollback" not in rollback_script and "--history-max 100" in rollback_script
+assert "--post-renderer" in rollback_script and "fleet_render_density" in rollback_script
+# Ruling 33: the acknowledgement deletes the marker before the first write,
+# and the Deploy Helm write is followed by the stop fence.
+ack = names.index("Acknowledge Emergency Stop")
+assert names.index("Admit pool state and record identities") < ack < names.index("Apply runner network policy")
+assert steps[ack]["if"] == "needs.validate-inputs.outputs.acknowledge_emergency_stop == 'true'"
+assert "fleet_acknowledge_stop" in steps[ack]["run"]
 assert rnames.index("Verify trust boundary after rollback") > i
 
 deploy_write = steps[write]["run"]
 assert deploy_write.index("git rev-parse HEAD") < deploy_write.index("helm upgrade"), "Deploy must re-check expected_sha before Helm"
+assert deploy_write.index("helm upgrade") < deploy_write.index("fleet_stop_fence"), "the stop fence must follow the Deploy Helm write"
 post = rsteps[rnames.index("Verify pool state after rollback")]["run"]
 assert "Pending" not in post.replace("momentarily Pending", ""), "rollback postcondition must not require zero Pending pods"
 
@@ -2659,7 +2765,7 @@ assert set(sinputs) == {"action", "expected_sha"}
 assert sinputs["action"]["options"] == ["record-density", "acceptance-phase-c"]
 (sjob,) = scale["jobs"].values()
 assert sjob["timeout-minutes"] == 300
-assert sjob["outputs"] == {"rollback_revision": "${{ steps.record.outputs.rollback_revision }}"}
+assert "outputs" not in sjob, "record-density emits no rollback revision (Ruling 34)"
 snames = [s.get("name") for s in sjob["steps"]]
 admit = sjob["steps"][snames.index("Admit pool state and record identities")]
 assert "OPERATION=record-density" in admit["run"] and "OPERATION=acceptance-phase-c" in admit["run"]
@@ -3261,6 +3367,174 @@ PY
 }
 
 
+# ---------------------------------------------------------------------------
+# Emergency Stop fence (Ruling 33): the marker ConfigMap
+# arc-runners/runner-fleet-emergency-stop refuses every fleet mutator except an
+# acknowledged Deploy `deploy`/`rollback` (and remove-burst), and every fleet
+# Helm write re-reads it afterwards, re-applying 0/0 and failing when a stop is
+# in effect. The regressions inject a completed Emergency Stop after the run's
+# final admission and immediately before its Helm write (knobs.stop_before).
+# ---------------------------------------------------------------------------
+
+# expect_fenced <label> <rc> <mutations> <final-arc> <dir>: the run failed, its
+# write was followed by a re-applied stop, and the fleet ends 0/0 with the marker.
+expect_fenced() {
+    local label=$1 rc=$2 mutations=$3 arc=$4 dir=$5
+    expect_fleet "$label" "$rc" 1 "$mutations" "$arc" - "STOP_FENCE" "$dir"
+    run_gate "$dir" --operation status
+    if grep -Eq "^STATE: arc=${arc#arc-} " "$GATE_OUT" && grep -q '^STOP: Emergency Stop marker' "$GATE_OUT" \
+        && [ "$(jq '[.runners[] | select(.busy | not)] | length' "${dir}/fleet.json")" = 0 ]; then
+        pass "${label}: the fleet ends at ${arc#arc-} (0/0) with the stop marker and no idle runner"
+    else
+        fail "${label}: final gate $(tr '\n' ' ' < "$GATE_OUT") runners $(jq -c '.runners' "${dir}/fleet.json")"
+    fi
+}
+
+assert_stop_fence() {
+    info "Checking the Emergency Stop fence (Ruling 33)..."
+    local dir rc op marker='"stop_marker": {"run-id": "4242", "time": "2026-10-27T10:00:00Z"}'
+
+    # Static: Emergency Stop writes the marker before its Helm write.
+    if python3 - "$EMERGENCY_WORKFLOW" <<'PY'
+import sys
+
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+steps = workflow["jobs"]["emergency-stop"]["steps"]
+names = [step.get("name") for step in steps]
+marker = steps[names.index("Write stop marker")]
+assert names.index("Record current state") < names.index("Write stop marker") < names.index("Scale to zero")
+assert "runner-fleet-emergency-stop" in marker["run"] and '--arg run "${RUN_ID}"' in marker["run"]
+assert marker["env"]["RUN_ID"] == "${{ github.run_id }}"
+assert "kubectl apply --server-side" in marker["run"]
+assert steps[names.index("Report marker failure")]["if"] == "always() && steps.marker.outputs.marker_failed == 'true'"
+PY
+    then
+        pass "Emergency Stop: the marker step runs after the state record and before the Helm write"
+    else
+        fail "Emergency Stop: the marker step is missing or not before the Helm write"
+    fi
+
+    # The gate while the marker exists.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", ${marker}}" base arc-burst pools-open)
+    for op in acceptance-phase-c record-density set-burst-maxima create-burst configure-expander deploy enable-burst drain rollback; do
+        run_gate "$dir" --operation "$op"
+        rc=$?
+        if [ "$rc" -eq 1 ] && grep -q "operation '${op}' is refused while the Emergency Stop marker arc-runners/runner-fleet-emergency-stop exists" "$GATE_ERR"; then
+            pass "gate: ${op} is refused while the stop marker exists"
+        else
+            fail "gate: ${op} with the stop marker -> exit ${rc} ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+        fi
+    done
+    run_gate "$dir" --operation status
+    if [ "$?" -eq 0 ] && grep -qx 'STOP: Emergency Stop marker arc-runners/runner-fleet-emergency-stop present (run 4242 at 2026-10-27T10:00:00Z)' "$GATE_OUT" \
+        && grep -qx 'STATE: arc=burst pools=both burst=open' "$GATE_OUT"; then
+        pass "gate: status is admitted and reports the stop marker"
+    else
+        fail "gate: status with the marker -> $(tr '\n' ' ' < "$GATE_OUT") $(head -c 200 "$GATE_ERR")"
+    fi
+    run_gate "$dir" --operation rebalance
+    if [ "$?" -eq 0 ] && grep -q '^STOP: ' "$GATE_OUT"; then
+        pass "gate: rebalance is admitted as a stopped condition while the marker exists"
+    else
+        fail "gate: rebalance with the marker ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+    fi
+    run_gate "$dir" --operation deploy --acknowledge-emergency-stop
+    if [ "$?" -eq 0 ] && grep -qx 'STATE: arc=burst pools=both burst=open' "$GATE_OUT"; then
+        pass "gate: deploy with --acknowledge-emergency-stop is admitted while the marker exists"
+    else
+        fail "gate: acknowledged deploy with the marker ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+    fi
+    run_gate "$dir" --operation drain --acknowledge-emergency-stop
+    if [ "$?" -eq 2 ] && grep -q 'valid only for deploy and rollback' "$GATE_ERR"; then
+        pass "gate: --acknowledge-emergency-stop is a usage error for drain"
+    else
+        fail "gate: acknowledged drain was not a usage error ($(head -c 200 "$GATE_ERR"))"
+    fi
+    dir=$(fleet_dir '{"arc": "arc-burst", "knobs": {"marker_read": "fail"}}' base arc-burst pools-open)
+    run_gate "$dir" --operation status
+    if [ "$?" -eq 1 ] && grep -q '^REJECTED: .*configmap runner-fleet-emergency-stop' "$GATE_ERR"; then
+        pass "gate: an unreadable stop marker rejects (fail closed)"
+    else
+        fail "gate: unreadable marker -> $(head -c 300 "$GATE_ERR" | tr '\n' ' ')"
+    fi
+
+    # Codex PR #35 finding 1, the regression: a completed Emergency Stop lands
+    # after the run's final admission and before its Helm write. The old run
+    # must re-stop and fail, and the fleet must end 0/0.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:burst\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fenced "deploy whose Helm write lands after a completed stop" $? \
+        apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped "$dir"
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:drain\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
+    expect_fenced "drain whose Helm write lands after a completed stop" $? \
+        injected-stop-marker,injected-stop,helm-upgrade:drain,helm-upgrade:stopped arc-drain-stopped "$dir"
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:min=8\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
+    run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "{\"action\":\"acceptance-phase-c\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fenced "Phase C whose Helm write lands after a completed stop" $? \
+        injected-stop-marker,injected-stop,helm-upgrade:stopped arc-burst-stopped "$dir"
+    if grep -qx 'STEP Restore burst after Phase C: failure' "$FLEET_OUT"; then
+        pass "Phase C after a stop: the always-run restore refuses to reopen the fleet"
+    else
+        fail "Phase C after a stop: restore step $(grep 'Restore burst' "$FLEET_OUT")"
+    fi
+    dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"knobs\": {\"stop_before\": \"helm-upgrade:density\"}}" base arc-drain)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fenced "rollback whose Helm write lands after a completed stop" $? \
+        injected-stop-marker,injected-stop,helm-upgrade:density,helm-upgrade:stopped arc-density-stopped "$dir"
+    # A newer stop after the acknowledged delete is not acknowledged by it.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}, \"knobs\": {\"stop_before\": \"helm-upgrade:burst\"}}" base arc-burst-stopped pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
+    expect_fenced "acknowledged deploy with a newer stop before its Helm write" $? \
+        stop-marker:delete,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped "$dir"
+    # The marker cannot be read after the write: fail closed (re-stop).
+    dir=$(fleet_dir '{"arc": "arc-burst", "knobs": {"marker_read": "fail-after-write"}}' base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "deploy whose post-write marker read fails" $? 1 apply-netpol,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped - "could not be read after the Helm write" "$dir"
+
+    # A newer stop rewrites the marker between the acknowledging read and the
+    # delete: the guarded delete fails and nothing is written.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}, \"knobs\": {\"marker_bump_before_delete\": true}}" base arc-burst-stopped pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
+    expect_fleet "acknowledged deploy racing a newer stop's marker write" $? 1 - arc-burst-stopped "STEP Acknowledge Emergency Stop: failure" "the fleet stays stopped" "$dir"
+    if [ "$(jq -r '.stop_marker.data["run-id"]' "${dir}/fleet.json")" = newer ] && ! grep -q '^upgrade' "${dir}/helm.calls"; then
+        pass "the newer stop's marker survives and no Helm write ran"
+    else
+        fail "after the marker race: marker $(jq -c '.stop_marker' "${dir}/fleet.json"), helm $(grep -c '^upgrade' "${dir}/helm.calls")"
+    fi
+    # acknowledge_emergency_stop is rejected for operations that cannot use it.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", ${marker}}" base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"drain\",\"acknowledge_emergency_stop\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "drain with acknowledge_emergency_stop" $? 1 - arc-burst "JOB validate-inputs: failure" - "$dir"
+
+    # Emergency Stop whose marker write fails: the stop is still applied, and
+    # the run fails so the missing fence is visible.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"marker_write\": \"fail\"}}" base arc-burst pools-open)
+    run_emergency_stop "$dir"
+    expect_fleet "emergency stop whose marker write fails" $? 1 helm-upgrade:stopped arc-burst-stopped "STEP Report marker failure: failure" - "$dir"
+
+    # Rebalance and Runner Status report the marker as a stopped condition.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", ${marker}, \"burst_nodes\": [{\"name\": \"github-runners-burst-16g-p1q2r\", \"pool\": \"github-runners-burst-16g\"}], \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"burstaa\", \"node\": \"github-runners-burst-16g-p1q2r\"}]}" base arc-burst pools-open)
+    FLEET_GITHUB_CONTEXT="{\"event_name\":\"workflow_dispatch\",\"sha\":\"${FLEET_SHA}\",\"ref\":\"refs/heads/main\"}" \
+        run_fleet_workflow "$REBALANCE_WORKFLOW" "$dir" "{\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "rebalance on burst with the stop marker" $? 0 - arc-burst "STEP Retire idle burst runners: skipped" - "$dir"
+    if fleet_summary | grep -q '^nothing to rebalance: the Emergency Stop marker is present'; then
+        pass "rebalance with the stop marker: notice in the summary, nothing retired"
+    else
+        fail "rebalance with the stop marker lacks the notice ($(fleet_steps))"
+    fi
+    dir=$(status_dir "{\"arc\": \"arc-burst\", ${marker}}" base arc-burst pools-open)
+    run_status "$dir"
+    if status_summary | grep -q 'Emergency Stop in effect' && no_mutating_calls "$dir"; then
+        pass "Runner Status reports the stop marker read-only"
+    else
+        fail "Runner Status with the stop marker: $(status_summary | grep -i 'pool state' | head -c 300)"
+    fi
+}
+
+
 assert_with_fakes_selftest
 assert_burst_contracts
 assert_generated_drain_values
@@ -3279,6 +3553,7 @@ assert_deploy_ops
 assert_phase_c
 assert_rebalance_workflow
 assert_emergency_stop
+assert_stop_fence
 assert_helm_history_max
 assert_ci_lint_coverage
 assert_admission_docs_name_no_collaborator

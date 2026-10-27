@@ -36,6 +36,18 @@ if [ -z "$GITHUB_TOKEN" ]; then
     echo -e "${YELLOW}Warning: GITHUB_TOKEN not set. Cannot check GitHub job status.${NC}"
 fi
 
+# Stop fence (Ruling 33): the marker is written before the Helm write, so any
+# fleet workflow Helm write that lands after this stop re-applies 0/0 and fails.
+echo "0. Writing the Emergency Stop marker arc-runners/runner-fleet-emergency-stop..."
+if ! jq -n --arg time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '{
+        apiVersion: "v1", kind: "ConfigMap",
+        metadata: {name: "runner-fleet-emergency-stop", namespace: "arc-runners",
+                   labels: {"app.kubernetes.io/managed-by": "redducklabs-emergency-stop"}},
+        data: {"run-id": "local-script", time: $time}}' \
+    | kubectl apply --server-side --force-conflicts --field-manager=redducklabs-emergency-stop -f -; then
+    echo -e "${RED}Could not write the stop marker; continuing with the stop. An in-flight fleet workflow could reopen runners: dispatch the Emergency Stop workflow too.${NC}"
+fi
+
 # Scale to zero
 echo "1. Scaling redducklabs runner scale set to zero..."
 helm upgrade redducklabs-runners \
@@ -84,9 +96,11 @@ echo ""
 echo "The release is now in a stopped state (its base template at 0/0). Restore"
 echo "runners only through the reviewed GitHub Actions workflows, as described in"
 echo "docs/runbooks/node-pool-sizing.md (\"Emergency Stop\"):"
-echo "  burst-stopped:   Deploy GitHub Runners operation=deploy (or drain to leave burst)"
-echo "  drain-stopped:   Node Pool Sizing remove-burst, then Deploy operation=rollback"
-echo "  density-stopped: Deploy GitHub Runners operation=rollback"
+echo "While the stop marker exists every fleet workflow refuses to run except"
+echo "Deploy deploy/rollback with acknowledge_emergency_stop=true (and remove-burst):"
+echo "  burst-stopped:   Deploy GitHub Runners operation=deploy acknowledge_emergency_stop=true"
+echo "  drain-stopped:   Node Pool Sizing remove-burst, then Deploy operation=rollback acknowledge_emergency_stop=true"
+echo "  density-stopped: Deploy GitHub Runners operation=rollback acknowledge_emergency_stop=true"
 echo ""
 echo -e "${YELLOW}Remember to investigate what caused the emergency before restarting.${NC}"
 echo ""

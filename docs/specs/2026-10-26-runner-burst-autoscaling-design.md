@@ -11,7 +11,10 @@ and Rebalance; see "Emergency Stop" and "Job protection and idle-runner
 retirement").
 **Amended:** 2026-10-27, final branch review Rulings 26-29 (the `stopped`
 state family, Helm history retention and the drain rollback target, Emergency
-Stop and Rebalance concurrency, the Rebalance skip predicate).
+Stop and Rebalance concurrency, the Rebalance skip predicate); 2026-10-27, PR
+#35 review Rulings 33-34 (the Emergency Stop fence; the rollback target is the
+committed `deploy/density-values.yaml`, independent of Helm history) and the
+removal of the alternate Phase B shape.
 
 ## Problem
 
@@ -283,18 +286,18 @@ ARC states admitted per operation:
 
 | Operation | Admitted ARC states | Admitted burst pools |
 |---|---|---|
-| Runner Status (read-only) | `density`, `burst`, `burst-acceptance`, `drain`, `burst-stopped`, `density-stopped`, `drain-stopped` | any valid subset |
-| Rebalance | `burst`, `drain` (retires idle burst runners); `burst-stopped`, `density-stopped`, `drain-stopped` (admitted; ends with a notice, retires nothing) | both present; any valid subset for a stopped state |
+| Runner Status (read-only) | `density`, `burst`, `burst-acceptance`, `drain`, `burst-stopped`, `density-stopped`, `drain-stopped`; reports the Emergency Stop marker | any valid subset |
+| Rebalance | `burst`, `drain` (retires idle burst runners); `burst-stopped`, `density-stopped`, `drain-stopped`, or any state while the Emergency Stop marker exists (admitted; ends with a notice, retires nothing) | both present; any valid subset for a stopped state or under the marker |
 | Scale Runners `acceptance-phase-c` | `burst` on entry and exit; `burst-acceptance` (8/20 or 4/20) inside the run and on a re-run after interruption, which first restores `burst` | both present, enabled |
-| Scale Runners `record-density` (read-only) | `density` | none |
+| Scale Runners `record-density` (read-only; verifies the live release equals the render of `deploy/density-values.yaml`) | `density` | none |
 | Node Pool Sizing `set-burst-maxima` | `burst` | both present; requested maxima within 0..6 and 0..2 with sum ≤ 8; lowers before raises, reading back each |
 | Node Pool Sizing `create-burst` | `density`, `burst` | none, one, or both at `max_nodes=0` (reconcile) |
 | Node Pool Sizing `configure-expander` | `density`, `burst` | both present |
-| Deploy `deploy` | `density`, `burst`, `burst-stopped` (restores `burst` after Emergency Stop) | both present, expander configured |
+| Deploy `deploy` | `density`, `burst`, `burst-stopped` (restores `burst` after Emergency Stop; with the marker present only when dispatched with `acknowledge_emergency_stop=true`) | both present, expander configured |
 | Node Pool Sizing `enable-burst` | `burst` | exactly one of three stages: both closed (0/0, 0/0); primary open and fallback closed (0/6, 0/0); both open (0/6, 0/2). It opens the primary first, so a retry from the middle stage opens only the fallback; any other combination fails |
-| Deploy `drain` | `burst`, `burst-acceptance` (interrupted Phase C), `drain` (retry), `burst-stopped`; requires `rollback_revision` that exists in `helm history` and validates as `density` (values and manifest) before the drain upgrade | both present |
-| Node Pool Sizing `remove-burst` | `drain` or `drain-stopped` with any pools; or `density` or `density-stopped` with every present burst pool at `max_nodes=0` and zero nodes | both, one, or none |
-| Deploy `rollback` | `drain`, `drain-stopped` or `density-stopped` (Helm rollback to the recorded `density` revision); `density` (no-op re-run) | none |
+| Deploy `drain` | `burst`, `burst-acceptance` (interrupted Phase C), `drain` (retry), `burst-stopped` (only without the Emergency Stop marker) | both present |
+| Node Pool Sizing `remove-burst` | `drain` or `drain-stopped` with any pools; or `density` or `density-stopped` with every present burst pool at `max_nodes=0` and zero nodes (also while the Emergency Stop marker exists) | both, one, or none |
+| Deploy `rollback` | `drain`, `drain-stopped` or `density-stopped` (Helm upgrade to the committed `deploy/density-values.yaml`, validated as `density`); `density` (no-op re-run); with the marker present only when dispatched with `acknowledge_emergency_stop=true` | none |
 
 Every other operation rejects the stopped states. `remove-burst` admits
 `drain-stopped` and `density-stopped` under the same pool conditions as `drain`
@@ -308,30 +311,62 @@ validators recognize exactly the canonical states above. This removes every
 non-canonical min/max pair from the reachable state space. Emergency Stop's
 0/0 is the canonical `stopped` state family above (Ruling 26).
 
-**Emergency Stop.** Emergency Stop sets `minRunners=maxRunners=0` with
-`--reuse-values` on the pinned chart (`--version 0.14.2`), reads back the
-resulting `stopped` state with the read-only gate, and prints the recovery
-path that admits it. It uses its own non-cancelling concurrency group,
-`runner-emergency-stop`, not `runner-fleet-mutation` (Ruling 28), so it runs
-immediately instead of waiting behind a drain (up to 300 minutes) or Phase C
-(up to 270 minutes). A fleet mutation in flight when it runs fails closed at
-its next identity comparison or admission: the ARC values, manifest and
-generation changed and the stopped state is not admitted for that operation.
-Recovery: `burst-stopped` by Deploy `deploy` (back to `burst`) or Deploy
-`drain`; `drain-stopped` by `remove-burst`, then Deploy `rollback`;
-`density-stopped` by `remove-burst` if closed burst pools exist, then Deploy
-`rollback`.
+**Emergency Stop.** Emergency Stop first writes the marker ConfigMap
+`arc-runners/runner-fleet-emergency-stop` (data: the run id and the time), then
+sets `minRunners=maxRunners=0` with `--reuse-values` on the pinned chart
+(`--version 0.14.2`), reads back the resulting `stopped` state and the marker
+with the read-only gate, and prints the recovery path that admits it. It uses
+its own non-cancelling concurrency group, `runner-emergency-stop`, not
+`runner-fleet-mutation` (Ruling 28), so it runs immediately instead of waiting
+behind a drain (up to 300 minutes) or Phase C (up to 270 minutes). A failed
+marker write does not delay the stop; the run fails afterwards.
 
-**Helm history.** Helm keeps 10 revisions per release by default, and a full
-rollout plus acceptance adds about 11, which could prune the `density`
-revision `record-density` recorded and leave `drain` with no rollback target.
-Every `helm upgrade` and `helm rollback` in this repository therefore passes
-`--history-max 100` (Ruling 27). `record-density` reads `helm history` back and
-fails if the recorded revision is not there, and Deploy `drain` takes that
-revision as the required input `rollback_revision` and verifies, before the
-drain upgrade, that it exists in `helm history` and validates as `density`
-(values and manifest), so the fleet never enters `drain` without a usable
-rollback target.
+**Emergency Stop fence (Ruling 33).** A separate concurrency group alone lets
+an older run that passed its final admission write after a completed stop and
+reopen the fleet (PR #35 review finding 1). The marker closes that window:
+
+- While the marker exists the pool-state gate refuses every fleet mutator.
+  Runner Status and Rebalance report it as a stopped condition (Rebalance ends
+  with a notice). Node Pool Sizing `remove-burst` stays admitted: it deletes
+  only empty, closed burst pools and cannot start a runner, and without it the
+  recovery from `drain-stopped` with pools present could not run. Deploy
+  `deploy` and `rollback` are admitted only when dispatched with
+  `acknowledge_emergency_stop=true`; they then delete the marker inside the
+  identity bracket (compare, acknowledged admission, delete, compare) before
+  their first write. The delete carries the uid and resourceVersion that were
+  read as preconditions, so a newer stop that rewrote the marker in between
+  makes it fail instead of being acknowledged unseen. Every later admission in
+  that run is made without the acknowledgement.
+- After every Helm write (Deploy, drain and Phase C through the shared
+  bracket, rollback) the run re-reads the marker, whether or not Helm reported
+  success. If it exists (a marker the run itself acknowledged was deleted
+  before the write, so any marker now belongs to a newer stop), or cannot be
+  read, the run immediately re-applies 0/0 with `--reuse-values
+  --history-max 100` and fails red. The shared bracket also refuses to write
+  while the marker exists, including on cleanup paths that skip re-admission.
+
+Because the marker precedes the stop's Helm write, every interleaving is
+covered: a mutator write before the stop's write is overwritten by the stop; a
+mutator write after it sees the marker and re-stops. Recovery:
+`burst-stopped` by Deploy `deploy` with the acknowledgement (back to `burst`;
+to leave burst, then `drain`); `drain-stopped` by `remove-burst`, then Deploy
+`rollback` with the acknowledgement; `density-stopped` by `remove-burst` if
+closed burst pools exist, then Deploy `rollback` with the acknowledgement.
+
+**Helm history and the rollback target (Ruling 34).** Every Helm write in
+this repository passes `--history-max 100` (Ruling 27). A finite retention cap
+cannot preserve a designated revision (PR #35 review finding 2), so rollback
+does not use Helm history at all. Its target is the committed
+`deploy/density-values.yaml`: the reviewed values of the pre-burst release,
+byte-for-byte the `deploy/dind-values.yaml` that is live before the rollout,
+also used as the test suites' density fixture. Deploy `rollback` validates the
+file as the `density` contract, renders it with the same token handling and
+fixed overlays as Deploy, validates the rendered manifest as density 2/4, and
+upgrades to exactly that render (manifest-hash post-renderer,
+`--history-max 100`) inside the identity bracket with transition
+`arc:density:2/4`. `record-density` is a read-only check that the live release
+is density 2/4 and that its manifest (Secret payloads excluded) equals that
+render. Deploy `drain` no longer takes a `rollback_revision`.
 
 **Burst pools are created closed.** `create-burst` creates both pools with
 `min_nodes=0, max_nodes=0`, so no burst node can exist until `enable-burst`
@@ -370,10 +405,10 @@ Operation contract:
 | Node Pool Sizing `enable-burst` | ARC `burst` readback; expander readback | raise burst maxima to 6 and 2 | pools read back at 0/6 and 0/2 |
 | Scale Runners `acceptance-phase-c` | ARC `burst` or interrupted `burst-acceptance`; burst enabled | whole Phase C cycle in one run | ARC `burst` readback |
 | Node Pool Sizing `configure-expander` | pool state valid; both burst pools exist | cluster expanders and priority ConfigMap | readback equals expected |
-| Deploy `drain` | pool state valid; `rollback_revision` exists in `helm history` and validates as `density` | Helm upgrade to `drain`; retire idle burst runners in process and wait | `drain` readback; no runner pod on a burst node; burst pools at zero nodes |
+| Deploy `drain` | pool state valid; no Emergency Stop marker | Helm upgrade to `drain`; retire idle burst runners in process and wait | `drain` readback; no runner pod on a burst node; burst pools at zero nodes |
 | Node Pool Sizing `remove-burst` | ARC `drain`/`drain-stopped`, or `density`/`density-stopped` with only closed burst pools; no runner pods and zero nodes in burst pools, observed twice | reset expanders; delete burst pools | only baseline pool remains |
-| Deploy `rollback` | ARC `drain`, `drain-stopped`, `density-stopped` or `density`; burst pools absent; recorded `density` revision | Helm rollback to `density` | `density` readback |
-| Emergency Stop | none (runs immediately in its own group) | Helm upgrade `--reuse-values` to 0/0 | a `stopped` state readback |
+| Deploy `rollback` | ARC `drain`, `drain-stopped`, `density-stopped` or `density`; burst pools absent; `deploy/density-values.yaml` validates as `density` (values and render) | Helm upgrade to the committed density values | `density` readback |
+| Emergency Stop | none (runs immediately in its own group) | stop marker, then Helm upgrade `--reuse-values` to 0/0 | a `stopped` state and marker readback |
 
 Every operation verifies `expected_sha` before its first mutating call, is
 idempotent when re-run on its own postcondition, and treats a partially
@@ -459,9 +494,10 @@ All infrastructure mutation runs through CI. Each run records its
 `expected_sha` and its run URL in the rollout log
 (`docs/runbooks/node-pool-sizing.md`, "Rollout record").
 
-1. **Record rollback target.** Scale Runners `record-density` reads the
+1. **Verify the rollback target.** Scale Runners `record-density` reads the
    current release (`density`, 2/4, private group), verifies it against the
-   `density` contract, and emits the Helm revision as the rollback target.
+   `density` contract, and verifies that it equals the render of the committed
+   `deploy/density-values.yaml`, which Deploy `rollback` restores (Ruling 34).
    This replaces the legacy-isolated 2/2 rollback target, which is retired.
 2. **Trust boundary.** `prepare-trust-boundary` with the expanded allow-list.
 3. **Pools.** Node Pool Sizing `create-burst` creates both burst pools closed
@@ -499,9 +535,13 @@ verification.
 | E. Restore and ready-for-migration | after D: Node Pool Sizing `remove-burst`, Deploy `rollback`, then rollout steps 3–4 again | `density` readback after rollback; then `burst` readback, three pools with expected IDs and bounds, expander readback, trust-boundary readback, two warm runners on baseline; an N=8 smoke run passes |
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
-uses that to make the fallback the only eligible burst group. If the API
-rejects it, Phase B falls back to primary `max_nodes=1` with N=10 and requires
-two fallback nodes. Phase B does not reproduce a provider 422/backoff; that
+uses that to make the fallback the only eligible burst group. There is no
+alternate Phase B shape (PR #35 review finding 3): `create-burst` already
+requires closed (0/0) pools, so a provider that rejected primary
+`max_nodes=0` would have stopped the rollout there (`SCALE_TO_ZERO_REJECTED`).
+If `set-burst-maxima` is nevertheless rejected, acceptance stops and Phase B
+needs a reviewed change to the procedure and to `scripts/acceptance-verdict.py`
+before it is re-run. Phase B does not reproduce a provider 422/backoff; that
 path is covered by an autoscaler-status fixture and the documented upstream
 behavior that backed-off groups are excluded from expansion, and is recorded as
 untested live.
@@ -520,8 +560,7 @@ successful Phase D proves recovery and leaves the fleet drained.
 
 Ordered CI recovery, each step reading back its postcondition before the next:
 
-1. Deploy `drain` with the recorded `rollback_revision`, which it verifies
-   first: Helm upgrade to the `drain` contract (max 4, required
+1. Deploy `drain`: Helm upgrade to the `drain` contract (max 4, required
    baseline affinity, safe-to-evict retained). In the same run, while holding
    the lock, it runs `retire-idle-burst-runners.sh` every 2 minutes and waits
    until no runner pod is on a burst node and both burst pools report zero
@@ -532,8 +571,9 @@ Ordered CI recovery, each step reading back its postcondition before the next:
 2. Node Pool Sizing `remove-burst` observes zero nodes and no runner pods in
    both burst pools twice, with identity checks between the observations,
    resets the expanders to the default, and deletes the pools.
-3. Deploy `rollback` restores the recorded `density` revision. With the burst
-   pools gone, its unrestricted node selector can only match baseline.
+3. Deploy `rollback` upgrades to the committed `deploy/density-values.yaml`
+   (validated as `density`; independent of Helm history, Ruling 34). With the
+   burst pools gone, its unrestricted node selector can only match baseline.
 
 A rollout that failed after `deploy` recovers by the same sequence; each step
 is a no-op when its postcondition already holds. A rollout that failed before

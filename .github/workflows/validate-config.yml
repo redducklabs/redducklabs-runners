@@ -292,13 +292,16 @@ jobs:
       - name: Check for secrets in tracked files
         run: |
           echo "🔍 Checking that no token-like values were committed..."
-          # deploy/dind-values.yaml must keep github_token empty - it is set at
+          # deploy/dind-values.yaml and deploy/density-values.yaml (the
+          # rollback target) must keep github_token empty - it is set at
           # deploy time via --set.
-          TOKEN_LINE=$(grep -E '^\s*github_token:' deploy/dind-values.yaml || true)
-          if echo "${TOKEN_LINE}" | grep -qE 'github_token:\s*"?(gh[pousr]_|[A-Za-z0-9]{20,})'; then
-            echo "❌ deploy/dind-values.yaml appears to contain a real token!"
-            exit 1
-          fi
+          for VALUES in deploy/dind-values.yaml deploy/density-values.yaml; do
+            TOKEN_LINE=$(grep -E '^\s*github_token:' "${VALUES}" || true)
+            if echo "${TOKEN_LINE}" | grep -qE 'github_token:\s*"?(gh[pousr]_|[A-Za-z0-9]{20,})'; then
+              echo "❌ ${VALUES} appears to contain a real token!"
+              exit 1
+            fi
+          done
           echo "✅ github_token is not populated in committed values"
 
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then

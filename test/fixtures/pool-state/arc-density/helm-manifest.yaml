@@ -1,5 +1,5 @@
 # Rendered with helm template (gha-runner-scale-set 0.14.2, kube 1.36.3) from
-# test/fixtures/arc-density-values.yaml with minRunners=2 maxRunners=4. The token is a placeholder.
+# deploy/density-values.yaml with minRunners=2 maxRunners=4. The token is a placeholder.
 ---
 # Source: gha-runner-scale-set/templates/no_permission_serviceaccount.yaml
 apiVersion: v1

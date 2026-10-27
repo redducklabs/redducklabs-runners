@@ -147,6 +147,13 @@ def main():
     # Unset dispatch inputs take their declared defaults, as in Actions.
     trigger = workflow.get("on", workflow.get(True)) or {}
     declared = ((trigger.get("workflow_dispatch") or {}).get("inputs") or {}) if isinstance(trigger, dict) else {}
+    # GitHub rejects a dispatch that names an undeclared input (HTTP 422
+    # "Unexpected inputs provided"), so nothing runs.
+    unexpected = sorted(set(inputs) - set(declared)) if isinstance(trigger, dict) and "workflow_dispatch" in trigger else []
+    if unexpected:
+        print(f"DISPATCH REJECTED: Unexpected inputs provided: {unexpected}")
+        print(f"actions_runner: unexpected inputs {unexpected}", file=sys.stderr)
+        return 1
     for name, spec in declared.items():
         if name not in inputs and isinstance(spec, dict) and "default" in spec:
             default = spec["default"]

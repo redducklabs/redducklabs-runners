@@ -528,7 +528,7 @@ for job in (document.get("jobs") or {}).values():
                 "inputs.pool_name": "github-runners-pool-16g",
                 "inputs.operation": "deploy",
                 "inputs.accept_privileged_runner_co_tenancy": "true",
-                "inputs.rollback_revision": "7",
+                "inputs.acknowledge_emergency_stop": "false",
                 "inputs.min_runners": "2",
                 "inputs.max_runners": max_runners,
                 "inputs.expected_sha": expected_sha,
@@ -536,7 +536,7 @@ for job in (document.get("jobs") or {}).values():
                 "inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "github.event.inputs.operation": "deploy",
                 "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
-                "github.event.inputs.rollback_revision": "7",
+                "github.event.inputs.acknowledge_emergency_stop": "false",
                 "github.event.inputs.apply": "true",
                 "github.event.inputs.expected_sha": expected_sha,
                 "github.event.inputs.max_runners": max_runners,
@@ -550,7 +550,7 @@ for job in (document.get("jobs") or {}).values():
                 "needs.validate-inputs.outputs.min_runners": "2",
                 "needs.validate-inputs.outputs.expected_sha": expected_sha,
                 "needs.validate-inputs.outputs.operation": "deploy",
-                "needs.validate-inputs.outputs.rollback_revision": "7",
+                "needs.validate-inputs.outputs.acknowledge_emergency_stop": "false",
                 "needs.validate-inputs.outputs.namespace": "arc-runners",
                 "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "steps.validate.outputs.max_nodes": max_nodes,
@@ -608,7 +608,7 @@ for job in (document.get("jobs") or {}).values():
             "inputs.pool_name": "github-runners-pool-16g",
             "inputs.operation": "deploy",
             "inputs.accept_privileged_runner_co_tenancy": "true",
-            "inputs.rollback_revision": "7",
+            "inputs.acknowledge_emergency_stop": "false",
             "inputs.min_runners": "2",
             "inputs.max_runners": max_runners,
             "inputs.expected_sha": expected_sha,
@@ -616,7 +616,7 @@ for job in (document.get("jobs") or {}).values():
             "inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "github.event.inputs.operation": "deploy",
             "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
-            "github.event.inputs.rollback_revision": "7",
+            "github.event.inputs.acknowledge_emergency_stop": "false",
             "github.event.inputs.max_runners": max_runners,
             "github.event.inputs.min_runners": "2",
             "github.event.inputs.max_nodes": max_nodes,
@@ -626,7 +626,7 @@ for job in (document.get("jobs") or {}).values():
             "needs.validate-inputs.outputs.min_runners": "2",
             "needs.validate-inputs.outputs.expected_sha": expected_sha,
             "needs.validate-inputs.outputs.operation": "deploy",
-            "needs.validate-inputs.outputs.rollback_revision": "7",
+            "needs.validate-inputs.outputs.acknowledge_emergency_stop": "false",
             "needs.validate-inputs.outputs.namespace": "arc-runners",
             "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "steps.validate.outputs.max_nodes": max_nodes,
@@ -2194,8 +2194,11 @@ if operations != ['deploy', 'prepare-trust-boundary', 'drain', 'rollback']:
     raise SystemExit('deploy operation choices are incomplete or unordered')
 if inputs.get('accept_privileged_runner_co_tenancy', {}).get('type') != 'boolean':
     raise SystemExit('explicit privileged co-tenancy acceptance input is missing')
-if 'rollback_revision' not in inputs:
-    raise SystemExit('rollback revision input is missing')
+if 'rollback_revision' in inputs:
+    raise SystemExit('rollback no longer takes a Helm revision (Ruling 34)')
+if inputs.get('acknowledge_emergency_stop', {}).get('type') != 'boolean' \
+        or inputs['acknowledge_emergency_stop'].get('default') is not False:
+    raise SystemExit('acknowledge_emergency_stop must be a boolean input defaulting to false (Ruling 33)')
 
 jobs = workflow.get('jobs') or {}
 trust = jobs.get('trust-boundary')
@@ -2224,7 +2227,7 @@ deploy_index = next(i for i, step in enumerate(steps) if step.get('name') == 'De
 preflight = steps[preflight_index].get('run', '')
 deploy_shell = steps[deploy_index].get('run', '')
 rollback_steps = jobs.get('rollback', {}).get('steps', [])
-rollback = next(step for step in rollback_steps if step.get('name') == 'Rollback runners').get('run', '')
+rollback = next(step for step in rollback_steps if step.get('name') == 'Roll back to committed density values').get('run', '')
 if preflight.count('helm template ') != 1:
     raise SystemExit('candidate must be rendered exactly once')
 if preflight.count('kubectl apply --server-side --force-conflicts --dry-run=server') != 2:
@@ -2233,7 +2236,7 @@ if '--post-renderer "${HASH_GATE}"' not in deploy_shell:
     raise SystemExit('Helm deployment is not guarded by the preflight manifest hash')
 if preflight_index >= deploy_index:
     raise SystemExit('preflight does not precede Helm deployment')
-if 'helm rollback ' not in rollback:
+if './scripts/rollback-density.sh --identities' not in rollback:
     raise SystemExit('CI rollback boundary is missing')
 if '--contract burst --kind manifest' not in preflight:
     raise SystemExit('rendered candidate is not checked against the burst contract before Helm')
@@ -2955,12 +2958,15 @@ PY
 }
 
 assert_deploy_unused_revision_cannot_route() {
+    # Ruling 34 removed rollback_revision; the remaining routing-adjacent input
+    # is acknowledge_emergency_stop, which must be exactly true or false and can
+    # never inject another workflow output.
     local script="$FIXTURE_DIR/deploy-unused-revision.sh"
-    local payload=$'7\noperation=rollback\nrollback_revision=99'
+    local payload=$'false\noperation=rollback'
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
       'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
-        fail "Deploy unused-revision routing fixture could not be materialized"
+        fail "Deploy acknowledgement routing fixture could not be materialized"
         return
       }
     python3 - "$script" "$payload" <<'PY'
@@ -2970,32 +2976,23 @@ import sys
 path, payload = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     source = stream.read()
-source = source.replace("export INPUT_ROLLBACK_REVISION=7", f"export INPUT_ROLLBACK_REVISION={shlex.quote(payload)}", 1)
+if "export INPUT_ACKNOWLEDGE_STOP=false" not in source:
+    raise SystemExit("acknowledgement input export not found")
+source = source.replace("export INPUT_ACKNOWLEDGE_STOP=false", f"export INPUT_ACKNOWLEDGE_STOP={shlex.quote(payload)}", 1)
 with open(path, "w", encoding="utf-8") as stream:
     stream.write(source)
 PY
     : > "$FIXTURE_DIR/mutations"
-    if ! run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Deploy rejects an unused rollback input instead of ignoring it"
+    : > "$FIXTURE_DIR/github-output"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts a multi-line acknowledge_emergency_stop value"
         return
     fi
-    if python3 - "$FIXTURE_DIR/github-output" <<'PY'
-import sys
-
-values = {}
-with open(sys.argv[1], encoding="utf-8", newline=None) as stream:
-    for line in stream:
-        line = line.rstrip("\r\n")
-        if "=" in line:
-            key, value = line.split("=", 1)
-            values[key] = value
-if values.get("operation") != "deploy" or "rollback_revision" in values:
-    raise SystemExit(1)
-PY
-    then
-        pass "Deploy ignores and does not emit rollback-only input for deploy routing"
+    if ! grep -q '^operation=rollback' "$FIXTURE_DIR/github-output" \
+        && grep -Fq 'acknowledge_emergency_stop must be true or false' "$FIXTURE_DIR/output"; then
+        pass "Deploy rejects a malformed acknowledge_emergency_stop before emitting any routing output"
     else
-        fail "Deploy unused rollback input can overwrite operation/revision routing outputs"
+        fail "Deploy acknowledgement input can inject routing outputs"
     fi
 }
 
@@ -3224,17 +3221,17 @@ PY
 from pathlib import Path
 
 runbook = " ".join(Path("docs/runbooks/node-pool-sizing.md").read_text(encoding="utf-8").split())
-# Burst rollout order (spec "Rollout"): record the density rollback target,
-# trust boundary, pools, deploy, then acceptance; rollback consumes the
-# recorded revision.
+# Burst rollout order (spec "Rollout"): verify the committed density rollback
+# target, trust boundary, pools, deploy, then acceptance; rollback restores the
+# committed density values (Ruling 34).
 required = [
-    "**Record rollback target.** Scale Runners `action=record-density`",
-    "Save `rollback_revision` from the job output",
+    "**Verify the rollback target.** Scale Runners `action=record-density`",
+    "`deploy/density-values.yaml`, the target Deploy `rollback` restores",
     "**Trust boundary.** Deploy GitHub Runners `operation=prepare-trust-boundary`",
     "**Pools.** Node Pool Sizing `create-burst`",
     "**Deploy.** Deploy GitHub Runners `operation=deploy`",
     "**Acceptance** phases A–E",
-    "Deploy GitHub Runners `operation=rollback` with the recorded `rollback_revision`",
+    "Deploy GitHub Runners `operation=rollback`. It validates the committed `deploy/density-values.yaml`",
 ]
 positions = []
 for text in required:
@@ -3249,11 +3246,12 @@ for retired in ("rollout-quiesce", "legacy-isolated 2/2", "Node Pool Sizing acce
         raise SystemExit(f"runbook retains the retired step: {retired}")
 if "Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of the rendered scale set and representative Pod before Helm mutation, and records" in runbook:
     raise SystemExit("runbook incorrectly assigns rollback-revision capture to Deploy")
-# Rulings 26-28: drain takes the recorded revision; Emergency Stop has its own
-# section covering the stopped states, its own lock and recovery.
+# Rulings 26-28 and 33-34: drain takes no revision; Emergency Stop has its own
+# section covering the stopped states, the stop marker, its own lock and recovery.
 for text in (
-    "-f operation=drain -f rollback_revision=\"$ROLLBACK_REVISION\"",
-    "Deploy GitHub Runners `operation=drain` with the recorded `rollback_revision`",
+    "-f operation=drain -f expected_sha=\"$SHA\"",
+    "1. Deploy GitHub Runners `operation=drain`. It moves ARC to `drain`",
+    "runner-fleet-emergency-stop", "acknowledge_emergency_stop=true",
     "## Emergency Stop",
     "does not wait for a running Deploy `drain` or Scale Runners Phase C",
     "`burst-stopped`", "`drain-stopped`", "`density-stopped`",
@@ -3445,15 +3443,19 @@ if not rollback or rollback.get('needs') != 'validate-inputs':
 if 'trust-boundary' in str(rollback.get('needs')):
     raise SystemExit('rollback depends on trust mutation')
 rollback_steps = rollback.get('steps', [])
-rollback_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Rollback runners')
+rollback_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Roll back to committed density values')
 post_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Verify trust boundary after rollback')
 if rollback_index >= post_index:
     raise SystemExit('post-recovery checks precede Helm rollback')
 before_rollback = '\n'.join(item.get('run', '') for item in rollback_steps[:rollback_index])
 if 'verify-runner-trust-boundary.sh' in before_rollback:
     raise SystemExit('trust health can block rollback')
-if '--operation rollback' not in before_rollback or '--transition none' not in before_rollback:
-    raise SystemExit('rollback is not admitted and identity-bracketed by the pool-state gate')
+if '--operation rollback' not in before_rollback:
+    raise SystemExit('rollback is not admitted by the pool-state gate')
+with open('scripts/rollback-density.sh', encoding='utf-8') as stream:
+    rollback_script = stream.read()
+if 'fleet_helm_bracket "$IDENTITIES" rollback none arc:density:2/4' not in rollback_script:
+    raise SystemExit('rollback is not identity-bracketed by the pool-state gate')
 deploy_job = deploy['jobs']['deploy']
 if "operation == 'deploy'" not in str(deploy_job.get('if', '')):
     raise SystemExit('deployment job is not deploy-only')
@@ -3525,7 +3527,11 @@ printf '#!/usr/bin/env bash\ncat\n' > "$FIXTURE_DIR/runner-candidate-hash-gate.s
 chmod 0700 "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
 assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' '--post-renderer "${HASH_GATE}"' Helm '^helm upgrade redducklabs-runners '
 assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation' '^(curl|gh) .*actions/runner-groups'
-assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback' '^helm rollback '
+# Deploy rollback no longer runs an inline Helm command (Ruling 34): its write is
+# scripts/rollback-density.sh inside the identity bracket. Its expected_sha
+# guards are exercised end to end by test/verify-burst-autoscaling.sh
+# ("deploy rollback: mismatched expected_sha stops before any doctl, kubectl or
+# helm call" and "rollback with the checkout moved after validation").
 assert_trust_boundary_fixtures
 assert_autoscaler_diagnostic_fixtures
 assert_deploy_operation_and_preflight_contract

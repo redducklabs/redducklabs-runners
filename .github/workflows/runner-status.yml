@@ -172,6 +172,10 @@ jobs:
           STATE_LINE=$(grep -E '^STATE: ' "${RUNNER_TEMP}/gate.out" || true)
           echo "admitted=${ADMITTED}" >> "${GITHUB_OUTPUT}"
           echo "state=${STATE_LINE#STATE: }" >> "${GITHUB_OUTPUT}"
+          # Ruling 33: the Emergency Stop marker is a stopped condition.
+          if grep -qE '^STOP: ' "${RUNNER_TEMP}/gate.out"; then
+            echo "stopped=true" >> "${GITHUB_OUTPUT}"
+          fi
           if [ "${ADMITTED}" != "true" ]; then
             # Rejection lines are the gate's own sanitized REJECTED: messages.
             echo "::error::Runner pool state was not admitted (see the REJECTED lines above)"
@@ -577,6 +581,7 @@ jobs:
         env:
           POOL_STATE: ${{ steps.gate.outputs.state }}
           POOL_ADMITTED: ${{ steps.gate.outputs.admitted }}
+          POOL_STOPPED: ${{ steps.gate.outputs.stopped }}
         run: |
           echo "# 📊 GitHub Runners Status Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -591,6 +596,10 @@ jobs:
             echo "**Pool state**: \`${POOL_STATE}\` (admitted)" >> $GITHUB_STEP_SUMMARY
           else
             echo "**Pool state**: not admitted. See the \`REJECTED:\` lines in the Admit pool state step." >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${POOL_STOPPED}" = "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Emergency Stop in effect**: the marker \`arc-runners/runner-fleet-emergency-stop\` exists; fleet mutators refuse to run until Deploy \`deploy\` or \`rollback\` runs with \`acknowledge_emergency_stop=true\`." >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ -f "${RUNNER_TEMP}/pool-report.txt" ]; then
