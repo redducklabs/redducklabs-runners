@@ -1,0 +1,434 @@
+{
+ "A-15-concurrent": {
+  "criteria": [
+   "A-runners"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-baseline-3": {
+  "criteria": [
+   "A-baseline"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-cold-p95-9min": {
+  "criteria": [
+   "pickup-cold"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-container-oomkilled": {
+  "criteria": [
+   "runner-health"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-container-restarted": {
+  "criteria": [
+   "runner-health"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-expander-missing": {
+  "criteria": [
+   "A-setup"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-fallback-node": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-forbidden-reported-pass": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-imds-connected": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-kubernetes-service-wrong-address": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-missing": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-pod-is-kube-dns": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-public-ip-not-external": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-public-kubelet-connected": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-public-targets-missing": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-refused": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-network-worker-not-worker-pool": {
+  "criteria": [
+   "A-network"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-not-from-zero": {
+  "criteria": [
+   "A-setup"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-pass": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "A-warm-p95-120s": {
+  "criteria": [
+   "pickup-warm"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-wrong-sha": {
+  "criteria": [
+   "probe-identity"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-cold-p95-9min": {
+  "criteria": [
+   "pickup-cold"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-compatibility-missing": {
+  "criteria": [
+   "B-compatibility"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-one-fallback-node": {
+  "criteria": [
+   "B-fallback-nodes"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-pass": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "B-placement-on-primary": {
+  "criteria": [
+   "B-placement",
+   "B-fallback-nodes",
+   "B-compatibility"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-primary-not-restored": {
+  "criteria": [
+   "B-restored"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-setup-primary-open": {
+  "criteria": [
+   "B-setup"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-arc-not-burst": {
+  "criteria": [
+   "C-arc"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-jobs-killed-not-measured": {
+  "criteria": [
+   "C-jobs-killed"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-killed-job": {
+  "criteria": [
+   "C-jobs-killed"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-pass-fixture-only": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "C-pass-retired": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "C-pools-not-zero": {
+  "criteria": [
+   "C-zero-nodes"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-result-inconsistent": {
+  "criteria": [
+   "C-retirement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-retired-while-baseline-full": {
+  "criteria": [
+   "C-full-baseline"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "C-run-failed": {
+  "criteria": [
+   "C-run"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-arc-not-drain": {
+  "criteria": [
+   "D-arc"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-drain-failed": {
+  "criteria": [
+   "D-drain-run"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-drain-other-workflow": {
+  "criteria": [
+   "D-drain-run"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-entry-cancelled": {
+  "criteria": [
+   "D-jobs"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-entry-failure": {
+  "criteria": [
+   "D-jobs"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-exhausted-before-drain-completed": {
+  "criteria": [
+   "D-overlap-end",
+   "D-overlap-continuous"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-fewer-than-8-in-flight": {
+  "criteria": [
+   "D-overlap-start"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-gap-in-drain-interval": {
+  "criteria": [
+   "D-overlap-continuous"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-pass": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "D-pass-unscheduled-pod-after-drain": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "D-pools-not-zero": {
+  "criteria": [
+   "D-zero"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-post-drain-pod-on-burst": {
+  "criteria": [
+   "D-post-drain-placement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-probe-started-after-drain": {
+  "criteria": [
+   "D-overlap-start",
+   "D-overlap-continuous",
+   "D-post-drain-placement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-runner-evicted": {
+  "criteria": [
+   "runner-health"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "D-scale-up-after-drain": {
+  "criteria": [
+   "D-no-scale-up"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-arc-not-burst": {
+  "criteria": [
+   "E-arc"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-baseline-pool-changed": {
+  "criteria": [
+   "E-pools"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-cold-p95-9min": {
+  "criteria": [
+   "pickup-cold"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-expander-missing": {
+  "criteria": [
+   "E-expander"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-pass": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": true
+ },
+ "E-pools-wrong-bounds": {
+  "criteria": [
+   "E-pools"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-rollback-after-probe": {
+  "criteria": [
+   "E-rollback"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-rollback-failed": {
+  "criteria": [
+   "E-rollback"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-smoke-failure": {
+  "criteria": [
+   "E-smoke"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-trust-failed": {
+  "criteria": [
+   "E-trust"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-warm-runner-on-burst": {
+  "criteria": [
+   "E-warm"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ }
+}

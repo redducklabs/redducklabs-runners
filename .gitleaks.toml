@@ -1,0 +1,15 @@
+# gitleaks configuration for this repository.
+#
+# Extends the default ruleset. The only allowlisted value is the synthetic
+# test-fixture placeholder used in rendered Helm manifests under
+# test/fixtures/: base64("FIXTURE-PLACEHOLDER"). It is not a credential.
+# Do not add real-looking values here; use a placeholder instead.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic Helm-manifest token placeholder in test fixtures"
+regexes = ['''^RklYVFVSRS1QTEFDRUhPTERFUg==$''']
+paths = ['''^test/fixtures/''']
+condition = "AND"

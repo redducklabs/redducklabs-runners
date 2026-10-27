@@ -150,7 +150,7 @@ jobs:
         run: |
           echo "🔍 Running bash -n on all scripts..."
           FAILED=0
-          for s in scripts/*.sh test/*.sh deploy/*.sh docs/codex/*.sh; do
+          for s in scripts/*.sh scripts/lib/*.sh test/*.sh deploy/*.sh docs/codex/*.sh; do
             [ -e "$s" ] || continue
             if bash -n "$s" 2>/dev/null; then
               echo "  OK   $s"
@@ -167,7 +167,7 @@ jobs:
           echo "🔍 Running shellcheck at severity=error..."
           # Errors only: these scripts predate this check and style-level
           # findings would be noise. Genuine errors still fail the build.
-          shellcheck -S error scripts/*.sh test/*.sh deploy/*.sh || exit 1
+          shellcheck -S error scripts/*.sh scripts/lib/*.sh test/*.sh deploy/*.sh || exit 1
           echo "✅ No shellcheck errors"
 
       - name: Verify runner resources and rollout safety boundaries
@@ -178,6 +178,18 @@ jobs:
           # error and no visible diff in the values file.
           chmod +x test/verify-runner-resources.sh
           ./test/verify-runner-resources.sh
+
+      - name: Verify burst autoscaling contracts
+        run: |
+          echo "🔍 Verifying burst, burst-acceptance and drain contracts..."
+          chmod +x test/verify-burst-autoscaling.sh
+          ./test/verify-burst-autoscaling.sh
+
+      - name: Verify acceptance verdicts and the evidence workflow
+        run: |
+          echo "🔍 Verifying acceptance verdict fixtures and runner-acceptance-evidence.yml..."
+          chmod +x test/verify-acceptance.sh
+          ./test/verify-acceptance.sh
 
       - name: Check ARC chart version pins agree
         run: |
@@ -242,7 +254,9 @@ jobs:
           # defaults moved on - and its kubectl drifted three minors out of the
           # supported skew from the API server. Callers should pass only
           # install-jq and inherit the rest.
-          if grep -rn --exclude=validate-config.yml                -e 'kubectl-version:' -e 'helm-version:' -e 'doctl-version:'                .github/workflows/; then
+          if grep -rn --exclude=validate-config.yml \
+               -e 'kubectl-version:' -e 'helm-version:' -e 'doctl-version:' \
+               .github/workflows/; then
             echo ""
             echo "❌ A workflow pins setup-tools versions (shown above)."
             echo "   Remove the override and inherit the action's defaults, or"
@@ -304,5 +318,6 @@ jobs:
             echo "- \`bash -n\` + shellcheck (errors) on all scripts"
             echo "- Runner pod-level reservations and the two-pods-per-node invariant"
             echo "- Mocked trust-boundary, API preflight, rollback, and autoscaler diagnostics"
+            echo "- Acceptance verdict fixtures and the evidence workflow against a simulator"
             echo "- No committed tokens"
           } >> $GITHUB_STEP_SUMMARY

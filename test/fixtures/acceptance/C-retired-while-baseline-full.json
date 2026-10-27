@@ -1,0 +1,52 @@
+{
+ "arc_contract_after": "burst",
+ "events": [],
+ "expander_readback": {
+   "expanders": [
+     "priority",
+     "random"
+   ],
+   "managed": true,
+   "priorities": {
+     "1": [
+       ".*"
+     ],
+     "100": [
+       "pool-pri"
+     ],
+     "50": [
+       "pool-fb"
+     ]
+   }
+ },
+ "expected_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "nodes": [
+   {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-a", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
+   {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-b", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"}
+ ],
+ "phase": "C",
+ "phase_c": {
+   "cycles": [
+     {"after4": {"retired": 1, "survivor_on_burst": true}, "min8": {"baseline": 4, "burst": 4, "retired": 1}, "pools_zero_at": "2026-11-02T19:20:00Z"}
+   ],
+   "jobs_killed": 0,
+   "jobs_killed_note": "measured by runner-acceptance-evidence from GitHub job conclusions",
+   "killed_jobs": [],
+   "result": "retired"
+ },
+ "phase_c_run": {"completed": "2026-11-02T19:30:00Z", "conclusion": "success", "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id": 555, "job_name": "Scale Runners - acceptance-phase-c", "repository": "redducklabs/redducklabs-runners", "started": "2026-11-02T18:00:00Z", "workflow_path": ".github/workflows/scale-runners.yml"},
+ "pods": [],
+ "pool_state_checks": [],
+ "pools_after": {
+   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
+ },
+ "pools_before": {
+   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
+ },
+ "probe": null,
+ "trust_readback": null
+}

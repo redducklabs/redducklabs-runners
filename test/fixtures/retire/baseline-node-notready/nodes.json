@@ -1,0 +1,95 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "github-runners-pool-16g-a1b2c",
+        "labels": {
+          "doks.digitalocean.com/node-pool": "github-runners-pool-16g"
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "github-runners-pool-16g-d3e4f",
+        "labels": {
+          "doks.digitalocean.com/node-pool": "github-runners-pool-16g"
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "False"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "github-runners-burst-16g-p1q2r",
+        "labels": {
+          "doks.digitalocean.com/node-pool": "github-runners-burst-16g"
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "github-runners-burst-amd-16g-s3t4u",
+        "labels": {
+          "doks.digitalocean.com/node-pool": "github-runners-burst-amd-16g"
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "worker-pool-x1y2z",
+        "labels": {
+          "doks.digitalocean.com/node-pool": "worker-pool"
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+invoice list -o json|invoice-list.json
+balance get -o json|balance.json

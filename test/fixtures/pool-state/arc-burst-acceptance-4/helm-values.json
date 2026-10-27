@@ -1,0 +1,184 @@
+{
+  "githubConfigUrl": "https://github.com/redducklabs",
+  "githubConfigSecret": {
+    "github_token": "FIXTURE-PLACEHOLDER"
+  },
+  "minRunners": 4,
+  "maxRunners": 20,
+  "runnerScaleSetName": "redducklabs-runners",
+  "runnerGroup": "redducklabs-private-runners",
+  "template": {
+    "metadata": {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      }
+    },
+    "spec": {
+      "affinity": {
+        "nodeAffinity": {
+          "preferredDuringSchedulingIgnoredDuringExecution": [
+            {
+              "weight": 100,
+              "preference": {
+                "matchExpressions": [
+                  {
+                    "key": "doks.digitalocean.com/node-pool",
+                    "operator": "In",
+                    "values": [
+                      "github-runners-pool-16g"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "automountServiceAccountToken": false,
+      "nodeSelector": {
+        "node-type": "github-runner"
+      },
+      "tolerations": [
+        {
+          "key": "github-runner",
+          "operator": "Equal",
+          "value": "true",
+          "effect": "NoSchedule"
+        }
+      ],
+      "resources": {
+        "requests": {
+          "cpu": "3",
+          "memory": "5Gi"
+        },
+        "limits": {
+          "memory": "6Gi"
+        }
+      },
+      "imagePullSecrets": [
+        {
+          "name": "do-registry-secret"
+        }
+      ],
+      "initContainers": [
+        {
+          "name": "init-dind-externals",
+          "image": "registry.digitalocean.com/redducklabs/github-runner:latest",
+          "command": [
+            "cp"
+          ],
+          "args": [
+            "-r",
+            "/home/runner/externals/.",
+            "/home/runner/tmpDir/"
+          ],
+          "volumeMounts": [
+            {
+              "name": "dind-externals",
+              "mountPath": "/home/runner/tmpDir"
+            }
+          ]
+        },
+        {
+          "name": "dind",
+          "image": "docker:29.7.2-dind",
+          "args": [
+            "dockerd",
+            "--host=unix:///var/run/docker.sock",
+            "--group=$(DOCKER_GROUP_GID)",
+            "--registry-mirror=https://mirror.gcr.io"
+          ],
+          "env": [
+            {
+              "name": "DOCKER_GROUP_GID",
+              "value": "123"
+            }
+          ],
+          "securityContext": {
+            "privileged": true
+          },
+          "restartPolicy": "Always",
+          "startupProbe": {
+            "exec": {
+              "command": [
+                "docker",
+                "info"
+              ]
+            },
+            "initialDelaySeconds": 0,
+            "failureThreshold": 24,
+            "periodSeconds": 5
+          },
+          "volumeMounts": [
+            {
+              "name": "work",
+              "mountPath": "/home/runner/_work"
+            },
+            {
+              "name": "dind-sock",
+              "mountPath": "/var/run"
+            },
+            {
+              "name": "dind-externals",
+              "mountPath": "/home/runner/externals"
+            }
+          ]
+        }
+      ],
+      "containers": [
+        {
+          "name": "runner",
+          "image": "registry.digitalocean.com/redducklabs/github-runner:latest",
+          "imagePullPolicy": "Always",
+          "command": [
+            "/home/runner/run.sh"
+          ],
+          "env": [
+            {
+              "name": "DOCKER_HOST",
+              "value": "unix:///var/run/docker.sock"
+            },
+            {
+              "name": "RUNNER_WAIT_FOR_DOCKER_IN_SECONDS",
+              "value": "120"
+            }
+          ],
+          "securityContext": {
+            "runAsUser": 1001,
+            "runAsGroup": 121,
+            "allowPrivilegeEscalation": true,
+            "readOnlyRootFilesystem": false
+          },
+          "volumeMounts": [
+            {
+              "name": "work",
+              "mountPath": "/home/runner/_work"
+            },
+            {
+              "name": "dind-sock",
+              "mountPath": "/var/run"
+            }
+          ]
+        }
+      ],
+      "volumes": [
+        {
+          "name": "work",
+          "emptyDir": {}
+        },
+        {
+          "name": "dind-sock",
+          "emptyDir": {}
+        },
+        {
+          "name": "dind-externals",
+          "emptyDir": {}
+        }
+      ]
+    }
+  },
+  "controllerServiceAccount": {
+    "name": "arc-gha-rs-controller",
+    "namespace": "arc-systems"
+  }
+}

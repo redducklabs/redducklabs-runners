@@ -98,3 +98,9 @@ docker-config.json
 notes.txt
 TODO.txt
 NOTES.md
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Acceptance Phase C evidence written by scripts/acceptance-phase-c.sh
+phase-c-evidence.json

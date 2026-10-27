@@ -85,7 +85,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-inputs
     timeout-minutes: 5
-    
+    # Explicit bash runs every step as "bash --noprofile --norc -eo pipefail",
+    # so a failing command inside a pipeline fails the step.
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -100,19 +105,21 @@ jobs:
           install-jq: 'true'
       
       - name: Configure Kubernetes access
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
           echo "🔧 Configuring Kubernetes access..."
-          
+
           # Validate DO_TOKEN
-          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+          if [ -z "${DO_TOKEN}" ]; then
             echo "❌ Error: DO_TOKEN secret is not set!"
             exit 1
           fi
-          
+
           # Initialize doctl with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring doctl..."
-            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+            if doctl auth init --access-token "${DO_TOKEN}" > /dev/null; then
               echo "✅ DigitalOcean authentication configured"
               break
             elif [ "${attempt}" = "3" ]; then
@@ -123,14 +130,13 @@ jobs:
               sleep 5
             fi
           done
-          
-          # Configure kubectl with retry logic
+
+          # kubeconfig save takes the cluster NAME; use-context takes the context.
+          # Never trust the context the save leaves current: select and assert it.
           echo "Configuring kubectl for cluster ${CLUSTER_NAME}..."
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring kubectl..."
             if doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"; then
-              kubectl config use-context "${CLUSTER_CONTEXT}"
-              echo "✅ Kubernetes access configured"
               break
             elif [ "${attempt}" = "3" ]; then
               echo "❌ Error: Failed to configure kubectl"
@@ -140,38 +146,75 @@ jobs:
               sleep 5
             fi
           done
-      
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
+
+      - name: Admit pool state (status)
+        id: gate
+        # Read-only admission through the shared pool-state gate. A rejection is
+        # recorded and reported by the later steps, and the run fails in the
+        # final step, so drift never hides the rest of the report.
+        run: |
+          echo "🚦 Checking runner pool state..."
+          ADMITTED=false
+          if ./scripts/verify-runner-pool-state.sh \
+              --cluster-name "${CLUSTER_NAME}" --operation status \
+              > "${RUNNER_TEMP}/gate.out" 2> "${RUNNER_TEMP}/gate.err"; then
+            ADMITTED=true
+          fi
+          cat "${RUNNER_TEMP}/gate.out"
+          cat "${RUNNER_TEMP}/gate.err" >&2
+          STATE_LINE=$(grep -E '^STATE: ' "${RUNNER_TEMP}/gate.out" || true)
+          echo "admitted=${ADMITTED}" >> "${GITHUB_OUTPUT}"
+          echo "state=${STATE_LINE#STATE: }" >> "${GITHUB_OUTPUT}"
+          if [ "${ADMITTED}" != "true" ]; then
+            # Rejection lines are the gate's own sanitized REJECTED: messages.
+            echo "::error::Runner pool state was not admitted (see the REJECTED lines above)"
+          fi
+
+      - name: Report pool node counts, bounds and expander
+        id: pools
+        continue-on-error: true
+        run: |
+          echo "🧮 Reading runner pool node counts and bounds..."
+          ./scripts/report-runner-pools.sh --cluster-name "${CLUSTER_NAME}" \
+            | tee "${RUNNER_TEMP}/pool-report.txt"
+          echo "ok=true" >> "${GITHUB_OUTPUT}"
+          if grep -q '^EXPANDER drift:' "${RUNNER_TEMP}/pool-report.txt"; then
+            echo "::warning::Cluster autoscaler expander configuration drifted (see the EXPANDER lines)"
+          fi
+
       - name: Check deployment status
         id: deployment
         run: |
           echo "🔍 Checking deployment status..."
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
-          # Check if release exists
-          if ! helm list -n "${NAMESPACE}" 2>/dev/null | grep -q "${RELEASE_NAME}"; then
+          # A helm failure fails the step (set -e, stderr visible); only a
+          # successful listing without the release means "not deployed".
+          HELM_INFO=$(helm list -n "${NAMESPACE}" -o json)
+          if ! echo "${HELM_INFO}" | jq -e --arg release "${RELEASE_NAME}" 'any(.[]; .name == $release)' > /dev/null; then
             echo "❌ Runners are not deployed in namespace '${NAMESPACE}'!"
             echo "deployed=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          
+
           echo "deployed=true" >> $GITHUB_OUTPUT
-          
-          # Get deployment info with error handling
-          HELM_INFO=$(helm list -n "${NAMESPACE}" -o json 2>/dev/null)
-          if [ $? -eq 0 ]; then
-            CHART_VERSION=$(echo "${HELM_INFO}" | jq -r ".[] | select(.name==\"${RELEASE_NAME}\") | .chart")
-            DEPLOYED_TIME=$(echo "${HELM_INFO}" | jq -r ".[] | select(.name==\"${RELEASE_NAME}\") | .updated")
-            
-            # Validate retrieved info
-            if [ "${CHART_VERSION}" = "null" ] || [ "${CHART_VERSION}" = "" ]; then
-              CHART_VERSION="Unknown"
-            fi
-            if [ "${DEPLOYED_TIME}" = "null" ] || [ "${DEPLOYED_TIME}" = "" ]; then
-              DEPLOYED_TIME="Unknown"
-            fi
-          else
-            echo "⚠️ Warning: Could not retrieve deployment information"
+
+          # Get deployment info
+          CHART_VERSION=$(echo "${HELM_INFO}" | jq -r ".[] | select(.name==\"${RELEASE_NAME}\") | .chart")
+          DEPLOYED_TIME=$(echo "${HELM_INFO}" | jq -r ".[] | select(.name==\"${RELEASE_NAME}\") | .updated")
+
+          # Validate retrieved info
+          if [ "${CHART_VERSION}" = "null" ] || [ "${CHART_VERSION}" = "" ]; then
             CHART_VERSION="Unknown"
+          fi
+          if [ "${DEPLOYED_TIME}" = "null" ] || [ "${DEPLOYED_TIME}" = "" ]; then
             DEPLOYED_TIME="Unknown"
           fi
           
@@ -190,9 +233,8 @@ jobs:
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           # Get current values with error handling
-          VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
-          
-          if [ $? -eq 0 ] && [ "${VALUES_JSON}" != "" ]; then
+          # (an assignment inside the condition, so set -e does not end the step)
+          if VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null) && [ "${VALUES_JSON}" != "" ]; then
             MIN_RUNNERS=$(echo "${VALUES_JSON}" | jq -r '.minRunners // 0')
             MAX_RUNNERS=$(echo "${VALUES_JSON}" | jq -r '.maxRunners // 0')
             GITHUB_URL=$(echo "${VALUES_JSON}" | jq -r '.githubConfigUrl // "Not configured"')
@@ -245,9 +287,7 @@ jobs:
           NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
           
           # Get pod information with error handling
-          PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json 2>/dev/null)
-          
-          if [ $? -eq 0 ] && [ "${PODS_JSON}" != "" ]; then
+          if PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json 2>/dev/null) && [ "${PODS_JSON}" != "" ]; then
             TOTAL_PODS=$(echo "${PODS_JSON}" | jq '.items | length')
             RUNNING_PODS=$(echo "${PODS_JSON}" | jq '[.items[] | select(.status.phase=="Running")] | length')
             PENDING_PODS=$(echo "${PODS_JSON}" | jq '[.items[] | select(.status.phase=="Pending")] | length')
@@ -297,7 +337,7 @@ jobs:
           echo ""
           echo "Runner node usage:"
           if kubectl top nodes --no-headers >/dev/null 2>&1; then
-            kubectl top nodes --no-headers 2>/dev/null | grep '^github-runners-pool' \
+            kubectl top nodes --no-headers 2>/dev/null | grep '^github-runners-' \
               || echo "  (no runner nodes reporting)"
           else
             echo "  ⚠️ metrics API unavailable - is metrics-server deployed?"
@@ -351,35 +391,6 @@ jobs:
 
           echo "oom_count=${OOM_COUNT}" >> $GITHUB_OUTPUT
           echo "evicted_count=${EVICTED}" >> $GITHUB_OUTPUT
-
-          # --- Capacity drift ------------------------------------------------
-          # The production cap is four runners packed two per node on a fixed
-          # two-node pool. Report any drift from that coupled configuration.
-          echo ""
-          MAX_RUNNERS="${{ steps.config.outputs.max_runners }}"
-          CLUSTER_ID=$(doctl kubernetes cluster list -o json 2>/dev/null \
-            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
-
-          if [ -n "${CLUSTER_ID}" ] && [ "${CLUSTER_ID}" != "null" ]; then
-            POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json 2>/dev/null \
-              | jq -r '.[] | select(.name=="github-runners-pool-16g")')
-            POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes // "?"')
-            POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes // "?"')
-            POOL_COUNT=$(echo "${POOL_JSON}" | jq -r '.count // "?"')
-
-            echo "Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX} current=${POOL_COUNT}"
-            echo "Scale set: maxRunners=${MAX_RUNNERS}"
-
-            if [ "${POOL_MIN}" != "2" ] || [ "${POOL_MAX}" != "2" ] \
-               || [ "${POOL_COUNT}" != "2" ] || [ "${MAX_RUNNERS}" != "4" ]; then
-              echo "⚠️ CAPACITY DRIFT: expected pool min/max/current=2/2/2 and maxRunners=4."
-              echo "   Run the repository validation and CI rollout gates before mutation."
-            else
-              echo "✅ Node pool and scale set retain the fixed two-node/four-runner cap"
-            fi
-          else
-            echo "⚠️ Could not resolve cluster '${CLUSTER_NAME}' to check pool capacity"
-          fi
 
       - name: Report autoscaler diagnostics
         continue-on-error: true
@@ -511,9 +522,7 @@ jobs:
           
           # Check runners via API with retry logic
           for attempt in 1 2 3; do
-            RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null)
-            
-            if [ $? -eq 0 ] && [ "${RESPONSE}" != "" ]; then
+            if RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null) && [ "${RESPONSE}" != "" ]; then
               # Check if response is valid JSON
               if echo "${RESPONSE}" | jq . >/dev/null 2>&1; then
                 RUNNERS=$(echo "${RESPONSE}" | jq -c '[.[]?.runners[]?]')
@@ -565,12 +574,36 @@ jobs:
       
       - name: Generate status report
         if: always()
+        env:
+          POOL_STATE: ${{ steps.gate.outputs.state }}
+          POOL_ADMITTED: ${{ steps.gate.outputs.admitted }}
         run: |
           echo "# 📊 GitHub Runners Status Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Report Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "**Namespace**: \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Release**: \`${RELEASE_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## 🧮 Runner Pools" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${POOL_ADMITTED}" = "true" ]; then
+            echo "**Pool state**: \`${POOL_STATE}\` (admitted)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Pool state**: not admitted. See the \`REJECTED:\` lines in the Admit pool state step." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "${RUNNER_TEMP}/pool-report.txt" ]; then
+            {
+              echo '```text'
+              cat "${RUNNER_TEMP}/pool-report.txt"
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Pool node counts unavailable." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Node-hours and cost are not reported here; run \`scripts/runner-cost-report.sh --month YYYY-MM\`." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ steps.deployment.outputs.deployed }}" != "true" ]; then
@@ -645,3 +678,20 @@ jobs:
               echo "There are ${FAILED_PODS} failed pod(s). Consider investigating or redeploying runners." >> $GITHUB_STEP_SUMMARY
             fi
           fi
+
+      - name: Fail on rejected pool state or unreadable pool report
+        if: always() && steps.gate.outputs.admitted != ''
+        env:
+          POOL_ADMITTED: ${{ steps.gate.outputs.admitted }}
+          POOLS_OK: ${{ steps.pools.outputs.ok }}
+        run: |
+          FAILED=false
+          if [ "${POOL_ADMITTED}" != "true" ]; then
+            echo "❌ Runner pool state was not admitted by the status gate"
+            FAILED=true
+          fi
+          if [ "${POOLS_OK}" != "true" ]; then
+            echo "❌ Per-pool node counts could not be read"
+            FAILED=true
+          fi
+          [ "${FAILED}" = "false" ]

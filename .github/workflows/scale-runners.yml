@@ -1,37 +1,34 @@
 name: Scale GitHub Runners
 
+# Ordinary min/max scaling is retired (docs/specs/2026-10-26-runner-burst-autoscaling-design.md,
+# "No ordinary runtime scaling"): runner bounds change only by a reviewed
+# commit to deploy/dind-values.yaml followed by Deploy. This workflow keeps
+# two actions:
+#
+#   record-density      read-only; validates the live release as the density
+#                       contract (2/4) and emits its Helm revision as the
+#                       rollback target (output rollback_revision)
+#   acceptance-phase-c  acceptance Phase C as one lock-owning run
+#                       (scripts/acceptance-phase-c.sh); a final always-run
+#                       step returns ARC to burst whether the run succeeded,
+#                       failed or was cancelled
+#
+# Both admit the live state with scripts/verify-runner-pool-state.sh under
+# their own operation name after expected_sha is verified.
+
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Scaling action to perform'
+        description: 'Action to perform'
         required: true
         type: choice
         options:
-          - 'status'
-          - 'scale-up'
-          - 'scale-down'
-          - 'scale-max'
-          - 'scale-custom'
-          - 'rollout-quiesce'
-      min_runners:
-        description: 'Minimum runners (for custom scaling)'
-        required: false
-        default: '2'
-        type: string
-      max_runners:
-        description: 'Maximum runners (for custom scaling)'
-        required: false
-        default: '4'
-        type: string
+          - 'record-density'
+          - 'acceptance-phase-c'
       expected_sha:
-        description: 'Exact commit SHA to scale'
+        description: 'Exact commit SHA to run'
         required: true
-        type: string
-      namespace:
-        description: 'Kubernetes namespace'
-        required: false
-        default: 'arc-runners'
         type: string
 
 concurrency:
@@ -52,38 +49,37 @@ permissions:
   contents: read
 
 jobs:
-  validate-inputs:
-    name: Validate Scaling Inputs
+  scale:
+    name: Scale Runners - ${{ inputs.action }}
     runs-on: ubuntu-latest
+    # Phase C stops itself at 270 minutes so the cleanup step fits.
+    timeout-minutes: 300
+    # Explicit bash runs every step as "bash --noprofile --norc -eo pipefail",
+    # so a failing command inside a pipeline fails the step.
+    defaults:
+      run:
+        shell: bash
     outputs:
-      action: ${{ steps.validate.outputs.action }}
-      expected_sha: ${{ steps.validate.outputs.expected_sha }}
-      min_runners: ${{ steps.validate.outputs.min_runners }}
-      max_runners: ${{ steps.validate.outputs.max_runners }}
-      namespace: ${{ steps.validate.outputs.namespace }}
-    
+      rollback_revision: ${{ steps.record.outputs.rollback_revision }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
 
       - name: Validate and sanitize inputs
         id: validate
         env:
           INPUT_ACTION: ${{ inputs.action }}
-          INPUT_MIN_RUNNERS: ${{ inputs.min_runners }}
-          INPUT_MAX_RUNNERS: ${{ inputs.max_runners }}
-          INPUT_NAMESPACE: ${{ inputs.namespace }}
           INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
-          echo "🔍 Validating scaling inputs..."
-          
-          # Get and validate inputs
-          ACTION="${INPUT_ACTION}"
-          MIN_RUNNERS="${INPUT_MIN_RUNNERS}"
-          MAX_RUNNERS="${INPUT_MAX_RUNNERS}"
-          NAMESPACE="${INPUT_NAMESPACE}"
+          # The SHA is verified before any other input and before any step
+          # that reads or changes the cluster.
           EXPECTED_SHA="${INPUT_EXPECTED_SHA}"
-
           ACTUAL_SHA=$(git rev-parse HEAD)
           if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "❌ Error: expected_sha must be a 40-character commit SHA"
@@ -93,119 +89,30 @@ jobs:
             echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
             exit 1
           fi
-          
-          # Non-custom actions ignore the optional custom inputs and emit only
-          # their fixed canonical bounds. This prevents a multiline custom
-          # value from creating additional GITHUB_OUTPUT records.
-          case "${ACTION}" in
-            status) MIN_RUNNERS=2; MAX_RUNNERS=4 ;;
-            scale-up) MIN_RUNNERS=2; MAX_RUNNERS=4 ;;
-            scale-down) MIN_RUNNERS=0; MAX_RUNNERS=1 ;;
-            scale-max) MIN_RUNNERS=4; MAX_RUNNERS=4 ;;
-            rollout-quiesce) MIN_RUNNERS=2; MAX_RUNNERS=2 ;;
-            scale-custom) ;;
+          case "${INPUT_ACTION}" in
+            record-density|acceptance-phase-c) ;;
             *)
-              echo "❌ Error: Invalid action '${ACTION}'"
+              echo "❌ Error: action must be record-density or acceptance-phase-c"
               exit 1
               ;;
           esac
-          echo "✅ Valid action: ${ACTION}"
-          
-          # Validate namespace format (DNS-1123 label)
-          if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
-            echo "❌ Error: namespace must be a valid DNS-1123 label"
-            exit 1
-          fi
-          
-          # For custom scaling, validate numeric inputs
-          if [ "${ACTION}" = "scale-custom" ]; then
-            # Validate min_runners is numeric
-            if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
-              echo "❌ Error: min_runners must be a number"
-              exit 1
-            fi
-            
-            # Validate max_runners is numeric
-            if ! [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]]; then
-              echo "❌ Error: max_runners must be a number"
-              exit 1
-            fi
-            
-            # Validate min <= max
-            if [ "${MIN_RUNNERS}" -gt "${MAX_RUNNERS}" ]; then
-              echo "❌ Error: min_runners (${MIN_RUNNERS}) cannot be greater than max_runners (${MAX_RUNNERS})"
-              exit 1
-            fi
-            
-            # Validate bounds before any value can be emitted or reach Helm.
-            if [ "${MIN_RUNNERS}" -gt 4 ]; then
-              echo "❌ Error: min_runners must be between 0 and 4"
-              exit 1
-            fi
-            
-            if [ "${MAX_RUNNERS}" -lt 1 ] || [ "${MAX_RUNNERS}" -gt 4 ]; then
-              echo "❌ Error: max_runners must be between 1 and 4"
-              exit 1
-            fi
-          fi
-          
-          write_output() {
-            local key=$1 value=$2
-            if ! [[ "${key}" =~ ^[a-z_]+$ ]] \
-               || [[ "${value}" == *$'\r'* || "${value}" == *$'\n'* ]]; then
-              echo "❌ Error: refusing unsafe workflow output ${key}"
-              return 1
-            fi
-            printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_OUTPUT}"
-          }
+          {
+            echo "action=${INPUT_ACTION}"
+            echo "expected_sha=${EXPECTED_SHA}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "✅ ${INPUT_ACTION} at ${ACTUAL_SHA}"
 
-          write_output action "${ACTION}"
-          write_output expected_sha "${EXPECTED_SHA}"
-          write_output min_runners "${MIN_RUNNERS}"
-          write_output max_runners "${MAX_RUNNERS}"
-          write_output namespace "${NAMESPACE}"
-          
-          echo "✅ All inputs validated successfully"
-          echo "  Action: ${ACTION}"
-          echo "  Namespace: ${NAMESPACE}"
-          if [ "${ACTION}" = "scale-custom" ]; then
-            echo "  Min runners: ${MIN_RUNNERS}"
-            echo "  Max runners: ${MAX_RUNNERS}"
-          fi
-
-  scale:
-    name: Scale Runners - ${{ needs.validate-inputs.outputs.action }}
-    runs-on: ubuntu-latest
-    needs: validate-inputs
-    timeout-minutes: 10
-    outputs:
-      rollback_revision: ${{ steps.rollout-quiesce.outputs.rollback_revision }}
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-      
-      - name: Setup infrastructure tools
-        uses: ./.github/actions/setup-tools
-        with:
-          install-jq: 'true'
-      
       - name: Configure Kubernetes access
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
-          echo "🔧 Configuring Kubernetes access..."
-          
-          # Validate DO_TOKEN
           if [ -z "${DO_TOKEN}" ]; then
             echo "❌ Error: DO_TOKEN secret is not set!"
             exit 1
           fi
-          
-          # Initialize doctl with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring doctl..."
-            if doctl auth init --access-token "${DO_TOKEN}"; then
+            if doctl auth init --access-token "${DO_TOKEN}" > /dev/null; then
               echo "✅ DigitalOcean authentication configured"
               break
             elif [ "${attempt}" = "3" ]; then
@@ -216,532 +123,141 @@ jobs:
               sleep 5
             fi
           done
-          
-          # Configure kubectl with retry logic.
           # kubeconfig save takes the cluster NAME; use-context takes the context.
-          echo "Configuring kubectl for cluster ${CLUSTER_NAME} (context ${CLUSTER_CONTEXT})..."
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Configuring kubectl..."
-            if doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"; then
-              kubectl config use-context "${CLUSTER_CONTEXT}"
-              echo "✅ Kubernetes access configured"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to configure kubectl"
-              exit 1
-            else
-              echo "⚠️ kubectl configuration failed, retrying in 5s..."
-              sleep 5
-            fi
-          done
-      
-      - name: Check current status
-        id: current-status
-        env:
-          ACTION: ${{ needs.validate-inputs.outputs.action }}
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          echo "📊 Checking current runner status..."
-          
-          # Check if release exists
-          if ! helm list -n "${NAMESPACE}" 2>/dev/null | grep -q "${RELEASE_NAME}"; then
-            echo "❌ Error: Runner deployment '${RELEASE_NAME}' not found in namespace '${NAMESPACE}'"
-            echo "Please deploy runners first using the 'Deploy GitHub Runners' workflow"
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
             exit 1
           fi
-          
-          # Get current values with error handling
-          VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
-          if [ $? -ne 0 ]; then
-            echo "❌ Error: Could not retrieve current Helm values"
-            exit 1
-          fi
-          
-          CURRENT_MIN=$(echo "${VALUES_JSON}" | jq -r '.minRunners // 2')
-          CURRENT_MAX=$(echo "${VALUES_JSON}" | jq -r '.maxRunners // 4')
-          
-          # Validate retrieved values
-          if ! [[ "${CURRENT_MIN}" =~ ^[0-9]+$ ]] || ! [[ "${CURRENT_MAX}" =~ ^[0-9]+$ ]]; then
-            echo "❌ Error: Invalid current values retrieved from Helm"
-            exit 1
-          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
 
+      - name: Admit pool state and record identities
+        id: admit
+        env:
+          ACTION: ${{ steps.validate.outputs.action }}
+        run: |
+          # Each action is admitted under its own gate operation name.
           case "${ACTION}" in
-            scale-up|scale-down|scale-max|scale-custom)
-              RELEASES=$(helm list -n "${NAMESPACE}" -o json)
-              if ! jq -e --arg name "${RELEASE_NAME}" --arg version "${ARC_CHART_VERSION}" '
-                [.[] | select(.name == $name
-                  and .chart == ("gha-runner-scale-set-" + $version)
-                  and .status == "deployed")] | length == 1
-              ' <<<"${RELEASES}" >/dev/null; then
-                echo "❌ Error: ordinary scaling requires the pinned deployed runner chart"
-                exit 1
-              fi
-              validate_density() {
-                local kind=$1
-                python3 scripts/validate-runner-isolation-contract.py \
-                  --contract density --kind "${kind}" \
-                  --min-runners "${CURRENT_MIN}" --max-runners "${CURRENT_MAX}" \
-                  --runner-group private
-              }
-              validate_density values <<<"${VALUES_JSON}" || {
-                echo "❌ Error: ordinary scaling prestate violates the exact density contract"
-                exit 1
-              }
-              CURRENT_MANIFEST="${RUNNER_TEMP}/ordinary-scale-prestate.yaml"
-              helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${CURRENT_MANIFEST}"
-              validate_density manifest < "${CURRENT_MANIFEST}" || exit 1
-              CURRENT_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
-                -n "${NAMESPACE}" -o json)
-              validate_density asrs-list <<<"${CURRENT_ASRS}" || exit 1
-              ;;
-          esac
-          
-          echo "current_min=${CURRENT_MIN}" >> $GITHUB_OUTPUT
-          echo "current_max=${CURRENT_MAX}" >> $GITHUB_OUTPUT
-          
-          echo "Current configuration:"
-          echo "  Min runners: ${CURRENT_MIN}"
-          echo "  Max runners: ${CURRENT_MAX}"
-          
-          # Get pod count
-          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
-          echo "pod_count=${POD_COUNT}" >> $GITHUB_OUTPUT
-          echo "  Active pods: ${POD_COUNT}"
-
-      - name: Check runner pool capacity
-        if: needs.validate-inputs.outputs.action != 'status'
-        env:
-          ACTION: ${{ needs.validate-inputs.outputs.action }}
-        run: |
-          echo "📐 Validating fixed runner-pool capacity before scaling..."
-          POOL_NAME="github-runners-pool-16g"
-
-          CLUSTER_ID=$(doctl kubernetes cluster list -o json \
-            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
-          if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
-            echo "❌ Error: cluster '${CLUSTER_NAME}' was not found"
-            exit 1
-          fi
-
-          POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
-            | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
-          if [ -z "${POOL_JSON}" ]; then
-            echo "❌ Error: runner pool '${POOL_NAME}' was not found"
-            exit 1
-          fi
-
-          POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
-          POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
-          POOL_COUNT=$(echo "${POOL_JSON}" | jq -r '.count')
-          POOL_SIZE=$(echo "${POOL_JSON}" | jq -r '.size')
-          POOL_AUTOSCALE=$(echo "${POOL_JSON}" | jq -r '.auto_scale')
-          if [ "${ACTION}" = "rollout-quiesce" ]; then
-            case "${POOL_MAX}" in 2|8) ;; *)
-              echo "❌ Error: rollout-quiesce requires current max_nodes 8 or 2; found ${POOL_MAX}"
-              exit 1
-              ;;
-            esac
-            case "${POOL_COUNT}" in ''|*[!0-9]*)
-              echo "❌ Error: rollout-quiesce requires a numeric current node count; found ${POOL_COUNT}"
-              exit 1
-              ;;
-            esac
-            if [ "${POOL_COUNT}" -lt 2 ] || [ "${POOL_COUNT}" -gt "${POOL_MAX}" ]; then
-              echo "❌ Error: rollout-quiesce requires 2..${POOL_MAX} current nodes; found ${POOL_COUNT}"
-              exit 1
-            fi
-          elif [ "${POOL_MAX}" != "2" ] || [ "${POOL_COUNT}" != "2" ]; then
-            echo "❌ Error: runner pool max/count must already be 2/2 for ${ACTION}; found ${POOL_MAX}/${POOL_COUNT}"
-            exit 1
-          fi
-          if [ "${POOL_MIN}" != "2" ] \
-             || [ "${POOL_SIZE}" != "s-8vcpu-16gb" ] \
-             || [ "${POOL_AUTOSCALE}" != "true" ]; then
-            echo "❌ Error: runner pool must have min=2, size=s-8vcpu-16gb, and autoscaling enabled; found min=${POOL_MIN} count=${POOL_COUNT} size=${POOL_SIZE} auto_scale=${POOL_AUTOSCALE}"
-            exit 1
-          fi
-
-          NODES=$(kubectl get nodes -l node-type=github-runner -o json)
-          TOTAL_NODES=$(jq '.items | length' <<<"${NODES}")
-          READY_NODES=$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<<"${NODES}")
-          if [ "${TOTAL_NODES}" != "${POOL_COUNT}" ] || [ "${READY_NODES}" != "${POOL_COUNT}" ]; then
-            echo "❌ Error: runner pool requires every provider node to be present and Ready; found ${READY_NODES}/${TOTAL_NODES}, provider count ${POOL_COUNT}"
-            exit 1
-          fi
-
-          echo "✅ Runner pool has ${READY_NODES}/${POOL_COUNT} Ready nodes within the admitted prestate"
-
-      - name: Quiesce rollout and record rollback revision
-        id: rollout-quiesce
-        if: needs.validate-inputs.outputs.action == 'rollout-quiesce'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          validate_isolated_values() {
-            local expected_max=$1 expected_group=$2
-            python3 scripts/validate-runner-isolation-contract.py \
-              --contract legacy-isolated --kind values \
-              --min-runners 2 --max-runners "${expected_max}" \
-              --runner-group "${expected_group}"
-          }
-
-          validate_isolated_manifest() {
-            local manifest=$1 expected_max=$2 expected_group=$3
-            python3 scripts/validate-runner-isolation-contract.py \
-              --contract legacy-isolated --kind manifest \
-              --min-runners 2 --max-runners "${expected_max}" \
-              --runner-group "${expected_group}" \
-              < "${manifest}"
-          }
-
-          RELEASES=$(helm list -n "${NAMESPACE}" -o json)
-          if ! jq -e --arg name "${RELEASE_NAME}" --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(.name == $name
-              and .chart == ("gha-runner-scale-set-" + $version)
-              and .status == "deployed")] | length == 1
-          ' <<<"${RELEASES}" >/dev/null; then
-            echo "❌ Error: rollout-quiesce requires deployed ${RELEASE_NAME} chart ${ARC_CHART_VERSION}"
-            exit 1
-          fi
-
-          PRE_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          PRE_MAX=$(jq -r '.maxRunners // empty' <<<"${PRE_VALUES}")
-          PRE_GROUP=$(jq -r '.runnerGroup // "Default"' <<<"${PRE_VALUES}")
-          case "${PRE_MAX}:${PRE_GROUP}" in
-            8:Default)
-              PRE_CONTRACT_GROUP=default
-              ;;
-            2:redducklabs-private-runners)
-              PRE_CONTRACT_GROUP=private
-              ;;
+            record-density) OPERATION=record-density ;;
+            acceptance-phase-c) OPERATION=acceptance-phase-c ;;
             *)
-              echo "❌ Error: pre-quiesce release must be legacy Default 2/8 or private 2/2; found 2/${PRE_MAX} group='${PRE_GROUP}'"
+              echo "❌ Error: unknown action"
               exit 1
               ;;
           esac
-          if ! validate_isolated_values "${PRE_MAX}" "${PRE_CONTRACT_GROUP}" \
-            <<<"${PRE_VALUES}"; then
-            echo "❌ Error: pre-quiesce release is not the recognized isolated 2/${PRE_MAX}, 5Gi+5Gi ${PRE_GROUP} template"
-            exit 1
-          fi
-          PRE_MANIFEST="${RUNNER_TEMP}/pre-quiesce-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${PRE_MANIFEST}"
-          validate_isolated_manifest "${PRE_MANIFEST}" "${PRE_MAX}" \
-            "${PRE_CONTRACT_GROUP}"
-
-          helm upgrade "${RELEASE_NAME}" \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace "${NAMESPACE}" \
-            --reuse-values \
-            --version "${ARC_CHART_VERSION}" \
-            --set minRunners=2 \
-            --set maxRunners=2 \
-            --set runnerGroup=redducklabs-private-runners \
-            --set template.spec.automountServiceAccountToken=false \
-            --wait --timeout 300s
-
-          QUIESCED=false
-          for attempt in $(seq 1 30); do
-            PODS=$(kubectl get pods -n "${NAMESPACE}" \
-              -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json)
-            PENDING=$(jq '[.items[] | select(.status.phase == "Pending")] | length' <<<"${PODS}")
-            SETS=$(kubectl get ephemeralrunnersets.actions.github.com -n "${NAMESPACE}" \
-              -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json)
-            DESIRED=$(jq '[.items[] | (.spec.replicas // 0)] | add // 0' <<<"${SETS}")
-            if [ "${PENDING}" = "0" ] && [ "${DESIRED}" -le 2 ]; then
-              QUIESCED=true
-              break
-            fi
-            sleep 10
-          done
-          if [ "${QUIESCED}" != "true" ]; then
-            echo "❌ Error: ARC still has Pending runners or scale-up demand after quiesce"
-            exit 1
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation "${OPERATION}" \
+            --emit-identities "${RUNNER_TEMP}/pool-identities.json"
+          # Written only after the SHA check and the gate admitted Phase C
+          # (from burst, or from an interrupted burst-acceptance 8/20 or 4/20):
+          # it authorizes the always-run cleanup to write to Helm.
+          if [ "${OPERATION}" = acceptance-phase-c ]; then
+            echo "cleanup_eligible=true" >> "${GITHUB_OUTPUT}"
           fi
 
-          POST_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! validate_isolated_values 2 private <<<"${POST_VALUES}"; then
-            echo "❌ Error: quiesced release values do not preserve the rollback template"
-            exit 1
-          fi
-          POST_MANIFEST="${RUNNER_TEMP}/post-quiesce-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${POST_MANIFEST}"
-          validate_isolated_manifest "${POST_MANIFEST}" 2 \
-            private
-          LIVE_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
-            -n "${NAMESPACE}" -o json)
-          if ! python3 scripts/validate-runner-isolation-contract.py \
-            --contract legacy-isolated --kind asrs-list \
-            --min-runners 2 --max-runners 2 --runner-group private \
-            <<<"${LIVE_ASRS}"; then
-            echo "❌ Error: live quiesced AutoscalingRunnerSet is not exact private 2/2 isolated state"
-            exit 1
-          fi
-          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
+      - name: Record density rollback revision
+        id: record
+        if: steps.validate.outputs.action == 'record-density'
+        run: |
+          validate_density() {
+            python3 scripts/validate-runner-isolation-contract.py \
+              --contract density --kind "$1" \
+              --min-runners 2 --max-runners 4 --runner-group private
+          }
+          helm get values "${RELEASE_NAME}" -n arc-runners -o json | validate_density values
+          helm get manifest "${RELEASE_NAME}" -n arc-runners | validate_density manifest
+          kubectl get autoscalingrunnersets.actions.github.com -n arc-runners -o json \
+            | validate_density asrs-list
+
+          HISTORY=$(helm history "${RELEASE_NAME}" -n arc-runners -o json)
           REVISION=$(jq -r --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(.chart == ("gha-runner-scale-set-" + $version)
-              and .status == "deployed") | .revision] | max // empty
+            [.[] | select(.status == "deployed")] as $deployed
+            | if ($deployed | length) == 1
+                and $deployed[0].chart == ("gha-runner-scale-set-" + $version)
+              then $deployed[0].revision | tostring else empty end
           ' <<<"${HISTORY}")
           if ! [[ "${REVISION}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "❌ Error: could not identify the validated rollback revision"
+            echo "❌ Error: could not identify exactly one deployed ${ARC_CHART_VERSION} revision"
             exit 1
           fi
-          REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" -o json)
-          if ! validate_isolated_values 2 private \
-            <<<"${REVISION_VALUES}"; then
-            echo "❌ Error: rollback revision values are not exact private 2/2 isolated state"
+          helm get values "${RELEASE_NAME}" --revision "${REVISION}" -n arc-runners -o json \
+            | validate_density values
+          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" -n arc-runners \
+            | validate_density manifest
+          # Nothing changed while the revision was read.
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
+            --transition none
+          # Readback (Ruling 27): the recorded revision must still be in helm
+          # history. Every Helm write keeps 100 revisions (--history-max 100),
+          # so it survives the rollout until Deploy drain and rollback use it.
+          HISTORY_AFTER=$(helm history "${RELEASE_NAME}" -n arc-runners -o json)
+          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
+            [.[] | select(
+              (.revision | tostring) == $revision
+              and .chart == ("gha-runner-scale-set-" + $version))] | length == 1
+          ' <<<"${HISTORY_AFTER}" >/dev/null; then
+            echo "❌ Error: recorded revision ${REVISION} is not in helm history; nothing was recorded"
             exit 1
           fi
-          REVISION_MANIFEST="${RUNNER_TEMP}/quiesced-revision-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
-          validate_isolated_manifest "${REVISION_MANIFEST}" 2 \
-            private
           echo "rollback_revision=${REVISION}" >> "${GITHUB_OUTPUT}"
           {
-            echo "## Rollout quiesced"
+            echo "## Density rollback target recorded"
             echo ""
-            echo "Validated rollback revision: **${REVISION}**"
+            echo "Validated density (2/4) Helm revision: **${REVISION}**"
+            echo ""
+            echo "Pass it as \`rollback_revision\` to Deploy GitHub Runners \`operation=drain\` and \`operation=rollback\`."
           } >> "${GITHUB_STEP_SUMMARY}"
-          echo "✅ ARC quiesced; validated rollback revision ${REVISION}"
-      
-      - name: Display status
-        if: needs.validate-inputs.outputs.action == 'status'
+          echo "✅ Recorded density rollback revision ${REVISION}"
+
+      - name: Run acceptance Phase C
+        if: steps.validate.outputs.action == 'acceptance-phase-c'
         env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          EXPECTED_SHA: ${{ steps.validate.outputs.expected_sha }}
         run: |
-          echo "## 📊 Runner Status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Current Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Min Runners**: ${{ steps.current-status.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Max Runners**: ${{ steps.current-status.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Active Pods**: ${{ steps.current-status.outputs.pod_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Namespace**: \`${NAMESPACE}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release**: \`${RELEASE_NAME}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Pod Details" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Scale up (default)
-        if: needs.validate-inputs.outputs.action == 'scale-up'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          echo "⬆️ Scaling up to default configuration..."
-          
-          # Scale with retry logic
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Scaling up..."
-            if helm upgrade "${RELEASE_NAME}" \
-              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-              --namespace "${NAMESPACE}" \
-              --reuse-values \
-              --version "${ARC_CHART_VERSION}" \
-              --set minRunners=2 \
-              --set maxRunners=4 \
-              --set runnerGroup=redducklabs-private-runners \
-              --wait \
-              --timeout 180s; then
-              
-              echo "✅ Scaled to: Min=2, Max=4"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to scale up runners"
-              exit 1
-            else
-              echo "⚠️ Scaling failed, retrying in 5s..."
-              sleep 5
-            fi
-          done
-          
-          echo "## ✅ Scaled Up" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=2, Max=4**" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Scale down (minimal)
-        if: needs.validate-inputs.outputs.action == 'scale-down'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          echo "⬇️ Scaling down to minimal configuration..."
-          
-          # Scale with retry logic
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Scaling down..."
-            if helm upgrade "${RELEASE_NAME}" \
-              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-              --namespace "${NAMESPACE}" \
-              --reuse-values \
-              --version "${ARC_CHART_VERSION}" \
-              --set minRunners=0 \
-              --set maxRunners=1 \
-              --set runnerGroup=redducklabs-private-runners \
-              --wait \
-              --timeout 180s; then
-              
-              echo "✅ Scaled to: Min=0, Max=1"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to scale down runners"
-              exit 1
-            else
-              echo "⚠️ Scaling failed, retrying in 5s..."
-              sleep 5
-            fi
-          done
-          
-          echo "## ✅ Scaled Down" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=0, Max=1** (minimal)" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Scale to maximum
-        if: needs.validate-inputs.outputs.action == 'scale-max'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-        run: |
-          echo "⬆️⬆️ Scaling to maximum configuration..."
-          
-          # Scale with retry logic
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Scaling to maximum..."
-            if helm upgrade "${RELEASE_NAME}" \
-              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-              --namespace "${NAMESPACE}" \
-              --reuse-values \
-              --version "${ARC_CHART_VERSION}" \
-              --set minRunners=4 \
-              --set maxRunners=4 \
-              --set runnerGroup=redducklabs-private-runners \
-              --wait \
-              --timeout 180s; then
-              
-              echo "✅ Scaled to: Min=4, Max=4"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to scale to maximum"
-              exit 1
-            else
-              echo "⚠️ Scaling failed, retrying in 5s..."
-              sleep 5
-            fi
-          done
-          
-          echo "## ✅ Scaled to Maximum" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=4, Max=4** (maximum)" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Custom scaling
-        if: needs.validate-inputs.outputs.action == 'scale-custom'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
-          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
-        run: |
-          echo "🎯 Scaling to custom configuration..."
-          
-          # Scale with retry logic
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Custom scaling..."
-            if helm upgrade "${RELEASE_NAME}" \
-              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-              --namespace "${NAMESPACE}" \
-              --reuse-values \
-              --version "${ARC_CHART_VERSION}" \
-              --set minRunners="${MIN_RUNNERS}" \
-              --set maxRunners="${MAX_RUNNERS}" \
-              --set runnerGroup=redducklabs-private-runners \
-              --wait \
-              --timeout 180s; then
-              
-              echo "✅ Scaled to: Min=${MIN_RUNNERS}, Max=${MAX_RUNNERS}"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to apply custom scaling"
-              exit 1
-            else
-              echo "⚠️ Scaling failed, retrying in 5s..."
-              sleep 5
-            fi
-          done
-          
-          echo "## ✅ Custom Scaling Applied" >> $GITHUB_STEP_SUMMARY
-          echo "Runners scaled to: **Min=${MIN_RUNNERS}, Max=${MAX_RUNNERS}**" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Verify scaling
-        if: needs.validate-inputs.outputs.action != 'status'
-        env:
-          ACTION: ${{ needs.validate-inputs.outputs.action }}
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
-          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
-        run: |
-          echo ""
-          echo "⏳ Waiting for scaling to take effect..."
-          sleep 10
-          
-          echo "📊 New runner status:"
-          kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}"
-          
-          # Get new values with error handling
-          NEW_VALUES=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
-          if [ $? -eq 0 ]; then
-            NEW_MIN=$(echo "${NEW_VALUES}" | jq -r '.minRunners // 0')
-            NEW_MAX=$(echo "${NEW_VALUES}" | jq -r '.maxRunners // 0')
-            
-            echo ""
-            echo "### New Configuration" >> $GITHUB_STEP_SUMMARY
-            echo "- **Min Runners**: ${NEW_MIN}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Max Runners**: ${NEW_MAX}" >> $GITHUB_STEP_SUMMARY
-            
-            # Verify scaling worked as expected
-            case "${ACTION}" in
-              scale-up)
-                if [ "${NEW_MIN}" = "2" ] && [ "${NEW_MAX}" = "4" ]; then
-                  echo "✅ Scale up verified"
-                else
-                  echo "❌ Scale up did not apply correctly"; exit 1
-                fi
-                ;;
-              scale-down)
-                if [ "${NEW_MIN}" = "0" ] && [ "${NEW_MAX}" = "1" ]; then
-                  echo "✅ Scale down verified"
-                else
-                  echo "❌ Scale down did not apply correctly"; exit 1
-                fi
-                ;;
-              scale-max)
-                if [ "${NEW_MIN}" = "4" ] && [ "${NEW_MAX}" = "4" ]; then
-                  echo "✅ Scale to maximum verified"
-                else
-                  echo "❌ Scale to maximum did not apply correctly"; exit 1
-                fi
-                ;;
-              scale-custom)
-                if [ "${NEW_MIN}" = "${MIN_RUNNERS}" ] && [ "${NEW_MAX}" = "${MAX_RUNNERS}" ]; then
-                  echo "✅ Custom scaling verified"
-                else
-                  echo "❌ Custom scaling did not apply correctly"; exit 1
-                fi
-                ;;
-            esac
-            if [ "${ACTION}" != "rollout-quiesce" ]; then
-              validate_density_result() {
-                local kind=$1
-                python3 scripts/validate-runner-isolation-contract.py \
-                  --contract density --kind "${kind}" \
-                  --min-runners "${NEW_MIN}" --max-runners "${NEW_MAX}" \
-                  --runner-group private
-              }
-              validate_density_result values <<<"${NEW_VALUES}" || exit 1
-              NEW_MANIFEST="${RUNNER_TEMP}/ordinary-scale-result.yaml"
-              helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${NEW_MANIFEST}"
-              validate_density_result manifest < "${NEW_MANIFEST}" || exit 1
-              NEW_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
-                -n "${NAMESPACE}" -o json)
-              validate_density_result asrs-list <<<"${NEW_ASRS}" || exit 1
-            fi
-          else
-            echo "❌ Could not verify new configuration"
+          # PHASE_C_EVIDENCE is unset in CI (evidence lands in the workspace);
+          # the offline fixtures point it at a temporary directory.
+          EVIDENCE="${PHASE_C_EVIDENCE:-phase-c-evidence.json}"
+          # Re-check the SHA immediately before the step that mutates.
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Error: checked-out SHA changed after validation"
             exit 1
           fi
+          ./scripts/acceptance-phase-c.sh --max-cycles 3 \
+            --identities "${RUNNER_TEMP}/pool-identities.json" \
+            --evidence "${EVIDENCE}" 2>&1 | tee "${RUNNER_TEMP}/phase-c.log"
+          {
+            echo "## Acceptance Phase C"
+            echo ""
+            grep -E '^PHASE_C_RESULT=' "${RUNNER_TEMP}/phase-c.log"
+            echo ""
+            echo '```json'
+            cat "${EVIDENCE}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Restore burst after Phase C
+        if: always() && steps.admit.outputs.cleanup_eligible == 'true'
+        run: |
+          # Runs on success, failure and cancellation. Re-checks release
+          # identity and the live contract, returns burst-acceptance to burst
+          # (minRunners=2) and reads back burst; on burst it is a verified
+          # no-op. A failed restoration fails the run.
+          ./scripts/acceptance-phase-c.sh --restore \
+            --identities "${RUNNER_TEMP}/pool-identities.json"
+
+      - name: Upload Phase C evidence
+        # runner-acceptance-evidence.yml (phase C) downloads this artifact and
+        # adds jobs_killed, which acceptance-phase-c.sh records as null.
+        if: always() && steps.admit.outputs.cleanup_eligible == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase-c-evidence
+          path: phase-c-evidence.json
+          if-no-files-found: error
+          retention-days: 90

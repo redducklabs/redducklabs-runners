@@ -1,0 +1,14 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "cluster-autoscaler-priority-expander",
+    "namespace": "kube-system",
+    "labels": {
+      "doks.digitalocean.com/managed": "true"
+    }
+  },
+  "data": {
+    "priorities": "1:\n  - .*\n"
+  }
+}

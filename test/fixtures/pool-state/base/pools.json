@@ -1,0 +1,77 @@
+[
+  {
+    "id": "2d8e4f60-7a1b-4c9d-b3e5-f6a7b8c9d004",
+    "name": "worker-pool",
+    "size": "s-2vcpu-4gb",
+    "count": 1,
+    "tags": [
+      "k8s",
+      "k8s:c4e1f0a2-6b3d-4f58-9a07-1d2e3f4a5b60",
+      "k8s:worker"
+    ],
+    "labels": null,
+    "taints": [],
+    "auto_scale": false,
+    "min_nodes": 0,
+    "max_nodes": 0,
+    "nodes": [
+      {
+        "id": "worker-pool-x1y2z",
+        "name": "worker-pool-x1y2z",
+        "status": {
+          "state": "running"
+        },
+        "droplet_id": "500000010",
+        "created_at": "2026-09-15T08:00:00Z",
+        "updated_at": "2026-09-15T08:05:00Z"
+      }
+    ]
+  },
+  {
+    "id": "6c1f5a7e-2b0d-4a3e-9f61-0b5d8e2c4a01",
+    "name": "github-runners-pool-16g",
+    "size": "s-8vcpu-16gb",
+    "count": 2,
+    "tags": [
+      "k8s",
+      "k8s:c4e1f0a2-6b3d-4f58-9a07-1d2e3f4a5b60",
+      "k8s:worker"
+    ],
+    "labels": {
+      "node-type": "github-runner",
+      "workload-type": "ci-cd"
+    },
+    "taints": [
+      {
+        "key": "github-runner",
+        "value": "true",
+        "effect": "NoSchedule"
+      }
+    ],
+    "auto_scale": true,
+    "min_nodes": 2,
+    "max_nodes": 2,
+    "nodes": [
+      {
+        "id": "github-runners-pool-16g-a1b2c",
+        "name": "github-runners-pool-16g-a1b2c",
+        "status": {
+          "state": "running"
+        },
+        "droplet_id": "500000001",
+        "created_at": "2026-09-15T08:00:00Z",
+        "updated_at": "2026-09-15T08:05:00Z"
+      },
+      {
+        "id": "github-runners-pool-16g-d3e4f",
+        "name": "github-runners-pool-16g-d3e4f",
+        "status": {
+          "state": "running"
+        },
+        "droplet_id": "500000002",
+        "created_at": "2026-09-15T08:00:00Z",
+        "updated_at": "2026-09-15T08:05:00Z"
+      }
+    ]
+  }
+]

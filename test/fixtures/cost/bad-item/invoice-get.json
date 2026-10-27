@@ -1,0 +1,20 @@
+{
+  "invoice_items": [
+    {
+      "amount": "192.00",
+      "category": "paas",
+      "description": "2 nodes - 16 GB / 8 vCPU / 320 GB SSD",
+      "duration": "n/a",
+      "duration_unit": "Hours",
+      "end_time": "2026-09-30T23:59:59Z",
+      "group_description": "redducklabs-cluster",
+      "product": "Kubernetes Clusters",
+      "project_name": "synthetic-project",
+      "resource_id": "",
+      "resource_uuid": "00000000-0000-0000-0000-000000000000",
+      "start_time": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "links": null,
+  "meta": null
+}

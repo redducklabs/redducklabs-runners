@@ -10,13 +10,16 @@ githubConfigUrl: "https://github.com/redducklabs"
 githubConfigSecret:
   github_token: ""  # SET VIA ENVIRONMENT VARIABLE
 
-# Runner scaling configuration.
-# Two runner pods fit on each dedicated node. With the fixed two-node pool
-# ceiling, maxRunners must remain four.
-# Pool bounds are applied by .github/workflows/node-pool-sizing.yml; see
-# docs/runbooks/node-pool-sizing.md before changing either number.
+# Runner scaling configuration (burst autoscaling; see
+# docs/specs/2026-10-26-runner-burst-autoscaling-design.md).
+# Two runner pods fit on each dedicated node. The baseline pool holds two
+# nodes and the burst pools add up to eight, so the pools host at most
+# 2 x (2 + 8) = 20 pods; maxRunners must not exceed that. minRunners stays at
+# or below 4. Pool bounds are applied by .github/workflows/node-pool-sizing.yml;
+# see docs/runbooks/node-pool-sizing.md before changing either number.
+# scripts/render-drain-values.py derives the temporary drain values (max 4).
 minRunners: 2
-maxRunners: 4
+maxRunners: 20
 
 # Runner scale set name (used in workflows as: runs-on: redducklabs-runners)
 runnerScaleSetName: "redducklabs-runners"
@@ -51,7 +54,25 @@ runnerGroup: "redducklabs-private-runners"
 
 # Runner template configuration
 template:
+  metadata:
+    annotations:
+      # The cluster autoscaler must never evict a runner pod to consolidate
+      # nodes; a running job would be killed.
+      cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
   spec:
+    # Prefer the baseline pool; burst nodes are used only when it is full.
+    # (scripts/render-drain-values.py makes this a required affinity for drain.)
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: doks.digitalocean.com/node-pool
+              operator: In
+              values:
+              - github-runners-pool-16g
+
     # Jobs do not need Kubernetes API credentials. Keep the chart-created
     # no-permission ServiceAccount, but do not project its token into runners.
     automountServiceAccountToken: false
@@ -105,6 +126,7 @@ template:
         - dockerd
         - --host=unix:///var/run/docker.sock
         - --group=$(DOCKER_GROUP_GID)
+        - --registry-mirror=https://mirror.gcr.io
       env:
         - name: DOCKER_GROUP_GID
           value: "123"

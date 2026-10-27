@@ -7,7 +7,6 @@ set -e
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${RED}EMERGENCY RUNNER SHUTDOWN - RED DUCK LABS${NC}"
@@ -42,9 +41,11 @@ echo "1. Scaling redducklabs runner scale set to zero..."
 helm upgrade redducklabs-runners \
     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
     --namespace arc-runners \
+    --version 0.14.2 \
     --reuse-values \
     --set minRunners=0 \
     --set maxRunners=0 \
+    --history-max 100 \
     --set githubConfigSecret.github_token="${GITHUB_TOKEN:-dummy}" \
     --wait --timeout 1m 2>/dev/null || true
 
@@ -80,9 +81,12 @@ fi
 echo ""
 echo -e "${GREEN}Emergency stop complete for redducklabs runners!${NC}"
 echo ""
-echo "To restart runners, run:"
-echo "  ./scale-runners.sh up     # For normal operation (2-4 runners)"
-echo "  ./scale-runners.sh max    # For maximum capacity (4-8 runners)"
+echo "The release is now in a stopped state (its base template at 0/0). Restore"
+echo "runners only through the reviewed GitHub Actions workflows, as described in"
+echo "docs/runbooks/node-pool-sizing.md (\"Emergency Stop\"):"
+echo "  burst-stopped:   Deploy GitHub Runners operation=deploy (or drain to leave burst)"
+echo "  drain-stopped:   Node Pool Sizing remove-burst, then Deploy operation=rollback"
+echo "  density-stopped: Deploy GitHub Runners operation=rollback"
 echo ""
 echo -e "${YELLOW}Remember to investigate what caused the emergency before restarting.${NC}"
 echo ""

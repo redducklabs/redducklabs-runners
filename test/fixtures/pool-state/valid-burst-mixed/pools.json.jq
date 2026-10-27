@@ -1,0 +1,2 @@
+map(if .name == "github-runners-burst-16g" then .count = 1 | .nodes = [{"id": "github-runners-burst-16g-p1q2r", "name": "github-runners-burst-16g-p1q2r", "status": {"state": "running"}, "droplet_id": "500000101"}] else . end)
+| map(if .name == "github-runners-burst-amd-16g" then .count = 1 | .nodes = [{"id": "github-runners-burst-amd-16g-s3t4u", "name": "github-runners-burst-amd-16g-s3t4u", "status": {"state": "running"}, "droplet_id": "500000201"}] else . end)

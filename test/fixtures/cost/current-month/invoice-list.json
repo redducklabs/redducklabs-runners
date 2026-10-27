@@ -1,0 +1,18 @@
+{
+  "invoice_preview": {
+    "invoice_uuid": "00000000-0000-4000-8000-000000000010",
+    "amount": "1.00",
+    "invoice_period": "2026-10",
+    "updated_at": "2026-10-15T00:00:00Z"
+  },
+  "invoices": [
+    {
+      "invoice_uuid": "00000000-0000-4000-8000-000000000009",
+      "amount": "1.00",
+      "invoice_period": "2026-09",
+      "updated_at": "2026-10-01T00:00:00Z"
+    }
+  ],
+  "links": null,
+  "meta": null
+}

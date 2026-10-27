@@ -1,0 +1,5 @@
+customresourcedefinition.apiextensions.k8s.io/autoscalingrunnersets.actions.github.com
+customresourcedefinition.apiextensions.k8s.io/ciliumclusterwidenetworkpolicies.cilium.io
+customresourcedefinition.apiextensions.k8s.io/ciliumendpoints.cilium.io
+customresourcedefinition.apiextensions.k8s.io/ciliumnetworkpolicies.cilium.io
+customresourcedefinition.apiextensions.k8s.io/ephemeralrunners.actions.github.com

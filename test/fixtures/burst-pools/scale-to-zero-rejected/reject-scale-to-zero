@@ -1,0 +1,1 @@
+Flag: node-pool create with min/max/count 0 fails with HTTP 422.

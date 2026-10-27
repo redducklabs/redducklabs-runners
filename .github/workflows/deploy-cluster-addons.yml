@@ -119,6 +119,7 @@ jobs:
               --namespace kube-system \
               --version "${{ steps.validate.outputs.chart_version }}" \
               --values deploy/metrics-server-values.yaml \
+              --history-max 100 \
               --wait --timeout 300s; then
               echo "✅ metrics-server deployed"
               break

@@ -158,3 +158,41 @@ gate is requested or required for the work.
 Reviews should be critical across security, correctness, best practices, and
 project standards. Address every finding by changing the work or documenting a
 concrete justification.
+
+When running Codex non-interactively (`codex exec`), redirect stdin from
+`/dev/null`. Without it, a backgrounded `codex exec` can print
+"Reading additional input from stdin..." and wait indefinitely:
+
+```bash
+codex exec -s workspace-write -C . "<review prompt>" < /dev/null > temp/codex-reviews/<name>.log 2>&1
+```
+
+## Running the test suites locally on Windows
+
+This checkout uses `core.autocrlf=true`, so fixture files get CRLF line
+endings and `test/verify-runner-resources.sh` reports ~30 false failures under
+Git Bash or when run against `/mnt/d/...` from WSL. Run the suites in WSL
+against a fresh LF clone instead (CI on Linux is the reference):
+
+```bash
+wsl -d Ubuntu -- bash -c 'rm -rf /tmp/rrtest && git -c core.autocrlf=false clone -q /mnt/d/repos/redducklabs-runners /tmp/rrtest && cd /tmp/rrtest && git checkout -q <branch> && bash test/verify-runner-resources.sh && bash test/verify-burst-autoscaling.sh'
+```
+
+Clone from the main checkout path, not from a worktree directory (a worktree's
+`.git` file holds a Windows path that WSL git cannot resolve). Commit first:
+the clone only sees committed work.
+
+## Editing files with backslash continuations
+
+Text passed through the agent's Bash tool (for example an inline
+`python3 - <<'EOF'` edit script) loses each backslash-newline pair, so a
+multi-line shell or Python command collapses onto one line with a run of
+spaces where the continuation was. This is the source of the "collapsed
+continuation" defects found in review. Edit such lines with the Edit tool, or
+write the edit script to a file with the Write tool and run that file. After
+an edit, check the diff for the symptom (aligned comments and tables also
+match; review each hit):
+
+```bash
+git diff -U0 | grep -E '^\+ *[^ ].*[^ ] {6,}[^ ]'
+```

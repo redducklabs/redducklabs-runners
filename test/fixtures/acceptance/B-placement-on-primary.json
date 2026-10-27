@@ -1,0 +1,83 @@
+{
+ "arc_contract_after": "burst",
+ "events": [],
+ "expander_readback": {
+   "expanders": [
+     "priority",
+     "random"
+   ],
+   "managed": true,
+   "priorities": {
+     "1": [
+       ".*"
+     ],
+     "100": [
+       "pool-pri"
+     ],
+     "50": [
+       "pool-fb"
+     ]
+   }
+ },
+ "expected_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "nodes": [
+   {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-a", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
+   {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-b", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
+   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "fb1", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"},
+   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "p1", "pool": "github-runners-burst-16g", "ready_at": "2026-11-02T18:01:00Z"}
+ ],
+ "phase": "B",
+ "phase_c": null,
+ "pods": [
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "br1", "uid": "uid-br1"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "br2", "uid": "uid-br2"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "br3", "uid": "uid-br3"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "br4", "uid": "uid-br4"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb1", "pool": "github-runners-burst-amd-16g", "runner_name": "br5", "uid": "uid-br5"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb1", "pool": "github-runners-burst-amd-16g", "runner_name": "br6", "uid": "uid-br6"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "p1", "pool": "github-runners-burst-16g", "runner_name": "br7", "uid": "uid-br7"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "p1", "pool": "github-runners-burst-16g", "runner_name": "br8", "uid": "uid-br8"}
+ ],
+ "pool_state_checks": [
+   {"at": "2026-11-02T18:06:00Z", "pass": true, "ready_nodes": ["baseline-a", "baseline-b", "fb1", "fb2"], "state": "STATE: arc=burst pools=both burst=open"}
+ ],
+ "pools_after": {
+   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
+ },
+ "pools_before": {
+   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 0, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
+ },
+ "probe": {
+   "dispatch_tag": "runner-burst-acceptance-2026-11-02-a",
+   "drain": null,
+   "expected_workflow_sha": "cccccccccccccccccccccccccccccccccccccccc",
+   "repository": "redducklabs/aurolegal.ai",
+   "run": {
+     "attempt": 1,
+     "conclusion": "success",
+     "created_at": "2026-11-02T18:00:00Z",
+     "event": "workflow_dispatch",
+     "head_branch": "runner-burst-acceptance-2026-11-02-a",
+     "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+     "id": 777,
+     "jobs": [
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9001, "name": "batch 1", "runner_name": "br1", "started_at": "2026-11-02T18:00:30Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9002, "name": "batch 2", "runner_name": "br2", "started_at": "2026-11-02T18:00:30Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9003, "name": "batch 3", "runner_name": "br3", "started_at": "2026-11-02T18:00:30Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9004, "name": "batch 4", "runner_name": "br4", "started_at": "2026-11-02T18:00:30Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9005, "name": "batch 5", "runner_name": "br5", "started_at": "2026-11-02T18:05:00Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9006, "name": "batch 6", "runner_name": "br6", "started_at": "2026-11-02T18:05:00Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9007, "name": "batch 7", "runner_name": "br7", "started_at": "2026-11-02T18:05:00Z"},
+       {"completed_at": "2026-11-02T18:20:00Z", "conclusion": "success", "created_at": "2026-11-02T18:00:00Z", "id": 9008, "name": "batch 8", "runner_name": "br8", "started_at": "2026-11-02T18:05:00Z"}
+     ],
+     "mode": "batch"
+   },
+   "tag_sha": "cccccccccccccccccccccccccccccccccccccccc",
+   "workflow_path": ".github/workflows/runner-burst-acceptance.yml"
+ },
+ "trust_readback": null
+}

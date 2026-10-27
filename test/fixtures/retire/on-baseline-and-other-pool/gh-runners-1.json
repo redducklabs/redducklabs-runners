@@ -1,0 +1,27 @@
+{
+  "total_count": 2,
+  "runners": [
+    {
+      "id": 100,
+      "name": "redducklabs-runners-7xk2p-runner-base0",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "name": "redducklabs-runners"
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "name": "redducklabs-runners-7xk2p-runner-w",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "name": "redducklabs-runners"
+        }
+      ]
+    }
+  ]
+}
