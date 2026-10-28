@@ -1499,6 +1499,11 @@ case "$joined" in
           || [ "${GH_SCENARIO}" = unknown_dynamic_path ] \
           || [ "${GH_SCENARIO}" = url_sensitive ] \
           || [ "${GH_SCENARIO}" = default_branch_drift ] \
+          || [ "${GH_SCENARIO}" = absent_workflow ] \
+          || [ "${GH_SCENARIO}" = absent_workflow_dir ] \
+          || [ "${GH_SCENARIO}" = absent_workflow_listed ] \
+          || [ "${GH_SCENARIO}" = absent_workflow_listing_error ] \
+          || [ "${GH_SCENARIO}" = absent_workflow_capped ] \
           || [ "${GH_SCENARIO}" = head_drift ]; then
             if [ "${GH_SCENARIO}" = later_page_public_label ] && [ "$paginated" = true ]; then
                 printf '[]\n[{"id":4242,"name":"public-repo","full_name":"redducklabs/public-repo","owner":{"login":"redducklabs"},"private":false,"default_branch":"main","visibility":"public"}]\n'
@@ -1550,7 +1555,43 @@ case "$joined" in
         fi
         printf '%s\n' 'jobs:' '  safe:' '    runs-on: ubuntu-latest' '    steps: []'
         ;;
+    *"repos/redducklabs/public-repo/contents/.github/workflows -f ref="*)
+        if [[ " $joined " != *" --method GET "* ]] \
+          || [[ " $joined " != *" -f ref=1111111111111111111111111111111111111111 "* ]]; then
+            printf 'unsafe workflow directory request: %s\n' "$joined" >&2
+            exit 64
+        fi
+        case "${GH_SCENARIO}" in
+            absent_workflow)
+                printf '[{"name":"release.yml","path":".github/workflows/release.yml","type":"file"}]\n'
+                ;;
+            absent_workflow_listed)
+                printf '[{"name":"ci.yml","path":".github/workflows/ci.yml","type":"file"}]\n'
+                ;;
+            absent_workflow_capped)
+                jq -cn '[range(1000) | {name: "w\(.).yml", path: ".github/workflows/w\(.).yml", type: "file"}]'
+                ;;
+            absent_workflow_dir)
+                printf '%s\n' 'gh: Not Found (HTTP 404)' >&2
+                exit 1
+                ;;
+            *)
+                printf '%s\n' 'gh: Server Error (HTTP 502)' >&2
+                exit 1
+                ;;
+        esac
+        ;;
     *"repos/redducklabs/public-repo/contents/.github/workflows/ci.yml"*)
+        case "${GH_SCENARIO}" in
+            absent_workflow | absent_workflow_dir | absent_workflow_listing_error)
+                printf '%s\n' 'gh: Not Found (HTTP 404)' >&2
+                exit 1
+                ;;
+            absent_workflow_listed | absent_workflow_capped)
+                printf '%s\n' 'gh: Server Error (HTTP 502)' >&2
+                exit 1
+                ;;
+        esac
         if [ "${GH_SCENARIO}" = dynamic_runs_on ]; then
             printf '%s\n' 'jobs:' '  unsafe:' '    runs-on: ${{ matrix.runner }}' '    steps: []'
         elif [ "${GH_SCENARIO}" = mixed_case_label ]; then
@@ -1900,6 +1941,30 @@ PY
             fail "Trust boundary ${post_readback_scenario//_/ } rejection is not diagnostic"
         else
             pass "Trust boundary fails closed on ${post_readback_scenario//_/ } after reconciliation"
+        fi
+    done
+
+    local absent_scenario
+    for absent_scenario in absent_workflow absent_workflow_dir; do
+        if run_trust_fixture "$absent_scenario" "$FIXTURE_DIR/trust-output" \
+          && grep -q 'contents/.github/workflows -f ref=1111111111111111111111111111111111111111' "$FIXTURE_DIR/gh-calls" \
+          && grep -Fq 'Skipping registered workflow public-repo:.github/workflows/ci.yml: absent at default-branch head' "$FIXTURE_DIR/trust-output" \
+          && grep -Eq -- '--method (POST|PATCH|PUT)' "$FIXTURE_DIR/gh-calls" \
+          && grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+            pass "Trust boundary skips a registered workflow proven absent at head (${absent_scenario//_/ })"
+        else
+            fail "Trust boundary does not skip a registered workflow proven absent at head (${absent_scenario//_/ })"
+        fi
+    done
+    for absent_scenario in absent_workflow_listed absent_workflow_listing_error absent_workflow_capped; do
+        if run_trust_fixture "$absent_scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary accepts an unreadable workflow (${absent_scenario//_/ })"
+        elif ! grep -Fq 'could not read public workflow public-repo:.github/workflows/ci.yml' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary unreadable workflow failure is not diagnostic (${absent_scenario//_/ })"
+        elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+            fail "Trust boundary mutates GitHub before rejecting an unreadable workflow (${absent_scenario//_/ })"
+        else
+            pass "Trust boundary fails closed on an unreadable workflow without proven absence (${absent_scenario//_/ })"
         fi
     done
 
