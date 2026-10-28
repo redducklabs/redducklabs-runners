@@ -124,6 +124,21 @@ the period (DigitalOcean does not itemize per pool).
   `scripts/lib/runner_pool_state.py`, and a different size is a reviewed
   re-plan (Ruling 38 replaced `s-8vcpu-16gb` this way). Retrying the same
   run later is safe; it re-admits and is a no-op for pools that already exist.
+- **`IDENTITY_DRIFT` on a closed pool's bounds (`expected=0 live=null`).**
+  `doctl ... node-pool list -o json` omits zero-valued fields, so a closed
+  pool has no `count`, `min_nodes` or `max_nodes` key (Ruling 39). Before the
+  fix, Node Pool Sizing `create-burst` run 40721560476 created the closed
+  primary `github-runners-burst-amd-16g` and then failed its readback with
+  `IDENTITY_DRIFT: pools.github-runners-burst-amd-16g.max_nodes: expected=0
+  live=null` (the same for `min_nodes`); the fallback was not created. Every
+  reader now treats an absent key as `0`. Re-dispatch `create-burst` on a
+  main that contains the fix: it admits the live state (ARC `density`,
+  primary closed, fallback absent), prints `NOOP: pool
+  'github-runners-burst-amd-16g' already exists closed (0/0)`, creates only
+  the fallback and completes the step. Do not delete the primary by hand. An
+  `IDENTITY_DRIFT` or `... is not a non-negative integer` that names an
+  explicit `null` (a key that is present) is still a real provider anomaly and
+  still fails closed.
 - **Baseline node replacement during a shortage.** The baseline pool still
   uses `s-8vcpu-16gb`. Its two existing nodes are unaffected, but if DOKS
   replaces one (node repair, recycle or a cluster upgrade) the new droplet
@@ -533,3 +548,11 @@ starting the next step.
 40647530519) with the regional-capacity 422 for `s-8vcpu-16gb`; nothing was
 created and ARC stayed `density`. The burst sizes were re-planned (Ruling 38).
 Start again from step 1 at the new reviewed commit.
+
+2026-10-28, second attempt at main `8344e81`: step 3 `create-burst` apply
+(Node Pool Sizing run 40721560476) created the closed primary
+`github-runners-burst-amd-16g`, then failed with `IDENTITY_DRIFT:
+pools.github-runners-burst-amd-16g.max_nodes: expected=0 live=null` because
+doctl omits zero-valued pool fields (Ruling 39). The fallback was not created
+and ARC stayed `density`. Re-run step 3 `create-burst` at the reviewed commit
+that contains the Ruling 39 fix; it creates only the fallback.

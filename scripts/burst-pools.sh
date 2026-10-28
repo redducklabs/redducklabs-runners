@@ -154,6 +154,13 @@ read_state() {
     CLUSTER_ID=$matches
     POOLS_JSON=$(doctl kubernetes cluster node-pool list "$CLUSTER_ID" -o json) || return 1
     jq -e 'type == "array"' <<<"$POOLS_JSON" > /dev/null || { echo "ERROR: node-pool list is not a JSON array" >&2; return 1; }
+    # Ruling 39: doctl omits zero-valued fields (godo omitempty), so a closed
+    # pool has no count/min_nodes/max_nodes key. Restore ABSENT keys as zero
+    # (auto_scale false, nodes []) before anything reads the list; a present
+    # key, including an explicit null, is kept as read and still fails closed.
+    # Mirrors normalize_pool_list in scripts/lib/runner_pool_state.py.
+    POOLS_JSON=$(jq -c 'map(if type == "object" then {count: 0, min_nodes: 0, max_nodes: 0, auto_scale: false, nodes: []} + . else . end)' <<<"$POOLS_JSON") \
+        || { echo "ERROR: node-pool list could not be normalized" >&2; return 1; }
 }
 
 pool_json() {  # name -> the single pool object, or nothing

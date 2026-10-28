@@ -31,6 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VALIDATOR="${REPO_ROOT}/scripts/validate-runner-isolation-contract.py"
 FIXTURES="${SCRIPT_DIR}/fixtures"
+DOCTL_ENCODER="${FIXTURES}/doctl_encoding.py"
 
 FAILURES=0
 WORK_DIR="$(mktemp -d)"
@@ -54,6 +55,12 @@ info() { echo -e "${YELLOW}$1${NC}"; }
 # Without a routes file, the fake prints "<fixture-dir>/<tool>.out" (if
 # present) and exits with the code in "<fixture-dir>/<tool>.rc" (default 0).
 #
+# doctl node-pool list output is printed in doctl's live encoding: a zero
+# count/min_nodes/max_nodes, a false auto_scale and an empty nodes list are
+# omitted (test/fixtures/doctl_encoding.py, Ruling 39). Fixture files keep the
+# explicit values; a "doctl-pools-verbatim" marker in <fixture-dir> serves
+# them as written.
+#
 # If "<fixture-dir>/stateful" exists, it names a hook script that runs first as
 # "python3 -B <hook> <fixture-dir> <tool> <args...>". The hook may rewrite fixture
 # files (so a mutation changes what the next read returns); exit 100 falls
@@ -74,10 +81,24 @@ with_fakes() {
     for tool in doctl kubectl helm gh; do
         {
             printf '#!/bin/bash\n'
-            printf 'FIXTURE_DIR=%q\nTOOL=%q\n' "$fixture_dir" "$tool"
+            printf 'FIXTURE_DIR=%q\nTOOL=%q\nPOOL_ENCODER=%q\n' "$fixture_dir" "$tool" "$DOCTL_ENCODER"
             cat <<'FAKE'
 printf '%s\n' "$*" >> "${FIXTURE_DIR}/${TOOL}.calls"
 args="$*"
+# serve <file>: node-pool list JSON leaves the doctl fake in doctl's live
+# encoding (zero count/min_nodes/max_nodes, false auto_scale and empty nodes
+# omitted, Ruling 39) unless the fixture dir holds "doctl-pools-verbatim".
+serve() {
+    case "${TOOL} ${args}" in
+        "doctl kubernetes cluster node-pool list "*)
+            if [ ! -f "${FIXTURE_DIR}/doctl-pools-verbatim" ]; then
+                python3 -B "$POOL_ENCODER" "$1"
+                return
+            fi
+            ;;
+    esac
+    cat "$1"
+}
 if [ -f "${FIXTURE_DIR}/stateful" ]; then
     python3 -B "$(cat "${FIXTURE_DIR}/stateful")" "$FIXTURE_DIR" "$TOOL" "$@"
     rc=$?
@@ -93,7 +114,7 @@ if [ -f "${FIXTURE_DIR}/${TOOL}.routes" ]; then
                     echo "fake ${TOOL}: no fixture ${file}" >&2
                     exit 1
                 fi
-                cat "${FIXTURE_DIR}/${file}"
+                serve "${FIXTURE_DIR}/${file}"
                 rc=0
                 [ -f "${FIXTURE_DIR}/${file}.rc" ] && rc=$(cat "${FIXTURE_DIR}/${file}.rc")
                 exit "$rc"
@@ -103,7 +124,7 @@ if [ -f "${FIXTURE_DIR}/${TOOL}.routes" ]; then
     echo "fake ${TOOL}: unexpected call: ${args}" >&2
     exit 97
 fi
-[ -f "${FIXTURE_DIR}/${TOOL}.out" ] && cat "${FIXTURE_DIR}/${TOOL}.out"
+[ -f "${FIXTURE_DIR}/${TOOL}.out" ] && serve "${FIXTURE_DIR}/${TOOL}.out"
 rc=0
 [ -f "${FIXTURE_DIR}/${TOOL}.rc" ] && rc=$(cat "${FIXTURE_DIR}/${TOOL}.rc")
 exit "$rc"
@@ -3159,19 +3180,20 @@ PY
         fail "Runner Status treated a helm error as an absent release ($(fleet_steps))"
     fi
 
-    # Missing count/min/max print as unknown; duplicate pool names are flagged.
+    # Explicitly null count/min/max print as unknown (an omitted key is a zero,
+    # Ruling 39); duplicate pool names are flagged.
     dir=$(pool_state_dir valid-burst-mixed) || { fail "report fixture could not be built"; return; }
     local edited
     edited=$(mktemp -d "${WORK_DIR}/report.XXXXXX")
     cp -r "${dir}/." "${edited}/"
-    jq 'map(if .name == "github-runners-burst-amd-16g" then del(.count, .min_nodes, .max_nodes) else . end)
+    jq 'map(if .name == "github-runners-burst-amd-16g" then .count = null | .min_nodes = null | .max_nodes = null else . end)
         + [(.[] | select(.name == "github-runners-pool-16g"))]' "${dir}/pools.json" > "${edited}/pools.json"
     with_fakes "$edited" env "NOW_CMD=echo ${POOL_STATE_NOW}" bash "${REPO_ROOT}/scripts/report-runner-pools.sh" \
         --cluster-name redducklabs-cluster > "$GATE_OUT" 2> "$GATE_ERR"
     if grep -q '^POOL github-runners-burst-amd-16g provider_count=unknown min=unknown max=unknown ' "$GATE_OUT" \
         && grep -q '^POOL github-runners-pool-16g duplicate: 2 pools share this name' "$GATE_OUT" \
         && ! grep -q 'None' "$GATE_OUT"; then
-        pass "pool report prints unknown for missing fields and flags a duplicated pool name"
+        pass "pool report prints unknown for explicitly null fields and flags a duplicated pool name"
     else
         fail "pool report edge cases are wrong ($(head -c 400 "$GATE_OUT" | tr '\n' '|'))"
     fi
@@ -3922,6 +3944,134 @@ PY
         apply-fence,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,writer-terminated arc-burst - - "$dir"
 }
 
+# ---------------------------------------------------------------------------
+# Ruling 39: doctl omits zero-valued node-pool fields (godo omitempty). The
+# fakes serve every node-pool list in that encoding (doctl_encoding.py); these
+# cases pin the incident shapes and the fail-closed explicit null.
+# ---------------------------------------------------------------------------
+
+PRIMARY_POOL=github-runners-burst-amd-16g
+FALLBACK_POOL=github-runners-burst-intel-16g
+
+served_pool_keys() {  # dir pool-name -> the sorted keys the doctl fake prints for that pool
+    with_fakes "$1" doctl kubernetes cluster node-pool list fixture-cluster -o json \
+        | jq -c --arg n "$2" '[.[] | select(.name == $n) | keys] | if length == 1 then .[0] else "absent" end'
+}
+
+assert_doctl_zero_encoding() {
+    info "Checking readers against doctl's omitted-zero node-pool encoding (Ruling 39)..."
+    local dir keys rc occupancy
+    local closed_keys='["auto_scale","id","labels","name","size","tags","taints"]'
+
+    # The fake prints a closed pool with exactly the keys the live pool had.
+    dir=$(pool_state_dir create-one-closed) || { fail "zero encoding: fixture could not be built"; return; }
+    keys=$(served_pool_keys "$dir" "$PRIMARY_POOL")
+    if [ "$keys" = "$closed_keys" ]; then
+        pass "zero encoding: the doctl fake prints a closed pool with only ${closed_keys}"
+    else
+        fail "zero encoding: the doctl fake printed keys ${keys} for a closed pool, expected ${closed_keys}"
+    fi
+
+    # (1) The incident: create-burst from no burst pools. The primary's readback
+    # arrives with count/min_nodes/max_nodes omitted; identity must still hold
+    # and the fallback must be created next.
+    dir=$(burst_dir valid-density-no-burst) || { fail "zero encoding create: fixture could not be built"; return; }
+    expect_burst "zero encoding: create-burst from no pools creates the primary then the fallback" "$dir" create-burst 0 \
+        create:primary,create:fallback "primary=0/0 fallback=0/0" "RESULT: create-burst applied" create-burst
+    if grep -qx "READBACK: pool '${PRIMARY_POOL}' is 0/0" "$BURST_OUT" \
+        && grep -qx "READBACK: pool '${FALLBACK_POOL}' is 0/0" "$BURST_OUT" \
+        && ! grep -q 'IDENTITY_DRIFT' "$BURST_OUT" "$BURST_ERR" \
+        && [ "$(served_pool_keys "$dir" "$PRIMARY_POOL")" = "$closed_keys" ] \
+        && [ "$(served_pool_keys "$dir" "$FALLBACK_POOL")" = "$closed_keys" ]; then
+        pass "zero encoding: both closed pools read back 0/0 from omitted keys, no IDENTITY_DRIFT"
+    else
+        fail "zero encoding: create-burst readback is wrong ($(grep -E 'READBACK|IDENTITY_DRIFT|RESULT' "$BURST_OUT" "$BURST_ERR" | head -n 6 | tr '\n' '|'))"
+    fi
+    expect_burst "zero encoding: create-burst re-run on two omitted-zero pools is a no-op" "$dir" create-burst 0 - \
+        "primary=0/0 fallback=0/0" "NOOP: pool '${FALLBACK_POOL}' already exists closed" create-burst
+
+    # (3) The live state after the failed run: ARC density, the primary closed
+    # with its zero keys omitted, the fallback absent.
+    expect_gate "create-one-closed" create-burst 0 "STATE: arc=density pools=primary burst=closed"
+    expect_gate "create-one-closed" remove-burst 0 "STATE: arc=density pools=primary burst=closed"
+    expect_gate "create-one-closed" status 0 "STATE: arc=density pools=primary burst=closed"
+    dir=$(burst_dir create-one-closed) || { fail "zero encoding live state: fixture could not be built"; return; }
+    expect_burst "zero encoding: create-burst on the live state creates only the fallback" "$dir" create-burst 0 \
+        create:fallback "primary=0/0 fallback=0/0" "NOOP: pool '${PRIMARY_POOL}' already exists closed (0/0)" create-burst
+    dir=$(burst_dir create-one-closed) || { fail "zero encoding live remove: fixture could not be built"; return; }
+    expect_burst "zero encoding: remove-burst on the live state deletes the closed primary" "$dir" remove-burst 0 \
+        delete:primary "primary=absent fallback=absent" - remove-burst
+
+    # (2) An explicitly present null is not an omitted zero: it fails closed.
+    local field operation start
+    for field in max_nodes min_nodes count; do
+        dir=$(burst_dir create-one-closed) || { fail "zero encoding null ${field}: fixture could not be built"; continue; }
+        jq --arg n "$PRIMARY_POOL" --arg f "$field" 'map(if .name == $n then .[$f] = null else . end)' \
+            "${dir}/pools.json" > "${dir}/pools.json.new" && mv "${dir}/pools.json.new" "${dir}/pools.json"
+        for operation in create-burst remove-burst status; do
+            run_gate "$dir" --operation "$operation"
+            rc=$?
+            if [ "$rc" -eq 1 ] && grep -qF "pool '${PRIMARY_POOL}' ${field} is not a non-negative integer" "$GATE_ERR"; then
+                pass "zero encoding: explicit \"${field}\": null is rejected by ${operation}"
+            else
+                fail "zero encoding: explicit \"${field}\": null under ${operation} exited ${rc} ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+            fi
+        done
+    done
+    # A null that appears after admission stops burst-pools.sh before any mutation.
+    start=$(burst_dir create-one-closed) || { fail "zero encoding null after admission: fixture could not be built"; return; }
+    if burst_snapshot "$start" create-burst; then
+        jq --arg n "$PRIMARY_POOL" 'map(if .name == $n then .max_nodes = null else . end)' \
+            "${start}/pools.json" > "${start}/pools.json.new" && mv "${start}/pools.json.new" "${start}/pools.json"
+        run_burst "$start" "$BURST_SNAPSHOT" create-burst --apply
+        rc=$?
+        if [ "$rc" -ne 0 ] && [ "$(burst_mutations "$start")" = - ] && grep -qF 'max_nodes' "$BURST_ERR"; then
+            pass "zero encoding: an explicit max_nodes null after admission stops create-burst (exit ${rc}) with no mutation"
+        else
+            fail "zero encoding: explicit null after admission: exit ${rc}, mutations $(burst_mutations "$start") ($(tail -c 300 "$BURST_ERR" | tr '\n' ' '))"
+        fi
+    else
+        fail "zero encoding null after admission: snapshot not admitted ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+    fi
+    # The same explicit zeros printed verbatim (not omitted) are still admitted.
+    dir=$(burst_dir create-one-closed) || { fail "zero encoding verbatim: fixture could not be built"; return; }
+    : > "${dir}/doctl-pools-verbatim"
+    expect_burst "zero encoding: explicit zeros (verbatim) still create only the fallback" "$dir" create-burst 0 \
+        create:fallback "primary=0/0 fallback=0/0" - create-burst
+
+    # (4) Runner Status and the pool report print 0/0 for an omitted-zero pool.
+    dir=$(status_dir '{"arc": "arc-density"}' create-one-closed) || { fail "zero encoding status: fixture could not be built"; return; }
+    run_status "$dir"
+    expect_fleet "zero encoding: Runner Status on the live state" $? 0 - arc-density "STEP Admit pool state (status): success" - "$dir"
+    if status_summary | grep -qx "POOL ${PRIMARY_POOL} provider_count=0 min=0 max=0 auto_scale=true registered=0 ready=0" \
+        && status_summary | grep -qx "POOL ${FALLBACK_POOL} absent" \
+        && ! status_summary | grep -q 'unknown'; then
+        pass "zero encoding: Runner Status prints provider_count=0 min=0 max=0 for the omitted-zero primary"
+    else
+        fail "zero encoding: Runner Status pool lines are wrong ($(status_summary | grep -E '^POOL' | tr '\n' '|'))"
+    fi
+    dir=$(pool_state_dir create-one-closed) || { fail "zero encoding report: fixture could not be built"; return; }
+    with_fakes "$dir" env "NOW_CMD=echo ${POOL_STATE_NOW}" bash "${REPO_ROOT}/scripts/report-runner-pools.sh" \
+        --cluster-name redducklabs-cluster > "$GATE_OUT" 2> "$GATE_ERR"
+    rc=$?
+    if [ "$rc" -eq 0 ] \
+        && grep -qx "POOL ${PRIMARY_POOL} provider_count=0 min=0 max=0 auto_scale=true registered=0 ready=0" "$GATE_OUT"; then
+        pass "zero encoding: report-runner-pools.sh prints 0/0 for the omitted-zero primary"
+    else
+        fail "zero encoding: pool report exit ${rc} ($(head -c 400 "$GATE_OUT" | tr '\n' '|'))"
+    fi
+
+    # fleet_occupancy (Deploy drain, Phase C) reads the omitted count as 0.
+    dir=$(fleet_dir '{"arc": "arc-density"}' create-one-closed) || { fail "zero encoding occupancy: fixture could not be built"; return; }
+    occupancy=$(with_fakes "$dir" python3 -B "${REPO_ROOT}/scripts/lib/fleet_occupancy.py" --cluster-name redducklabs-cluster 2> "$GATE_ERR")
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(jq -c '.burst_pool_counts' <<<"$occupancy" 2>/dev/null)" = "{\"${PRIMARY_POOL}\":0,\"${FALLBACK_POOL}\":null}" ]; then
+        pass "zero encoding: fleet_occupancy reports count 0 for the omitted-zero primary and null for the absent fallback"
+    else
+        fail "zero encoding: fleet_occupancy exit ${rc}: ${occupancy} ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+    fi
+}
+
 
 assert_with_fakes_selftest
 assert_burst_contracts
@@ -3949,6 +4099,7 @@ assert_admission_docs_name_no_collaborator
 assert_operator_docs_current
 assert_cost_report
 assert_status_workflow
+assert_doctl_zero_encoding
 assert_network_policy
 
 echo ""

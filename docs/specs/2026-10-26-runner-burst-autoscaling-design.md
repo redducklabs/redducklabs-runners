@@ -18,7 +18,8 @@ removal of the alternate Phase B shape; 2026-10-27, PR #35 re-review Ruling 36
 (the server-side Emergency Stop fence, a ValidatingAdmissionPolicy keyed on
 the stop marker); 2026-10-28, rollout Ruling 38 (the burst pools use
 `s-8vcpu-16gb-amd` and `s-8vcpu-16gb-intel`; see "Burst pool sizes
-(Ruling 38)").
+(Ruling 38)"); 2026-10-28, rollout Ruling 39 (doctl omits zero-valued
+node-pool fields; see "Node-pool list encoding (Ruling 39)").
 
 ## Problem
 
@@ -216,6 +217,41 @@ The baseline pool keeps `s-8vcpu-16gb` and its two existing nodes, which are
 unaffected. A baseline node replacement (a DOKS node repair, recycle or
 upgrade) requests a new `s-8vcpu-16gb` droplet and can hit the same regional
 shortage; the runbook describes what an operator sees and does.
+
+### Node-pool list encoding (Ruling 39)
+
+`doctl kubernetes cluster node-pool list <cluster> -o json` prints the godo
+node-pool struct, whose fields are tagged `omitempty`: a zero `count`,
+`min_nodes` or `max_nodes`, a false `auto_scale` and an empty `nodes` list are
+left out of the object, not printed as `0`, `false` or `[]`. A closed burst
+pool (count 0, 0/0, autoscaling on) therefore reads back with exactly the keys
+`auto_scale`, `id`, `labels`, `name`, `size`, `tags` and `taints`.
+
+The second live `create-burst` apply, Node Pool Sizing run 40721560476 on
+2026-10-28 (main `8344e81`), created the closed primary
+`github-runners-burst-amd-16g` and then stopped at its identity readback:
+
+```text
+IDENTITY_DRIFT: pools.github-runners-burst-amd-16g.max_nodes: expected=0 live=null
+IDENTITY_DRIFT: pools.github-runners-burst-amd-16g.min_nodes: expected=0 live=null
+```
+
+The readers treated the absent keys as `null`. The fallback was not created;
+the live state is ARC `density`, the primary present and closed, the fallback
+absent.
+
+Ruling: every reader of node-pool list JSON (`read_live` in
+`scripts/lib/runner_pool_state.py`, `scripts/lib/fleet_occupancy.py`,
+`scripts/acceptance-evidence.py` through the shared `normalize_pool_list`, and
+`read_state` in `scripts/burst-pools.sh` with the equivalent `jq`) restores an
+ABSENT `count`, `min_nodes` or `max_nodes` as integer `0`, an absent
+`auto_scale` as `false` and an absent `nodes` as `[]`, immediately after the
+read and before any check, identity snapshot, comparison or output. Only key
+absence means zero. A key that is present keeps its value: an explicit `null`,
+a string or any other non-integer still fails the structural checks exactly
+as before, so no gate is weakened. The test fakes print every node-pool list
+in this encoding (`test/fixtures/doctl_encoding.py`), so every scenario
+exercises it.
 
 ### Runner bounds and placement
 

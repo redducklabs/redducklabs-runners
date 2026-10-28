@@ -35,6 +35,9 @@ import sys
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from doctl_encoding import encode_pool_list  # noqa: E402  (doctl's live omitempty encoding, Ruling 39)
+
 PROBE_REPO = "redducklabs/aurolegal.ai"
 FLEET_REPO = "redducklabs/redducklabs-runners"
 POOL_LABEL = "doks.digitalocean.com/node-pool"
@@ -469,7 +472,7 @@ def doctl(sim, args):
         return out([sim.scenario["cluster"]])
     if line == "kubernetes cluster node-pool list cluster-1 -o json":
         switch = sim.scenario.get("pools_switch_at") or 0
-        return out(sim.scenario["pools_after"] if sim.clock >= switch else sim.scenario["pools_before"])
+        return out(encode_pool_list(sim.scenario["pools_after"] if sim.clock >= switch else sim.scenario["pools_before"]))
     return None
 
 

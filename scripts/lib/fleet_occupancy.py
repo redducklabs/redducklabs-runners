@@ -65,7 +65,9 @@ def report(cluster_name):
     matches = [c for c in clusters if isinstance(c, dict) and c.get("name") == cluster_name]
     if len(matches) != 1 or not isinstance(matches[0].get("id"), str) or not matches[0]["id"]:
         raise pool_state.ReadError(f"cluster '{cluster_name}' must resolve to exactly one DigitalOcean cluster")
-    pools = pool_state.run_json(["doctl", "kubernetes", "cluster", "node-pool", "list", matches[0]["id"], "-o", "json"])
+    pools = pool_state.normalize_pool_list(
+        pool_state.run_json(["doctl", "kubernetes", "cluster", "node-pool", "list", matches[0]["id"], "-o", "json"])
+    )
     if not isinstance(pools, list) or not all(isinstance(p, dict) for p in pools):
         raise pool_state.ReadError("doctl node-pool list is not a JSON array of pools")
 

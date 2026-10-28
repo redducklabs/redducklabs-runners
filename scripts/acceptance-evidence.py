@@ -69,6 +69,12 @@ import yaml
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# The shared node-pool list normalizer (Ruling 39) lives in
+# scripts/lib/runner_pool_state.py; load it without writing bytecode.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(SCRIPT_DIR, "lib"))
+from runner_pool_state import normalize_pool_list  # noqa: E402
 ORG = "redducklabs"
 PROBE_REPOSITORY = "redducklabs/aurolegal.ai"
 PROBE_WORKFLOW = ".github/workflows/runner-burst-acceptance.yml"
@@ -428,7 +434,8 @@ def cluster_and_pools(cluster_name):
     if len(matches) != 1:
         raise ReadError(f"expected exactly one cluster named {cluster_name}")
     cluster = matches[0]
-    pools = run_json(["doctl", "kubernetes", "cluster", "node-pool", "list", cluster["id"], "-o", "json"])
+    pools = normalize_pool_list(
+        run_json(["doctl", "kubernetes", "cluster", "node-pool", "list", cluster["id"], "-o", "json"]))
     if not isinstance(pools, list):
         raise ReadError("doctl node-pool list is not a JSON array")
     return cluster, pools
