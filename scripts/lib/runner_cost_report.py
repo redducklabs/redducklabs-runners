@@ -31,7 +31,9 @@ Burst node-hours are derived: runner node-hours minus two baseline nodes for
 every hour of the invoice period (floor 0); estimated burst cost is those hours
 at the average runner price per node-hour. Burst sizes cost $0.16667/node-hour
 against $0.14286 for the baseline size, so the average understates burst cost
-by up to 14%; marked AMD/Intel lines show the measured burst cost directly.
+(by more once the baseline is billed at its monthly cap, which lowers its
+effective hourly rate); marked AMD/Intel lines show the measured burst cost
+directly.
 
 Output is one of: the table for a completed month; the ACCOUNT-WIDE
 month-to-date usage for the month in progress (not itemized by DigitalOcean);

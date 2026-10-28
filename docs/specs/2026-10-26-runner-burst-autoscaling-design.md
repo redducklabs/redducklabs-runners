@@ -596,8 +596,9 @@ AMD is reported as the primary burst size, one that says Intel as the
 fallback burst size, and one that says both makes the month unavailable; an
 unmarked line is the baseline, plus burst nodes if the invoice does not mark
 the variant. The estimated burst cost prices the derived hours at the average
-runner rate, which understates burst cost by up to 14% now that burst sizes
-cost more than the baseline; marked AMD/Intel lines show it measured.
+runner rate, which understates burst cost now that burst sizes cost more than
+the baseline (by more once the baseline is billed at its monthly cap, which
+lowers its effective hourly rate); marked AMD/Intel lines show it measured.
 Invoice items persist after node deletion, so deleted burst nodes are
 counted. The
 month in progress is not itemized by DigitalOcean; for it the script reports

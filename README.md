@@ -498,8 +498,9 @@ burst size, one that says Intel as the fallback burst size, and an unmarked
 line as the baseline (plus burst nodes, if the invoice does not mark them).
 Burst node-hours are derived as runner node-hours minus two baseline nodes for
 every hour of the period (floor 0), and the burst cost is estimated at the
-average runner price per node-hour, which understates it by up to 14% because
-the burst sizes cost more than the baseline size.
+average runner price per node-hour, which understates it because the burst
+sizes cost more than the baseline size (more so when the baseline reaches its
+monthly price cap); marked AMD/Intel invoice lines show the measured burst cost.
 The cluster defaults to `redducklabs-cluster`; use `--cluster-name` to override.
 Deleted nodes are included because invoice items persist. DigitalOcean does not
 itemize the month in progress, so for it the script prints the account-wide
