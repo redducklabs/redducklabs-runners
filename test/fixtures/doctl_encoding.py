@@ -7,8 +7,11 @@ list are left out of the object instead of being printed (Ruling 39). Live,
 a closed burst pool (count 0, 0/0) reads back with exactly the keys
 auto_scale, id, labels, name, size, tags and taints.
 
-Every test double that serves node-pool list JSON passes it through
-encode_pool_list, so each scenario exercises the live encoding. Values that
+The burst-autoscaling and acceptance test doubles pass node-pool list JSON
+through encode_pool_list, so each of their scenarios exercises the live
+encoding. The one exception is the inline doctl() mock in
+test/verify-runner-resources.sh, which only prints the baseline pool at
+2/2/2: it has no zero fields to omit. Values that
 doctl could not omit (an explicit null, a string, a nonzero number) are kept
 as they are, so fixtures can still model malformed provider output.
 
