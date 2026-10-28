@@ -38,13 +38,13 @@
  "pods": [],
  "pool_state_checks": [],
  "pools_after": {
-   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
-   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
+   "github-runners-burst-intel-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
    "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
  },
  "pools_before": {
-   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
-   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
+   "github-runners-burst-intel-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
    "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
  },
  "probe": null,

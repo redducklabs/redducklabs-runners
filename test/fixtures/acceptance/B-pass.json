@@ -23,8 +23,8 @@
  "nodes": [
    {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-a", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
    {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-b", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
-   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "fb1", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"},
-   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "fb2", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"}
+   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "fb1", "pool": "github-runners-burst-intel-16g", "ready_at": "2026-11-02T18:01:00Z"},
+   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "fb2", "pool": "github-runners-burst-intel-16g", "ready_at": "2026-11-02T18:01:00Z"}
  ],
  "phase": "B",
  "phase_c": null,
@@ -33,22 +33,22 @@
    {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "br2", "uid": "uid-br2"},
    {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "br3", "uid": "uid-br3"},
    {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "br4", "uid": "uid-br4"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb1", "pool": "github-runners-burst-amd-16g", "runner_name": "br5", "uid": "uid-br5"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb1", "pool": "github-runners-burst-amd-16g", "runner_name": "br6", "uid": "uid-br6"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb2", "pool": "github-runners-burst-amd-16g", "runner_name": "br7", "uid": "uid-br7"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb2", "pool": "github-runners-burst-amd-16g", "runner_name": "br8", "uid": "uid-br8"}
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb1", "pool": "github-runners-burst-intel-16g", "runner_name": "br5", "uid": "uid-br5"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb1", "pool": "github-runners-burst-intel-16g", "runner_name": "br6", "uid": "uid-br6"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb2", "pool": "github-runners-burst-intel-16g", "runner_name": "br7", "uid": "uid-br7"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "fb2", "pool": "github-runners-burst-intel-16g", "runner_name": "br8", "uid": "uid-br8"}
  ],
  "pool_state_checks": [
    {"at": "2026-11-02T18:06:00Z", "pass": true, "ready_nodes": ["baseline-a", "baseline-b", "fb1", "fb2"], "state": "STATE: arc=burst pools=both burst=open"}
  ],
  "pools_after": {
-   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
-   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-pri", "max": 6, "min": 0, "nodes": 0},
+   "github-runners-burst-intel-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
    "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
  },
  "pools_before": {
-   "github-runners-burst-16g": {"count": 0, "id": "pool-pri", "max": 0, "min": 0, "nodes": 0},
-   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
+   "github-runners-burst-amd-16g": {"count": 0, "id": "pool-pri", "max": 0, "min": 0, "nodes": 0},
+   "github-runners-burst-intel-16g": {"count": 0, "id": "pool-fb", "max": 2, "min": 0, "nodes": 0},
    "github-runners-pool-16g": {"count": 2, "id": "pool-base", "max": 2, "min": 2, "nodes": 2}
  },
  "probe": {

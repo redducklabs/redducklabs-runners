@@ -108,20 +108,27 @@ YAML
     done
 }
 
-# Node budgets. Both burst sizes use published allocatable figures; the
-# baseline pool and the primary burst pool are s-8vcpu-16gb (measured 13967028Ki
-# / 7880m). The fallback burst pool is s-8vcpu-16gb-amd (same 16 GiB / 8 vCPU
-# class; the allocatable below is the same published figure and must be
-# re-measured if DigitalOcean publishes a different one).
-# The four values below are read through ${!alloc_mi_var} / ${!alloc_cpu_var}.
+# Node budgets. The baseline pool is s-8vcpu-16gb (measured 13967028Ki /
+# 7880m on the live baseline nodes). The primary burst pool is s-8vcpu-16gb-amd
+# and the fallback burst pool s-8vcpu-16gb-intel (spec Ruling 38): the same
+# 16 GiB / 8 vCPU / 320 GB shape, but no node of either size has run in this
+# cluster, so their allocatable below is ASSUMED equal to the measured
+# s-8vcpu-16gb figure. The live pool-state gate checks headroom on every Ready
+# node against its real allocatable, and acceptance Phases A (AMD) and B
+# (Intel) measure it; correct these values if the measurement differs.
+# The six values below are read through ${!alloc_mi_var} / ${!alloc_cpu_var}.
 # shellcheck disable=SC2034
 NODE_ALLOCATABLE_MI_s_8vcpu_16gb=13639     # 13967028Ki
 # shellcheck disable=SC2034
 NODE_ALLOCATABLE_CPU_M_s_8vcpu_16gb=7880
 # shellcheck disable=SC2034
-NODE_ALLOCATABLE_MI_s_8vcpu_16gb_amd=13639
+NODE_ALLOCATABLE_MI_s_8vcpu_16gb_amd=13639     # assumed, see above
 # shellcheck disable=SC2034
-NODE_ALLOCATABLE_CPU_M_s_8vcpu_16gb_amd=7880
+NODE_ALLOCATABLE_CPU_M_s_8vcpu_16gb_amd=7880   # assumed, see above
+# shellcheck disable=SC2034
+NODE_ALLOCATABLE_MI_s_8vcpu_16gb_intel=13639   # assumed, see above
+# shellcheck disable=SC2034
+NODE_ALLOCATABLE_CPU_M_s_8vcpu_16gb_intel=7880 # assumed, see above
 SYSTEM_OVERHEAD_MI=694        # cilium, kube-proxy, csi, do-node-agent
 SYSTEM_OVERHEAD_CPU_M=522
 REQUIRED_HEADROOM_MI=2048
@@ -345,7 +352,7 @@ TWO_POD_CPU_M=$(( PODS_PER_NODE * REQ_TOTAL_CPU_M ))
 THREE_POD_MI=$(( (PODS_PER_NODE + 1) * REQ_TOTAL_MI ))
 THREE_POD_CPU_M=$(( (PODS_PER_NODE + 1) * REQ_TOTAL_CPU_M ))
 
-for node_size in s_8vcpu_16gb s_8vcpu_16gb_amd; do
+for node_size in s_8vcpu_16gb s_8vcpu_16gb_amd s_8vcpu_16gb_intel; do
     size_label=${node_size//_/-}
     alloc_mi_var="NODE_ALLOCATABLE_MI_${node_size}"
     alloc_cpu_var="NODE_ALLOCATABLE_CPU_M_${node_size}"

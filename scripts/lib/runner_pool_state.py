@@ -37,12 +37,12 @@ from decimal import Decimal, InvalidOperation
 import yaml
 
 BASELINE = "github-runners-pool-16g"
-PRIMARY = "github-runners-burst-16g"
-FALLBACK = "github-runners-burst-amd-16g"
+PRIMARY = "github-runners-burst-amd-16g"
+FALLBACK = "github-runners-burst-intel-16g"
 RUNNER_POOL_SIZES = {
     BASELINE: "s-8vcpu-16gb",
-    PRIMARY: "s-8vcpu-16gb",
-    FALLBACK: "s-8vcpu-16gb-amd",
+    PRIMARY: "s-8vcpu-16gb-amd",
+    FALLBACK: "s-8vcpu-16gb-intel",
 }
 BURST_CAPS = {PRIMARY: 6, FALLBACK: 2}
 BURST_SUM_CAP = 8

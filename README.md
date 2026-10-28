@@ -241,11 +241,16 @@ after Phase E reports `READY_FOR_MIGRATION=true`.
 | Pod scheduler request | **3 CPU and 5 GiB memory**, shared by the runner and DinD sidecar |
 | Pod memory limit | **6 GiB shared** by the runner and privileged DinD sidecar |
 | Baseline pool | `github-runners-pool-16g`: two `s-8vcpu-16gb` nodes (`min=max=count=2`), $192/month |
-| Burst pools | `github-runners-burst-16g` (`s-8vcpu-16gb`, 0..6, priority 100) and `github-runners-burst-amd-16g` (`s-8vcpu-16gb-amd`, 0..2, priority 50); maxima sum to 8 |
-| Fleet cost ceiling | 10 runner nodes, **$992/month** only if every node ran all month |
+| Burst pools | `github-runners-burst-amd-16g` (`s-8vcpu-16gb-amd`, 0..6, priority 100) and `github-runners-burst-intel-16g` (`s-8vcpu-16gb-intel`, 0..2, priority 50); maxima sum to 8; $0.16667/node-hour each |
+| Fleet cost ceiling | 10 runner nodes, **$1,088/month** only if every node ran all month |
 
-On the measured 13.32 GiB / 7880m allocatable node, two pods reserve 10 GiB and
-6 CPU; a third does not fit. Warm runners prefer baseline; burst nodes exist only
+On the measured 13.32 GiB / 7880m allocatable baseline node, two pods reserve
+10 GiB and 6 CPU; a third does not fit. The burst sizes have the same
+16 GiB / 8 vCPU shape; their allocatable is assumed equal until acceptance
+Phases A and B measure it live.
+The burst pools do not use the baseline's `s-8vcpu-16gb`: DigitalOcean refused
+to create a pool of that size in `sfo3` for lack of regional capacity
+(2026-10-28; spec "Burst pool sizes (Ruling 38)"). Warm runners prefer baseline; burst nodes exist only
 while jobs need them. Runner pods carry
 `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, so a node running a
 job is never scaled down, and **Rebalance Runners** retires idle runners left on
@@ -282,14 +287,15 @@ and rejects repository-membership drift.
 
 Measured demand (October 2026) was about 542 job-hours per week. The baseline
 covers four concurrent jobs; the rest is about 240 burst node-hours per week
-including boot and scale-down idle time.
+including boot and scale-down idle time, priced at the burst sizes'
+$0.16667/node-hour (16.7% above the baseline size's $0.14286).
 
 | Item | Monthly |
 |---|---|
 | Baseline nodes | $192 |
-| Burst nodes (estimated) | ~$150 |
+| Burst nodes (estimated) | ~$175 |
 | Remaining GitHub-hosted (secret-handling jobs, Windows, deploys) | ~$25-40 |
-| **Total** | **~$370-380**, against a ~$1,000/month hosted run rate |
+| **Total** | **~$390-410**, against a ~$1,000/month hosted run rate |
 
 Actual cost is measured from the DigitalOcean invoice with
 `scripts/runner-cost-report.sh` (see [Runner Node Cost](#runner-node-cost)).
@@ -482,12 +488,18 @@ authenticated (read-only):
 DigitalOcean bills DOKS nodes as "Kubernetes Clusters" items aggregated per
 cluster and node size, not per droplet or pool. For a completed month the report
 therefore has per-cluster, per-size granularity: node-hours and USD for the
-16 GB / 8 vCPU runner size (baseline and primary burst nodes share it and cannot
-be split; an AMD fallback line is shown separately if the invoice has one), the
-8 GB / 4 vCPU worker size reported separately as not runner cost, and the
-cluster's other items (volumes, load balancers). Burst node-hours are derived as
-runner node-hours minus two baseline nodes for every hour of the period (floor
-0), and the burst cost is estimated at the average runner price per node-hour.
+16 GB / 8 vCPU runner shape, the 8 GB / 4 vCPU worker size reported separately
+as not runner cost, and the cluster's other items (volumes, load balancers).
+The baseline (`s-8vcpu-16gb`), primary burst (`s-8vcpu-16gb-amd`) and fallback
+burst (`s-8vcpu-16gb-intel`) sizes all have the 16 GB / 8 vCPU shape, and how
+DigitalOcean words an AMD or Intel invoice line is not documented, so every
+line of that shape is runner cost: a line that says AMD is shown as the primary
+burst size, one that says Intel as the fallback burst size, and an unmarked
+line as the baseline (plus burst nodes, if the invoice does not mark them).
+Burst node-hours are derived as runner node-hours minus two baseline nodes for
+every hour of the period (floor 0), and the burst cost is estimated at the
+average runner price per node-hour, which understates it by up to 14% because
+the burst sizes cost more than the baseline size.
 The cluster defaults to `redducklabs-cluster`; use `--cluster-name` to override.
 Deleted nodes are included because invoice items persist. DigitalOcean does not
 itemize the month in progress, so for it the script prints the account-wide

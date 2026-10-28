@@ -70,8 +70,8 @@ ROLLBACK_READBACK_STEP = "Verify rollback transition and density readback"
 PHASE_C_JOB = "Scale Runners - acceptance-phase-c"
 
 BASELINE = "github-runners-pool-16g"
-PRIMARY = "github-runners-burst-16g"
-FALLBACK = "github-runners-burst-amd-16g"
+PRIMARY = "github-runners-burst-amd-16g"
+FALLBACK = "github-runners-burst-intel-16g"
 BURST_POOLS = (PRIMARY, FALLBACK)
 
 WARM_P95_SECONDS = 90
@@ -315,6 +315,22 @@ def check_runner_health(evidence, failures, notes):
 # --- phases ----------------------------------------------------------------
 
 
+def check_compatibility(label, evidence, pool_name, failures):
+    """A passing pool-state check (node compatibility and headroom) covered every node of the pool while Ready.
+
+    Neither burst size (s-8vcpu-16gb-amd primary, s-8vcpu-16gb-intel fallback)
+    had run in the cluster when the allocatable assumption of
+    test/verify-runner-resources.sh was made (spec, Ruling 38): phase A is the
+    live measurement for the primary size, phase B for the fallback size.
+    """
+    names = {node.get("name") for node in evidence.get("nodes") or [] if node.get("pool") == pool_name}
+    compatible = any(check.get("pass") is True and names <= set(check.get("ready_nodes") or [])
+                     for check in evidence.get("pool_state_checks") or [])
+    if not names or not compatible:
+        failures.append(f"{label}-compatibility: no passing pool-state check (node compatibility and headroom) "
+                        f"covered every {pool_name} node while Ready")
+
+
 def phase_a(evidence, failures, report, notes):
     jobs = check_probe_identity("A", evidence, failures)
     pre = burst_nodes_before_run(evidence)
@@ -330,6 +346,7 @@ def phase_a(evidence, failures, report, notes):
     fallback_nodes = [node.get("name") for node in evidence.get("nodes") or [] if node.get("pool") == FALLBACK]
     if off_primary or fallback_nodes:
         failures.append(f"A-primary-only: burst capacity outside {PRIMARY}: runners {off_primary}, fallback nodes {fallback_nodes}")
+    check_compatibility("A", evidence, PRIMARY, failures)
     check_pickup("A", evidence, jobs, failures, report)
     # A-network (runner network isolation): check_network_probe.
     for extra in EXTRA_CRITERIA["A"]:
@@ -356,11 +373,7 @@ def phase_b(evidence, failures, report, notes):
     primary = [node.get("name") for node in evidence.get("nodes") or [] if node.get("pool") == PRIMARY]
     if len(fallback) != 2 or primary:
         failures.append(f"B-fallback-nodes: {len(fallback)} fallback nodes and primary nodes {primary}; expected exactly two fallback nodes and no primary node")
-    names = {node.get("name") for node in fallback}
-    compatible = any(check.get("pass") is True and names <= set(check.get("ready_nodes") or [])
-                     for check in evidence.get("pool_state_checks") or [])
-    if not names or not compatible:
-        failures.append("B-compatibility: no passing pool-state check (node compatibility and headroom) covered both fallback nodes while Ready")
+    check_compatibility("B", evidence, FALLBACK, failures)
     for name, expected_max in ((PRIMARY, 6), (FALLBACK, 2)):
         after = pool(evidence, "pools_after", name)
         if after.get("min") != 0 or after.get("max") != expected_max:

@@ -16,7 +16,9 @@ Stop and Rebalance concurrency, the Rebalance skip predicate); 2026-10-27, PR
 committed `deploy/density-values.yaml`, independent of Helm history) and the
 removal of the alternate Phase B shape; 2026-10-27, PR #35 re-review Ruling 36
 (the server-side Emergency Stop fence, a ValidatingAdmissionPolicy keyed on
-the stop marker).
+the stop marker); 2026-10-28, rollout Ruling 38 (the burst pools use
+`s-8vcpu-16gb-amd` and `s-8vcpu-16gb-intel`; see "Burst pool sizes
+(Ruling 38)").
 
 ## Problem
 
@@ -89,15 +91,16 @@ and self-hosted would remain cheaper than hosted.
 | Pool | Size | min | max | Cost |
 |---|---|---|---|---|
 | `github-runners-pool-16g` (existing, baseline) | `s-8vcpu-16gb` | 2 | 2 | $192/month fixed |
-| `github-runners-burst-16g` (new, primary) | `s-8vcpu-16gb` | 0 | 6 | $0.143/node-hour |
-| `github-runners-burst-amd-16g` (new, fallback) | `s-8vcpu-16gb-amd` | 0 | 2 | $0.167/node-hour |
+| `github-runners-burst-amd-16g` (new, primary) | `s-8vcpu-16gb-amd` | 0 | 6 | $0.16667/node-hour ($112/month) |
+| `github-runners-burst-intel-16g` (new, fallback) | `s-8vcpu-16gb-intel` | 0 | 2 | $0.16667/node-hour ($112/month) |
 
 The approved burst ceiling is eight nodes in aggregate. It is enforced by the
 provider's autoscaling bounds: the burst pool maxima sum to exactly 8
 (`6 + 2`), so the cluster autoscaler cannot grow the burst pools past eight
 nodes regardless of provisioning delay, backoff, or which pool it picks. The
 billed ceiling is 10 runner nodes, worst case
-`2×$96 + 6×$96 + 2×$112 = $992/month` if every node ran continuously.
+`2×$96 + 6×$112 + 2×$112 = $1,088/month` if every node ran continuously
+(it was $992 with the original `s-8vcpu-16gb` primary; Ruling 38).
 
 That bound covers autoscaling, not provider maintenance. DOKS surge upgrades
 temporarily create duplicate worker nodes during a cluster upgrade;
@@ -124,9 +127,9 @@ DOKS-managed `kube-system/cluster-autoscaler-priority-expander` ConfigMap's
 
 ```yaml
 100:
-  - <github-runners-burst-16g pool id>
-50:
   - <github-runners-burst-amd-16g pool id>
+50:
+  - <github-runners-burst-intel-16g pool id>
 1:
   - .*
 ```
@@ -139,12 +142,15 @@ fallback. `worker-pool` matches only the priority-1 catch-all and no runner pod
 fits it, so its behavior is unchanged. Undo is `--expanders ""`, which restores
 DigitalOcean's default.
 
-The fallback pool uses a different droplet size because the September 2026
-incident showed the DOKS autoscaler receiving HTTP 422 while growing the sole
-eligible `s-8vcpu-16gb` pool. The account droplet limit is 100 with 15 in use,
-so the limit was not the cause; the root cause is unproven. The fallback gives
-the autoscaler a second node group while the primary is in backoff. It is
-deliberately small: fallback capacity covers four extra jobs, not a full burst.
+The two burst pools use two different droplet sizes, and neither is the
+baseline's `s-8vcpu-16gb`. The September 2026 incident showed the DOKS
+autoscaler receiving HTTP 422 while growing the sole eligible `s-8vcpu-16gb`
+pool (the account droplet limit is 100 with 15 in use, so the limit was not
+the cause), and on 2026-10-28 DigitalOcean refused to create a pool of that
+size in `sfo3` for lack of regional capacity (see "Burst pool sizes
+(Ruling 38)"). The fallback gives the autoscaler a second node group, backed
+by a different stock, while the primary is in backoff. It is deliberately
+small: fallback capacity covers four extra jobs, not a full burst.
 
 All three pools carry exactly the labels `node-type=github-runner`,
 `workload-type=ci-cd` and the single taint `github-runner=true:NoSchedule`.
@@ -155,6 +161,61 @@ Scale-to-zero (`min_nodes=0`) is documented for DOKS autoscaling pools; the
 DigitalOcean release notes still describe it as preview. If the API rejects
 `min_nodes=0`, the run fails, creates nothing further, and the rollout stops
 for re-planning. It never falls back to a `min_nodes=1` cost floor.
+
+### Burst pool sizes (Ruling 38)
+
+The design originally made the primary burst pool `github-runners-burst-16g`
+on `s-8vcpu-16gb`, the baseline's size, with an `s-8vcpu-16gb-amd` fallback.
+The first live `create-burst` apply failed in both attempts, Node Pool Sizing
+runs 40647394663 and 40647530519 on 2026-10-28 (main `badfb93`), when the
+primary pool was created:
+
+```text
+POST https://api.digitalocean.com/v2/kubernetes/clusters/<cluster id>/node_pools: 422
+region has insufficient capacity for requested worker pool for slug: s-8vcpu-16gb
+RESULT: failed: create closed pool github-runners-burst-16g failed (exit 1; identities unchanged); no further mutation
+```
+
+Nothing was created: the cluster still has only `worker-pool` and the baseline
+pool, and ARC is still `density`. The refused request was the
+closed `0/0` create, so DigitalOcean checks regional capacity for the slug even
+for a pool with no nodes, and there is no signal of when capacity returns. The
+owner chose to re-plan:
+
+- primary `github-runners-burst-amd-16g`, `s-8vcpu-16gb-amd`, 0..6;
+- fallback `github-runners-burst-intel-16g`, `s-8vcpu-16gb-intel`, 0..2;
+- `github-runners-burst-16g` and any burst use of `s-8vcpu-16gb` are removed.
+
+Everything else is unchanged: the aggregate cap of eight burst nodes and 20
+runners, the labels and taint, closed `0/0` creation, `enable-burst` opening
+the primary to 0/6 before the fallback to 0/2, the expander order (primary at
+100, fallback at 50), and every gate and contract. A pool with the old name or
+size fails the pool-state check as an unknown eligible pool or a wrong size;
+nothing renames or resizes a pool in place.
+
+Both sizes are the same 16 GiB / 8 vCPU / 320 GiB shape as the baseline and
+are offered in `sfo3` (`doctl compute size list`, read-only, 2026-10-28):
+
+| Size | Description | Monthly | Hourly |
+|---|---|---|---|
+| `s-8vcpu-16gb` (baseline) | Basic | $96 | $0.14286 |
+| `s-8vcpu-16gb-amd` (primary burst) | Basic AMD | $112 | $0.16667 |
+| `s-8vcpu-16gb-intel` (fallback burst) | Basic Intel | $112 | $0.16667 |
+
+A burst node-hour therefore costs 16.7% more than it would have on
+`s-8vcpu-16gb`; the cost model below uses the new rate. No node of either
+burst size has run in this cluster, so their allocatable is assumed equal to
+the measured `s-8vcpu-16gb` figure (13639Mi / 7880m; Ruling 4, which now
+covers both burst sizes) in `test/verify-runner-resources.sh`. The live
+pool-state check measures headroom on every Ready node against its real
+allocatable, and acceptance requires a passing check that covers every
+primary node (Phase A, `A-compatibility`) and both fallback nodes (Phase B,
+`B-compatibility`).
+
+The baseline pool keeps `s-8vcpu-16gb` and its two existing nodes, which are
+unaffected. A baseline node replacement (a DOKS node repair, recycle or
+upgrade) requests a new `s-8vcpu-16gb` droplet and can hit the same regional
+shortage; the runbook describes what an operator sees and does.
 
 ### Runner bounds and placement
 
@@ -509,14 +570,16 @@ Measured demand is 542 job-hours/week. The baseline covers four concurrent
 jobs. Job time above four concurrent jobs is about 58% of job-minutes, or 315
 job-hours/week, which is 158 burst node-hours at two jobs per node. With a 1.5×
 allowance for boot and scale-down idle time, about 240 node-hours/week, or
-about $150/month.
+about 1,040 node-hours/month, which is about $175/month at the burst sizes'
+$0.16667/node-hour (Ruling 38; it was about $150/month at the original
+primary size's $0.14286).
 
 | Item | Monthly |
 |---|---|
 | Baseline nodes | $192 |
-| Burst nodes (estimated) | ~$150 |
+| Burst nodes (estimated) | ~$175 |
 | Remaining GitHub-hosted (Class B, Windows, deploys) | ~$25–40 |
-| **Total** | **~$370–380** vs ~$1,000 hosted run rate |
+| **Total** | **~$390–410** vs ~$1,000 hosted run rate |
 
 Cost is measured, not inferred, from the DigitalOcean monthly invoice: a new
 `scripts/runner-cost-report.sh` reads `doctl invoice get` items. DigitalOcean
@@ -525,8 +588,18 @@ size (for example `8 nodes - 16 GB / 8 vCPU / 320 GB SSD`, grouped under the
 cluster name, with node-hours in `duration`), not per droplet or pool. The
 report therefore sums runner-size node-hours and cost for this cluster and
 derives burst node-hours as runner node-hours minus two baseline nodes for the
-whole period. Invoice items persist after node deletion, so deleted burst
-nodes are counted. The
+whole period. Every 16 GB / 8 vCPU line counts as runner cost: the baseline
+`s-8vcpu-16gb` and both burst sizes have that shape, and how DigitalOcean words
+an AMD or Intel line is not documented (no invoice of this account has carried
+one), so a variant word before or after the size is accepted. A line that says
+AMD is reported as the primary burst size, one that says Intel as the
+fallback burst size, and one that says both makes the month unavailable; an
+unmarked line is the baseline, plus burst nodes if the invoice does not mark
+the variant. The estimated burst cost prices the derived hours at the average
+runner rate, which understates burst cost by up to 14% now that burst sizes
+cost more than the baseline; marked AMD/Intel lines show it measured.
+Invoice items persist after node deletion, so deleted burst nodes are
+counted. The
 month in progress is not itemized by DigitalOcean; for it the script reports
 account month-to-date usage from `doctl balance get` and labels it
 account-wide. Missing or unparseable invoice data produces an explicit
@@ -626,8 +699,8 @@ during it.
 
 | Phase | Setup | Pass criteria |
 |---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=16 | 16 distinct runners concurrent; 4 on baseline; all burst nodes from the primary pool (proves priority order); warm and cold pickup within thresholds |
-| B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=8 | 4 runners on baseline, 4 on two fallback nodes created from zero; fallback nodes pass node compatibility; primary restored to 0/6 afterwards |
+| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=16 | 16 distinct runners concurrent; 4 on baseline; all burst nodes from the primary pool (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
+| B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=8 | 4 runners on baseline, 4 on two fallback nodes created from zero; fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
 | C. Idle retirement and return to zero | after A; Scale Runners `acceptance-phase-c` sets `minRunners=8` (4 idle runners must land on burst nodes because baseline holds 4); retirement runs with zero free baseline slots; then `minRunners` returns to 4 and then 2 | retirement deletes nothing while baseline is full; once ARC removes surplus runners, any idle runner left on a burst node is retired and replaced on baseline; both burst pools reach 0 nodes within 60 minutes; no job killed |
 | D. Drain under continuing load | a probe that keeps 12 jobs in flight, submitting a new job as each finishes, while Deploy `drain` runs | in-flight jobs on burst nodes complete; every runner pod created after `drain` is on baseline; no Pending runner pod triggers scale-up; burst pools reach zero nodes |
 | E. Restore and ready-for-migration | after D: Node Pool Sizing `remove-burst`, Deploy `rollback`, then rollout steps 3–4 again | `density` readback after rollback; then `burst` readback, three pools with expected IDs and bounds, expander readback, trust-boundary readback, two warm runners on baseline; an N=8 smoke run passes |
@@ -684,7 +757,8 @@ before any repository migration PR merges. Migrated repositories revert their
 
 - `test/verify-runner-resources.sh` asserts the `burst` contract: bounds,
   affinity, annotation, unchanged pod budget and DinD wiring, and two pods with
-  the required headroom on both burst sizes' published allocatable.
+  the required headroom on the baseline size's measured allocatable and on
+  both burst sizes' assumed allocatable (Ruling 38).
 - `verify-runner-pool-state.sh` fixtures: unknown eligible pool, wrong size,
   wrong label, missing or extra taint, burst max over the per-pool or aggregate
   limit, burst `min ≠ 0`, baseline drift, a burst node not Ready beyond 15
@@ -724,7 +798,9 @@ before any repository migration PR merges. Migrated repositories revert their
   `remove-burst` refusing non-empty pools, and mismatched `expected_sha`
   failing before any mutating call.
 - Trust-boundary fixture: a member that allows fork-PR workflows fails.
-- Cost report fixtures: deleted-node invoice items, missing invoice.
+- Cost report fixtures: deleted-node invoice items, missing invoice, AMD and
+  Intel burst lines (variant word before or after the size), and a line naming
+  both variants (unavailable).
 - Emergency Stop fence fixtures (Ruling 36): the exact manifest contract;
   Deploy installing it before Helm after a dry-run comparison (defaulted,
   failed or drifted results stop before Helm); mutator admission refusing a

@@ -10,6 +10,8 @@
 
 **Spec:** `docs/specs/2026-10-26-runner-burst-autoscaling-design.md` (Codex-approved, review 5). Read it in full before any task.
 
+> **2026-10-28 note (Ruling 38):** the burst pool names and sizes below are historical. DigitalOcean refused `s-8vcpu-16gb` in `sfo3` (regional capacity 422), so the primary burst pool is now `github-runners-burst-amd-16g` (`s-8vcpu-16gb-amd`, 0..6) and the fallback `github-runners-burst-intel-16g` (`s-8vcpu-16gb-intel`, 0..2); `github-runners-burst-16g` is removed. The spec section "Burst pool sizes (Ruling 38)" supersedes every burst name and size in this plan.
+
 ## Global Constraints
 
 - Baseline pool `github-runners-pool-16g`, `s-8vcpu-16gb`, `min=max=count=2`.
