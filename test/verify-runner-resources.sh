@@ -1503,6 +1503,7 @@ case "$joined" in
           || [ "${GH_SCENARIO}" = absent_workflow_dir ] \
           || [ "${GH_SCENARIO}" = absent_workflow_listed ] \
           || [ "${GH_SCENARIO}" = absent_workflow_listing_error ] \
+          || [ "${GH_SCENARIO}" = absent_workflow_capped ] \
           || [ "${GH_SCENARIO}" = head_drift ]; then
             if [ "${GH_SCENARIO}" = later_page_public_label ] && [ "$paginated" = true ]; then
                 printf '[]\n[{"id":4242,"name":"public-repo","full_name":"redducklabs/public-repo","owner":{"login":"redducklabs"},"private":false,"default_branch":"main","visibility":"public"}]\n'
@@ -1567,6 +1568,9 @@ case "$joined" in
             absent_workflow_listed)
                 printf '[{"name":"ci.yml","path":".github/workflows/ci.yml","type":"file"}]\n'
                 ;;
+            absent_workflow_capped)
+                jq -cn '[range(1000) | {name: "w\(.).yml", path: ".github/workflows/w\(.).yml", type: "file"}]'
+                ;;
             absent_workflow_dir)
                 printf '%s\n' 'gh: Not Found (HTTP 404)' >&2
                 exit 1
@@ -1583,7 +1587,7 @@ case "$joined" in
                 printf '%s\n' 'gh: Not Found (HTTP 404)' >&2
                 exit 1
                 ;;
-            absent_workflow_listed)
+            absent_workflow_listed | absent_workflow_capped)
                 printf '%s\n' 'gh: Server Error (HTTP 502)' >&2
                 exit 1
                 ;;
@@ -1952,7 +1956,7 @@ PY
             fail "Trust boundary does not skip a registered workflow proven absent at head (${absent_scenario//_/ })"
         fi
     done
-    for absent_scenario in absent_workflow_listed absent_workflow_listing_error; do
+    for absent_scenario in absent_workflow_listed absent_workflow_listing_error absent_workflow_capped; do
         if run_trust_fixture "$absent_scenario" "$FIXTURE_DIR/trust-output"; then
             fail "Trust boundary accepts an unreadable workflow (${absent_scenario//_/ })"
         elif ! grep -Fq 'could not read public workflow public-repo:.github/workflows/ci.yml' "$FIXTURE_DIR/trust-output"; then

@@ -149,7 +149,8 @@ resolve_branch_head() {
 # workflow_absent_at_head <repo> <sha> <workflow path>: succeeds only when a
 # listing of .github/workflows at <sha> proves <workflow path> is not there
 # (including a directory that does not exist at <sha>, HTTP 404). Fails on
-# any other read error, an unrecognized schema, or when the file is listed.
+# any other read error, an unrecognized schema, a possibly truncated listing
+# (1,000 or more entries), or when the file is listed.
 workflow_absent_at_head() {
     local repo_name=$1 sha=$2 workflow_path=$3 listing errors status=0
     errors=$(mktemp)
@@ -165,8 +166,11 @@ workflow_absent_at_head() {
         return 1
     fi
     rm -f "$errors"
+    # The contents API returns at most 1,000 directory entries; a listing of
+    # that size may be incomplete and proves nothing.
     jq -e --arg path "$workflow_path" '
         type == "array"
+        and length < 1000
         and all(.[]; (.path | type == "string"))
         and all(.[]; .path != $path)
     ' <<<"$listing" >/dev/null
