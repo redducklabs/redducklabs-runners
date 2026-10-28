@@ -18,7 +18,11 @@
 #      validate the manifest as density 2/4;
 #   3. with --acknowledge-emergency-stop, delete the Emergency Stop marker
 #      inside the identity bracket (Ruling 33; a no-op when there is none);
-#   4. unless already `density`: "helm upgrade" with exactly that file behind a
+#   4. unless already `density`: install the server-side Emergency Stop fence
+#      deploy/runner-emergency-stop-fence.yaml (Ruling 36: server dry run
+#      compared with the file, then compare none, re-admit `rollback`, apply,
+#      compare none, type-check readback), then
+#      "helm upgrade" with exactly that file behind a
 #      manifest-hash post-renderer, --history-max 100, inside the identity
 #      bracket (compare none, re-admit `rollback`, the upgrade, the Emergency
 #      Stop fence, compare arc:density:2/4);
@@ -145,6 +149,14 @@ if [ "$STATE" = density:2/4 ]; then
     echo "NOOP: ARC is already density 2/4 with no burst pools; rollback is a no-op"
     exit 0
 fi
+
+# Ruling 36: install the server-side Emergency Stop fence before the Helm
+# write (server dry run compared with the file, then a bracketed apply), as
+# Deploy `deploy` does.
+fleet_fence_dry_run || exit 1
+fleet_install_fence "$IDENTITIES" rollback
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
 
 mapfile -t OVERLAYS < <(fleet_density_overlays "$FLEET_DENSITY_VALUES" "$RUNNER_TOKEN")
 fleet_helm_bracket "$IDENTITIES" rollback none arc:density:2/4 \

@@ -14,7 +14,9 @@ state family, Helm history retention and the drain rollback target, Emergency
 Stop and Rebalance concurrency, the Rebalance skip predicate); 2026-10-27, PR
 #35 review Rulings 33-34 (the Emergency Stop fence; the rollback target is the
 committed `deploy/density-values.yaml`, independent of Helm history) and the
-removal of the alternate Phase B shape.
+removal of the alternate Phase B shape; 2026-10-27, PR #35 re-review Ruling 36
+(the server-side Emergency Stop fence, a ValidatingAdmissionPolicy keyed on
+the stop marker).
 
 ## Problem
 
@@ -345,13 +347,81 @@ reopen the fleet (PR #35 review finding 1). The marker closes that window:
   --history-max 100` and fails red. The shared bracket also refuses to write
   while the marker exists, including on cleanup paths that skip re-admission.
 
-Because the marker precedes the stop's Helm write, every interleaving is
-covered: a mutator write before the stop's write is overwritten by the stop; a
-mutator write after it sees the marker and re-stops. Recovery:
+Because the marker precedes the stop's Helm write, a mutator write before the
+stop's write is overwritten by the stop, and a mutator write after it sees the
+marker and re-stops, provided the writing process survives its Helm call; the
+server-side fence below covers a writer that does not. Recovery:
 `burst-stopped` by Deploy `deploy` with the acknowledgement (back to `burst`;
 to leave burst, then `drain`); `drain-stopped` by `remove-burst`, then Deploy
 `rollback` with the acknowledgement; `density-stopped` by `remove-burst` if
 closed burst pools exist, then Deploy `rollback` with the acknowledgement.
+
+**Server-side Emergency Stop fence (Ruling 36).** The post-write re-check
+above runs in the writing process after `helm` returns. A stale run that is
+cancelled, or loses its runner, after its Helm write and before that re-check
+leaves the fleet reopened (PR #35 re-review finding 1): the ConfigMap alone
+constrains nothing and no reconciler restores 0/0. The fence is therefore
+enforced by the API server:
+
+- `deploy/runner-emergency-stop-fence.yaml` defines the
+  `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy
+  `runner-fleet-emergency-stop-fence` (`paramKind` v1 ConfigMap,
+  `failurePolicy: Fail`; CREATE and UPDATE of `actions.github.com/v1alpha1`
+  `autoscalingrunnersets`, the only version ARC 0.14.2 serves, in namespace
+  `arc-runners`, `matchPolicy: Equivalent`) with the validation
+  `has(object.spec.maxRunners) && object.spec.maxRunners == 0 &&
+  (!has(object.spec.minRunners) || object.spec.minRunners == 0)`, and a
+  binding of the same name (`paramRef` name `runner-fleet-emergency-stop`,
+  namespace `arc-runners`, `parameterNotFoundAction: Allow`;
+  `validationActions: [Deny]`; the same namespace selector). With no marker
+  the binding passes every request; while the marker exists every write of an
+  AutoscalingRunnerSet that is not 0/0 is denied, whoever sends it.
+  Emergency Stop's own 0/0 write is allowed. The rule `autoscalingrunnersets`
+  does not match the status subresource, and DELETE is not matched. The file
+  is written in its defaulted form (`matchPolicy`, `objectSelector`, `scope`).
+- Deploy `deploy` (the bootstrap path) and `rollback` install it before their
+  Helm write, as the runner NetworkPolicy is installed: a server-side dry run
+  whose returned specs must equal the file (any defaulting difference fails
+  before anything is applied), then a server-side apply inside the identity
+  bracket (compare, re-admission, apply, compare), then a readback that the
+  live specs equal the file and that the policy's `status.typeChecking` for
+  its current generation carries no expression warnings.
+- Every other fleet mutator (Rebalance retirement, Scale Runners Phase C,
+  Deploy `drain`, Node Pool Sizing `create-burst`, `configure-expander`,
+  `enable-burst`, `set-burst-maxima`) is admitted only when the live policy
+  and binding exist with exactly the committed specs; missing or different
+  rejects with an error naming the fence and the recovery. While ARC is
+  `density` or `density-stopped` an absent fence is tolerated (the rollout
+  steps before the first Deploy `deploy`, and the recovery of a rollout that
+  failed before it); a present but different fence never is. Runner Status,
+  `record-density` (read-only) and `remove-burst` (for the reason it is
+  admitted under the marker: it deletes only empty closed pools and must stay
+  available to recover from `drain-stopped`) do not require it.
+- Emergency Stop, after writing the marker and before its Helm write, proves
+  the fence enforces: the policy and binding must equal the file, and a
+  server-side dry-run merge patch of the AutoscalingRunnerSet to
+  `maxRunners: 1` must be denied by this policy, retried for up to 30 seconds
+  while the API server's admission informer catches up with the marker.
+  Proving it before its own write means every write that lands after the
+  stop's 0/0 is denied. If the fence is absent or not enforcing, the stop is
+  still applied (the check never blocks it and delays it by at most those 30
+  seconds) and the run fails with an explicit message.
+- An acknowledging Deploy `deploy`/`rollback` deletes the marker and then
+  polls the same dry-run probe (up to 30 seconds) until it is allowed, before
+  any write, so its Helm write is not denied by a stale admission view. If the
+  fence still denies after 30 seconds the run fails before writing; the marker
+  is gone, so the operator re-dispatches without the acknowledgement. Polling
+  was chosen over letting the Helm write fail: a denied Helm upgrade inside
+  the bracket is a failed write that needs review, while a dry-run poll writes
+  nothing.
+- The client-side post-write re-check above stays as defense in depth.
+
+Residual risks: while the marker exists the API server also denies the ARC
+controller's own updates (finalizers, annotations) of an AutoscalingRunnerSet
+that is not yet 0/0; that is only the seconds between the marker write and the
+stop's own write. A credential that can delete the policy can remove the
+fence; the next admission of a mutator that requires it, and the next
+Emergency Stop, then fail red.
 
 **Helm history and the rollback target (Ruling 34).** Every Helm write in
 this repository passes `--history-max 100` (Ruling 27). A finite retention cap
@@ -400,7 +470,7 @@ Operation contract:
 |---|---|---|---|
 | `prepare-trust-boundary` | admission evidence committed | runner group only | group readback equals allow-list |
 | Node Pool Sizing `create-burst` | pool state valid with zero, one, or two closed burst pools; ARC `density` or `burst` | create/reconcile burst pools | readback of all three pools; baseline identity unchanged |
-| Deploy `deploy` | pool state valid; server-side dry runs pass | Helm upgrade to `burst` | ASRS/values/manifest equal `burst` |
+| Deploy `deploy` | pool state valid; server-side dry runs pass | Emergency Stop fence and runner NetworkPolicy, then Helm upgrade to `burst` | fence specs equal the file; ASRS/values/manifest equal `burst` |
 | Rebalance | pool state valid | delete idle burst-node EphemeralRunners | none required |
 | Node Pool Sizing `enable-burst` | ARC `burst` readback; expander readback | raise burst maxima to 6 and 2 | pools read back at 0/6 and 0/2 |
 | Scale Runners `acceptance-phase-c` | ARC `burst` or interrupted `burst-acceptance`; burst enabled | whole Phase C cycle in one run | ARC `burst` readback |
@@ -408,7 +478,7 @@ Operation contract:
 | Deploy `drain` | pool state valid; no Emergency Stop marker | Helm upgrade to `drain`; retire idle burst runners in process and wait | `drain` readback; no runner pod on a burst node; burst pools at zero nodes |
 | Node Pool Sizing `remove-burst` | ARC `drain`/`drain-stopped`, or `density`/`density-stopped` with only closed burst pools; no runner pods and zero nodes in burst pools, observed twice | reset expanders; delete burst pools | only baseline pool remains |
 | Deploy `rollback` | ARC `drain`, `drain-stopped`, `density-stopped` or `density`; burst pools absent; `deploy/density-values.yaml` validates as `density` (values and render) | Helm upgrade to the committed density values | `density` readback |
-| Emergency Stop | none (runs immediately in its own group) | stop marker, then Helm upgrade `--reuse-values` to 0/0 | a `stopped` state and marker readback |
+| Emergency Stop | none (runs immediately in its own group) | stop marker, fence enforcement proof (dry run, Ruling 36), then Helm upgrade `--reuse-values` to 0/0 | a `stopped` state and marker readback; red if the fence did not deny the probe |
 
 Every operation verifies `expected_sha` before its first mutating call, is
 idempotent when re-run on its own postcondition, and treats a partially
@@ -627,6 +697,14 @@ before any repository migration PR merges. Migrated repositories revert their
   failing before any mutating call.
 - Trust-boundary fixture: a member that allows fork-PR workflows fails.
 - Cost report fixtures: deleted-node invoice items, missing invoice.
+- Emergency Stop fence fixtures (Ruling 36): the exact manifest contract;
+  Deploy installing it before Helm after a dry-run comparison (defaulted,
+  failed or drifted results stop before Helm); mutator admission refusing a
+  missing or different fence; Emergency Stop's denial probe passing, absorbing
+  informer lag, and failing red with the stop still applied; an acknowledged
+  deploy waiting out informer lag; and a stale writer terminated right after a
+  Helm write that the fake API server denies, leaving the fleet at 0/0 (with a
+  control run where the server does not enforce, which reopens it).
 - actionlint, shellcheck, YAML parsing, Helm render, and `validate-config.yml`
   pass.
 

@@ -82,9 +82,46 @@ earlier fail-closed control and adds:
 - Emergency Stop leaves a classified `stopped` state (the base template at
   `minRunners=maxRunners=0`); only the recovery paths admit it, and every other
   operation rejects it.
-- Every Helm write keeps 100 revisions (`--history-max 100`), and Deploy
-  `drain` verifies the recorded `density` rollback revision before its upgrade,
-  so the fleet never enters `drain` without a usable rollback target.
+- Every Helm write keeps 100 revisions (`--history-max 100`). Rollback does not
+  depend on Helm history: Deploy `rollback` validates the committed, reviewed
+  `deploy/density-values.yaml` as the `density` contract (values and rendered
+  manifest) and upgrades the release to exactly that render, and Scale Runners
+  `record-density` verifies read-only that the live pre-burst release equals
+  it. Drain takes and verifies no revision.
+- Emergency Stop fence, client side (Ruling 33): Emergency Stop writes the
+  marker ConfigMap `arc-runners/runner-fleet-emergency-stop` before its Helm
+  write. While it exists the pool-state gate refuses every fleet mutator except
+  Deploy `deploy`/`rollback` dispatched with `acknowledge_emergency_stop=true`
+  (they delete the marker with uid/resourceVersion preconditions, inside the
+  identity bracket) and `remove-burst`; every fleet Helm write re-reads the
+  marker afterwards and re-applies 0/0 if it exists.
+- Emergency Stop fence, server side (Ruling 36): the client-side re-check runs
+  only if the writing process survives its Helm call. The
+  ValidatingAdmissionPolicy `runner-fleet-emergency-stop-fence`
+  (`deploy/runner-emergency-stop-fence.yaml`, `failurePolicy: Fail`, binding
+  `validationActions: [Deny]`) takes the marker as its parameter
+  (`paramRef`, `parameterNotFoundAction: Allow`): while the marker exists the
+  API server denies every CREATE or UPDATE of an AutoscalingRunnerSet in
+  `arc-runners` unless it keeps `maxRunners=0` and `minRunners` 0 or absent,
+  whoever sends it. A stale fleet run that is cancelled or loses its runner
+  right after its Helm write therefore cannot leave the fleet reopened.
+  Emergency Stop's own 0/0 write is allowed, the status subresource and DELETE
+  are not matched, and outside a stop the policy is inert. Deploy `deploy` and
+  `rollback` install it before their Helm write (server-side dry run whose
+  returned specs must equal the file, then a bracketed server-side apply and a
+  type-check readback); every other fleet mutator's admission requires the live
+  policy and binding to equal the file (an absent fence is tolerated only while
+  ARC is `density`/`density-stopped`, before the first burst deploy). After
+  writing the marker and before its Helm write, Emergency Stop proves the fence
+  enforces: a server-side dry-run patch of the AutoscalingRunnerSet to
+  `maxRunners=1` must be denied by this policy (retried for up to 30 s for the
+  admission informer); if not, the stop is still applied and the run fails.
+  Residual: while the marker exists the API server also denies the ARC
+  controller's own metadata updates of an AutoscalingRunnerSet that is not yet
+  0/0 (only in the seconds between the marker write and Emergency Stop's
+  write), and a deployment credential able to delete the policy can still
+  remove the fence; a missing or changed fence then fails the admission of
+  every later mutator that requires it, and Emergency Stop reports it red.
 - Runner pods marked `safe-to-evict: "false"`, so no node with a job is scaled
   down; idle-runner retirement deletes only EphemeralRunners with no job.
 - A read-only acceptance controller: Runner Acceptance Evidence runs only

@@ -86,7 +86,13 @@ Every Helm write keeps 100 revisions (`--history-max 100`). Emergency Stop
 writes the marker `arc-runners/runner-fleet-emergency-stop` before its Helm
 write; while it exists the fleet workflows refuse to run (except recovery with
 `acknowledge_emergency_stop=true`), and every fleet Helm write re-checks it
-afterwards and re-applies the stop. Every
+afterwards and re-applies the stop. Deploy `deploy` and `rollback` also
+install the server-side fence `deploy/runner-emergency-stop-fence.yaml` (a
+ValidatingAdmissionPolicy and binding: while the marker exists the API server
+denies any AutoscalingRunnerSet write that is not 0/0) before their Helm
+write, and every other fleet mutator requires it to equal the file; the
+deployment credential must be allowed to create cluster-scoped
+`admissionregistration.k8s.io` policies and bindings. Every
 operation is admitted by `scripts/verify-runner-pool-state.sh` under its own
 name. Deploy also installs the runner NetworkPolicy
 (`deploy/runner-network-policy.yaml`) before its Helm upgrade, and

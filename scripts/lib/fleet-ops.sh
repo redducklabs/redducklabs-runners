@@ -20,6 +20,14 @@
 # bracket also refuses to write while the marker exists, including for the
 # cleanup paths that skip re-admission (operation "-").
 #
+# Step 4 runs only if the writing process survives its Helm call. The
+# server-side fence (Ruling 36, deploy/runner-emergency-stop-fence.yaml) does
+# not depend on that: while the marker exists the API server denies any
+# AutoscalingRunnerSet write that is not 0/0, whoever sends it.
+# fleet_fence_dry_run / fleet_install_fence install it (Deploy `deploy` and
+# `rollback`); fleet_fence_probe / fleet_fence_wait observe whether it is
+# enforcing (Emergency Stop, and the acknowledgement after deleting the marker).
+#
 # Clocks are injectable for tests: NOW_CMD (default "date +%s") prints epoch
 # seconds and SLEEP_CMD (default "sleep") is called with a number of seconds.
 
@@ -37,6 +45,13 @@ FLEET_STOP_MARKER="runner-fleet-emergency-stop"
 # Ruling 34: the reviewed density values Deploy `rollback` upgrades to
 # (relative to the repository root, where the workflows run).
 FLEET_DENSITY_VALUES="deploy/density-values.yaml"
+# Ruling 36: the server-side Emergency Stop fence (relative to the repository root).
+FLEET_FENCE_NAME="runner-fleet-emergency-stop-fence"
+FLEET_FENCE_FILE="deploy/runner-emergency-stop-fence.yaml"
+FLEET_FENCE_CHECK="${FLEET_LIB_DIR}/runner_stop_fence.py"
+# How long a fence probe waits for the API server's admission informer to
+# observe a marker write or delete.
+FLEET_FENCE_WAIT_SECONDS=30
 # Every ARC state the fleet workflows can classify, as contract:min/max.
 # The stopped states (Ruling 26) are what Emergency Stop leaves: a base
 # template with minRunners=maxRunners=0.
@@ -260,6 +275,13 @@ fleet_acknowledge_stop() {
         return 1
     fi
     rm -f "$body"
+    # Ruling 36: the API server's admission informer may still hold the marker
+    # for a moment. Wait (dry runs only) until the fence allows a non-zero
+    # write, so the Helm write is not denied by that stale view.
+    if ! fleet_fence_wait allowed; then
+        echo "ERROR: the Emergency Stop marker of run ${run_id} was deleted, but the fence still denies writes; nothing was written. Re-dispatch (the marker is gone, so no acknowledgement is needed)" >&2
+        return 1
+    fi
     fleet_compare "$identities" none >/dev/null
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -270,7 +292,119 @@ fleet_acknowledge_stop() {
     echo "STOP_MARKER: acknowledged and deleted the marker of Emergency Stop run ${run_id}"
 }
 
-# fleet_density_overlays <values-file> <token>: the fixed overlays the
+# fleet_fence_probe: a server-side dry-run patch of the AutoscalingRunnerSet
+# to maxRunners=1 (nothing is written). Prints "denied" when the fence denied
+# it and "allowed" when the API server accepted it; returns 1 when the probe
+# could not run or failed for any other reason.
+fleet_fence_probe() {
+    local asrs name out rc
+    if ! asrs=$(kubectl get autoscalingrunnersets.actions.github.com -n "$FLEET_NAMESPACE" -o json) \
+        || ! name=$(jq -er 'if (.items | length) == 1 then .items[0].metadata.name | strings else error("not exactly one") end' <<<"$asrs"); then
+        echo "ERROR: STOP_FENCE_PROBE: could not read exactly one AutoscalingRunnerSet in ${FLEET_NAMESPACE}" >&2
+        return 1
+    fi
+    rc=0
+    out=$(kubectl patch autoscalingrunnersets.actions.github.com "$name" -n "$FLEET_NAMESPACE" \
+        --type merge -p '{"spec":{"maxRunners":1}}' --dry-run=server -o name 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo allowed
+        return 0
+    fi
+    if grep -qF "ValidatingAdmissionPolicy '${FLEET_FENCE_NAME}'" <<<"$out" && grep -qF "denied request" <<<"$out"; then
+        echo denied
+        return 0
+    fi
+    echo "ERROR: STOP_FENCE_PROBE: the dry-run patch failed for another reason: $(head -c 300 <<<"$out")" >&2
+    return 1
+}
+
+# fleet_fence_wait <denied|allowed>: probes until the result is the wanted one,
+# for up to FLEET_FENCE_WAIT_SECONDS (the admission informer's lag after a
+# marker write or delete). Returns 1 on timeout or a failed probe.
+fleet_fence_wait() {
+    local want=$1 now deadline result
+    now=$(fleet_now) || return 1
+    deadline=$((now + FLEET_FENCE_WAIT_SECONDS))
+    while :; do
+        result=$(fleet_fence_probe) || return 1
+        if [ "$result" = "$want" ]; then
+            echo "STOP_FENCE_PROBE: a dry-run maxRunners=1 write is ${want}"
+            return 0
+        fi
+        now=$(fleet_now) || return 1
+        if [ "$now" -ge "$deadline" ]; then
+            echo "ERROR: STOP_FENCE_PROBE: a dry-run maxRunners=1 write is still ${result} after ${FLEET_FENCE_WAIT_SECONDS}s (expected ${want})" >&2
+            return 1
+        fi
+        fleet_sleep 2
+    done
+}
+
+# fleet_fence_dry_run: server-side dry run of the committed fence. The objects
+# the API server would store must carry exactly the file's specs, so a spec
+# the server would default or rewrite fails here, before anything is applied.
+fleet_fence_dry_run() {
+    local work rc=0
+    work=$(umask 077 && mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fence-dry-run.XXXXXX") || return 1
+    if ! kubectl apply --server-side --dry-run=server -f "$FLEET_FENCE_FILE" \
+        --field-manager=redducklabs-runner-deploy -o json > "$work"; then
+        echo "ERROR: the server-side dry run of ${FLEET_FENCE_FILE} failed; nothing was applied" >&2
+        rm -f "$work"
+        return 1
+    fi
+    python3 -B "$FLEET_FENCE_CHECK" compare-dry-run "$work" || rc=$?
+    rm -f "$work"
+    return "$rc"
+}
+
+# fleet_install_fence <identities> <operation>: applies the committed fence
+# server-side inside the identity bracket (compare none, re-admit <operation>,
+# the apply, compare none; the fence is not part of the identity snapshot),
+# then requires the live specs to equal the file and the policy to report type
+# checking of its current generation without expression warnings (polled for
+# FLEET_FENCE_WAIT_SECONDS). Run fleet_fence_dry_run first. No retry: a second
+# apply would run outside the bracket.
+fleet_install_fence() {
+    local identities=$1 operation=$2 rc now deadline
+    fleet_compare "$identities" none >/dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: identity check before applying the Emergency Stop fence failed (exit ${rc}); nothing was applied" >&2
+        [ "$rc" -eq 3 ] && return 3
+        return 1
+    fi
+    if ! fleet_admit "$operation" >/dev/null; then
+        echo "ERROR: ${operation} is no longer admitted; the Emergency Stop fence was not applied" >&2
+        return 1
+    fi
+    if ! kubectl apply --server-side -f "$FLEET_FENCE_FILE" --field-manager=redducklabs-runner-deploy; then
+        echo "ERROR: applying ${FLEET_FENCE_FILE} failed" >&2
+        return 1
+    fi
+    fleet_compare "$identities" none >/dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: identity check after applying the Emergency Stop fence failed (exit ${rc}); stopping" >&2
+        [ "$rc" -eq 3 ] && return 3
+        return 1
+    fi
+    now=$(fleet_now) || return 1
+    deadline=$((now + FLEET_FENCE_WAIT_SECONDS))
+    while :; do
+        rc=0
+        python3 -B "$FLEET_FENCE_CHECK" verify --require-type-checked || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        [ "$rc" -eq 75 ] || return 1
+        now=$(fleet_now) || return 1
+        if [ "$now" -ge "$deadline" ]; then
+            echo "ERROR: the ValidatingAdmissionPolicy ${FLEET_FENCE_NAME} did not report type checking within ${FLEET_FENCE_WAIT_SECONDS}s" >&2
+            return 1
+        fi
+        fleet_sleep 2
+    done
+}
+
+# fleet_density_overlays <values-file> <token>:the fixed overlays the
 # production release is rendered with (as Deploy and drain), one per line.
 fleet_density_overlays() {
     printf '%s\n' \

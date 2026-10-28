@@ -59,12 +59,42 @@ knobs.fail_helm (a token) makes that write fail unchanged; knobs.cancel_after
 (a token) applies the write, creates "cancel-requested" and exits 143, the way
 a cancelled job kills the step after the write. knobs.admission
 ("drop-annotation" | "annotation-true") mutates server dry-run responses.
+
+Server-side Emergency Stop fence (Ruling 36,
+deploy/runner-emergency-stop-fence.yaml). The fake API server stores the
+ValidatingAdmissionPolicy and binding (scenario "fence": "installed", the
+default, "absent", or "drift" for a binding whose validationActions is Warn)
+and serves them to "kubectl get validatingadmissionpolicies... / ...bindings
+<name> --ignore-not-found -o json" (knobs.fence_read "fail" fails both).
+  kubectl apply --server-side [--dry-run=server -o json] -f <fence file>
+    dry run: prints the List the server would store (knobs.fence_dry_run
+    "fail" | "defaulted"); apply: stores it ("apply-fence"; knobs.fence_apply
+    "drift" stores a Warn binding; knobs.fence_type_check "warning" reports an
+    expression warning, "pending" reports type checking only after two reads).
+While the stored fence equals the committed file and the API server's view of
+the marker shows one, every Helm write that would not leave ARC at 0/0 is
+denied and changes nothing ("<token>:denied"); Emergency Stop's 0/0 is allowed.
+knobs.fence_unenforced true models an API server without the policy in force.
+The view lags the marker by knobs.fence_lag reads (each fence probe or Helm
+write admission is one read) after Emergency Stop's marker write or the
+acknowledged delete; an injected stop (knobs.stop_before) is complete, so its
+marker is already visible.
+  kubectl patch autoscalingrunnersets.actions.github.com <name> -n arc-runners
+    --type merge -p <maxRunners=1> --dry-run=server -o name
+    the fence probe ("probe:denied" | "probe:allowed"): denied with the
+    policy's message, or accepted; changes nothing (knobs.fence_probe "error"
+    fails it for another reason).
+knobs.term_after <token>: right after that Helm call returns (applied or
+denied), creates "cancel-requested" and sends SIGTERM to the process that ran
+helm ("writer-terminated"): the stale writer dies before its client-side
+fence runs.
 """
 
 import datetime
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -97,6 +127,16 @@ BURST_FAMILY = ("arc-burst", "arc-burst-acceptance-8", "arc-burst-acceptance-4")
 MIN_LAYER = {"8": "arc-burst-acceptance-8", "4": "arc-burst-acceptance-4", "2": "arc-burst"}
 DENSITY_VALUES = "deploy/density-values.yaml"
 STOP_MARKER = "runner-fleet-emergency-stop"
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+FENCE_FILE = "deploy/runner-emergency-stop-fence.yaml"
+FENCE_NAME = "runner-fleet-emergency-stop-fence"
+FENCE_KINDS = {"policy": "ValidatingAdmissionPolicy", "binding": "ValidatingAdmissionPolicyBinding"}
+FENCE_RESOURCES = {"validatingadmissionpolicies.admissionregistration.k8s.io": "policy",
+                   "validatingadmissionpolicybindings.admissionregistration.k8s.io": "binding"}
+PROBE_PATCH = '{"spec":{"maxRunners":1}}'
+DENIAL = ("ValidatingAdmissionPolicy 'runner-fleet-emergency-stop-fence' with binding "
+          "'runner-fleet-emergency-stop-fence' denied request: runner-fleet-emergency-stop-fence: "
+          "an Emergency Stop is in effect")
 
 
 def p(directory, name):
@@ -369,6 +409,132 @@ def write_token(args):
     return "helm-upgrade:drain" if option(args, "-f") else None
 
 
+def committed_fence(path=None):
+    with open(path or os.path.join(REPO, FENCE_FILE), encoding="utf-8") as stream:
+        documents = [d for d in yaml.safe_load_all(stream) if d]
+    return {role: next(d for d in documents if d["kind"] == kind) for role, kind in FENCE_KINDS.items()}
+
+
+def drifted_fence(fence):
+    fence = json.loads(json.dumps(fence))
+    fence["binding"]["spec"]["validationActions"] = ["Warn"]
+    return fence
+
+
+def fence_enforcing(world):
+    """The stored fence equals the committed file and the server enforces it."""
+    if world["knobs"].get("fence_unenforced"):
+        return False
+    fence = world.get("fence") or {}
+    expected = committed_fence()
+    return all(fence.get(role) is not None and fence[role]["spec"] == expected[role]["spec"] for role in FENCE_KINDS)
+
+
+def marker_changed(world, before):
+    """The admission view keeps the old marker state for knobs.fence_lag reads."""
+    world["informer_stale"] = before
+    world["informer_lag"] = int(world["knobs"].get("fence_lag", 0))
+
+
+def marker_visible(world):
+    """The marker as the API server's admission view shows it (one read)."""
+    if world.get("informer_lag", 0) > 0:
+        world["informer_lag"] -= 1
+        return world["informer_stale"]
+    return bool(world.get("stop_marker"))
+
+
+def fence_denies(world):
+    return fence_enforcing(world) and marker_visible(world)
+
+
+def fence_object(world, role):
+    document = json.loads(json.dumps(world["fence"][role]))
+    metadata = document.setdefault("metadata", {})
+    metadata.update(uid=f"fence-{role}-uid", generation=world.get("fence_generation", 1), resourceVersion="7")
+    if role == "policy":
+        knob = world["knobs"].get("fence_type_check")
+        if knob == "pending" and world.get("fence_status_reads", 0) < 2:
+            world["fence_status_reads"] = world.get("fence_status_reads", 0) + 1
+            document["status"] = {}
+        else:
+            typing = {"expressionWarnings": [{"fieldRef": "spec.validations[0].expression",
+                                              "warning": "fixture warning"}]} if knob == "warning" else {}
+            document["status"] = {"observedGeneration": metadata["generation"], "typeChecking": typing}
+    return document
+
+
+def fence_command(directory, world, args):
+    """The fence objects: reads, server dry run, apply, and the dry-run probe."""
+    knobs = world["knobs"]
+    if args[:1] == ["get"] and len(args) > 2 and args[1] in FENCE_RESOURCES:
+        if args[2:] != [FENCE_NAME, "--ignore-not-found", "-o", "json"]:
+            print(f"fake kubectl: unexpected fence read {args}", file=sys.stderr)
+            return 1
+        if knobs.get("fence_read") == "fail":
+            print("fake kubectl: injected fence read failure", file=sys.stderr)
+            return 1
+        role = FENCE_RESOURCES[args[1]]
+        if (world.get("fence") or {}).get(role) is not None:
+            print(json.dumps(fence_object(world, role)))
+            save(directory, "fleet.json", world)
+        return 0
+    if args[:1] == ["apply"] and option(args, "-f") == FENCE_FILE:
+        if "--server-side" not in args or "--field-manager=redducklabs-runner-deploy" not in args:
+            print(f"fake kubectl: the fence must be applied server-side by redducklabs-runner-deploy {args}",
+                  file=sys.stderr)
+            return 1
+        committed = committed_fence(option(args, "-f"))
+        if "--dry-run=server" in args:
+            if knobs.get("fence_dry_run") == "fail":
+                print("fake kubectl: injected server dry-run failure for the fence", file=sys.stderr)
+                return 1
+            if option(args, "-o") != "json":
+                print("fake kubectl: the fence dry run must print the objects (-o json)", file=sys.stderr)
+                return 1
+            items = [json.loads(json.dumps(committed[role])) for role in FENCE_KINDS]
+            if knobs.get("fence_dry_run") == "defaulted":
+                # The server would store a field differently from the file.
+                items[0]["spec"]["matchConstraints"]["resourceRules"][0]["scope"] = "*"
+            print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
+            return 0
+        world["fence"] = drifted_fence(committed) if knobs.get("fence_apply") == "drift" else committed
+        world["fence_generation"] = world.get("fence_generation", 1) + 1
+        log(directory, "apply-fence")
+        save(directory, "fleet.json", world)
+        print(f"validatingadmissionpolicy.admissionregistration.k8s.io/{FENCE_NAME} serverside-applied")
+        print(f"validatingadmissionpolicybinding.admissionregistration.k8s.io/{FENCE_NAME} serverside-applied")
+        return 0
+    if args[:2] == ["patch", "autoscalingrunnersets.actions.github.com"]:
+        expected = ["patch", "autoscalingrunnersets.actions.github.com", "redducklabs-runners", "-n", "arc-runners",
+                    "--type", "merge", "-p", PROBE_PATCH, "--dry-run=server", "-o", "name"]
+        if args != expected:
+            log(directory, "unexpected-kubectl:" + " ".join(args))
+            print(f"fake kubectl: unexpected AutoscalingRunnerSet patch {args}", file=sys.stderr)
+            return 1
+        if knobs.get("fence_probe") == "error":
+            print("Error from server (InternalError): fixture probe failure", file=sys.stderr)
+            return 1
+        denied = fence_denies(world)
+        save(directory, "fleet.json", world)
+        log(directory, "probe:denied" if denied else "probe:allowed")
+        if denied:
+            print(f'The autoscalingrunnersets "redducklabs-runners" is invalid: : {DENIAL}', file=sys.stderr)
+            return 1
+        print("autoscalingrunnerset.actions.github.com/redducklabs-runners")
+        return 0
+    return NOT_HANDLED
+
+
+def terminate_writer(directory):
+    """knobs.term_after: SIGTERM the process that ran helm (the fake helm's parent)."""
+    open(p(directory, "cancel-requested"), "w").close()
+    with open(f"/proc/{os.getppid()}/stat", encoding="utf-8") as stream:
+        writer = int(stream.read().rsplit(")", 1)[1].split()[1])
+    log(directory, "writer-terminated")
+    os.kill(writer, signal.SIGTERM)
+
+
 def marker_document(marker):
     return {"apiVersion": "v1", "kind": "ConfigMap",
             "metadata": {"name": STOP_MARKER, "namespace": "arc-runners", "uid": marker["uid"],
@@ -380,6 +546,7 @@ def set_marker(world, data):
     """Emergency Stop's marker write (an update keeps the uid, bumps the resourceVersion)."""
     world["rv"] = world.get("rv", 100) + 1
     marker = world.get("stop_marker")
+    marker_changed(world, bool(marker))
     uid = marker["uid"] if marker else f"stop-marker-uid-{world['rv']}"
     world["stop_marker"] = {"uid": uid, "resourceVersion": world["rv"], "data": data}
 
@@ -388,6 +555,8 @@ def inject_stop(directory, world):
     """knobs.stop_before: a complete Emergency Stop (marker, then 0/0) that lands
     after the run's final admission and immediately before its Helm write."""
     set_marker(world, {"run-id": "injected", "time": "2026-10-27T00:00:00Z"})
+    # A complete Emergency Stop waited until the fence enforced its marker.
+    world["informer_lag"] = 0
     log(directory, "injected-stop-marker")
     stop(world, 100)
     log(directory, "injected-stop")
@@ -400,6 +569,11 @@ def helm(directory, world, args):
     if token is not None and token != "helm-upgrade:stopped" and world["knobs"].get("stop_before") == token \
             and not world.get("injected"):
         inject_stop(directory, world)
+    if token is not None and token != "helm-upgrade:stopped" and fence_denies(world):
+        log(directory, f"{token}:denied")
+        save(directory, "fleet.json", world)
+        print(f"Error: UPGRADE FAILED: {DENIAL}", file=sys.stderr)
+        return 1
     if args[:2] == ["upgrade", "redducklabs-runners"]:
         history_max = history_max_of(args)
         if "--reuse-values" in args and "maxRunners=0" in args:
@@ -562,6 +736,7 @@ def stop_marker_command(directory, world, args):
             print("Error from server (Conflict): Precondition failed", file=sys.stderr)
             return 1
         world["stop_marker"] = None
+        marker_changed(world, True)
         log(directory, "stop-marker:delete")
         write_world(directory, world)
         return 0
@@ -570,6 +745,9 @@ def stop_marker_command(directory, world, args):
 
 def kubectl(directory, world, args):
     handled = stop_marker_command(directory, world, args)
+    if handled != NOT_HANDLED:
+        return handled
+    handled = fence_command(directory, world, args)
     if handled != NOT_HANDLED:
         return handled
     if args[:1] == ["apply"] and option(args, "-f") == "deploy/runner-network-policy.yaml":
@@ -649,8 +827,11 @@ def init(directory, scenario):
     shutil.copyfile(os.path.join(LAYERS, "arc-burst", "helm-manifest.yaml"), p(directory, "template-burst.yaml"))
     shutil.copyfile(os.path.join(LAYERS, "arc-drain", "helm-manifest.yaml"), p(directory, "template-drain.yaml"))
     shutil.copyfile(os.path.join(LAYERS, "arc-density", "helm-manifest.yaml"), p(directory, "template-density.yaml"))
+    world["fence"] = {"installed": committed_fence(), "drift": drifted_fence(committed_fence()),
+                      "absent": {"policy": None, "binding": None}}[scenario.get("fence", "installed")]
     if scenario.get("stop_marker"):
         set_marker(world, scenario["stop_marker"])
+        world["informer_lag"] = 0
     write_world(directory, world)
     return 0
 
@@ -668,7 +849,11 @@ def main():
         write_world(directory, world)
         return 0
     if tool == "helm":
-        return helm(directory, world, args)
+        token = write_token(args)
+        rc = helm(directory, world, args)
+        if token is not None and world["knobs"].get("term_after") == token:
+            terminate_writer(directory)
+        return rc
     if tool == "kubectl":
         return kubectl(directory, world, args)
     return NOT_HANDLED

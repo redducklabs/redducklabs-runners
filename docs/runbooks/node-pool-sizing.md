@@ -69,15 +69,15 @@ run except as described in "Emergency Stop".
 | Scale Runners `action=record-density` | read-only | `density` | verifies the live release is density 2/4 and equals the render of `deploy/density-values.yaml` (the rollback target) |
 | Node Pool Sizing `create-burst` (`apply`) | create pools closed | `density`/`burst`, 0–2 closed pools | both burst pools at `min=max=count=0` |
 | Node Pool Sizing `configure-expander` (`apply`) | expander | both pools present | `--expanders priority,random` and the priority ConfigMap |
-| Deploy GitHub Runners `operation=deploy` (co-tenancy accepted; `acknowledge_emergency_stop` to recover from a stop) | runner NetworkPolicy, then Helm to `burst` | `density`/`burst`/`burst-stopped`, pools present, expander configured | runner network policy set valid (checked before Helm); ASRS, values and manifest equal `burst` |
+| Deploy GitHub Runners `operation=deploy` (co-tenancy accepted; `acknowledge_emergency_stop` to recover from a stop) | Emergency Stop fence and runner NetworkPolicy, then Helm to `burst` | `density`/`burst`/`burst-stopped`, pools present, expander configured | fence equals `deploy/runner-emergency-stop-fence.yaml` and runner network policy set valid (both checked before Helm); ASRS, values and manifest equal `burst` |
 | Node Pool Sizing `enable-burst` (`apply`) | open pools | `burst`; stages 0/0+0/0, 0/6+0/0, 0/6+0/2; runner network policy set valid | primary 0/6, then fallback 0/2 |
 | Node Pool Sizing `set-burst-maxima` (`primary_max`, `fallback_max`, `apply`) | move allowance | `burst`, both pools | lowers the donor first, reads back, then raises |
 | Rebalance Runners (hourly; dispatch with `expected_sha`) | retire idle burst runners | `burst`, `drain`; the stopped states or the Emergency Stop marker (notice only); runner network policy set valid | deletes idle burst-node EphemeralRunners only; skips with a notice while any fleet mutator is queued or running |
 | Scale Runners `action=acceptance-phase-c` | acceptance Phase C | `burst` (or interrupted `burst-acceptance`), burst enabled, runner network policy set valid | one lock-owning run; ends at `burst`; uploads `phase-c-evidence` |
 | Deploy GitHub Runners `operation=drain` | Helm to `drain`, wait | `burst`, `burst-acceptance`, `drain`, `burst-stopped` (no stop marker) | no runner pod on a burst node; burst pools at zero nodes |
 | Node Pool Sizing `remove-burst` (`apply`) | delete pools | `drain`/`drain-stopped`, or `density`/`density-stopped` with closed empty pools (also while the stop marker exists) | expanders reset; only baseline remains |
-| Deploy GitHub Runners `operation=rollback` (`acknowledge_emergency_stop` to recover from a stop) | Helm upgrade to `deploy/density-values.yaml` | `drain`/`drain-stopped`/`density-stopped`/`density`, burst pools absent, the committed values validate as `density` | `density` readback, trust readback |
-| Emergency Stop Runners (`confirm=STOP-RUNNERS`) | stop marker, then Helm `--reuse-values` to 0/0 | any release (runs immediately, own group) | a `stopped` state and marker readback and the recovery to use |
+| Deploy GitHub Runners `operation=rollback` (`acknowledge_emergency_stop` to recover from a stop) | Emergency Stop fence, then Helm upgrade to `deploy/density-values.yaml` | `drain`/`drain-stopped`/`density-stopped`/`density`, burst pools absent, the committed values validate as `density` | `density` readback, trust readback |
+| Emergency Stop Runners (`confirm=STOP-RUNNERS`) | stop marker, fence enforcement proof (dry-run denial), then Helm `--reuse-values` to 0/0 | any release (runs immediately, own group) | a `stopped` state and marker readback and the recovery to use; red if the fence did not deny the probe |
 | Runner Acceptance Evidence (`phase`, run IDs, `expected_sha`) | read-only evidence | any | acceptance verdict; cancels only its verified probe |
 | Runner Status | read-only | any | pools, burst node count per pool, ARC state |
 
@@ -96,6 +96,16 @@ the period (DigitalOcean does not itemize per pool).
   found an Emergency Stop in effect (or could not read the stop marker)
   re-applied 0/0 and failed. The fleet is stopped; recover as in "Emergency
   Stop". Do not re-dispatch the failed operation without the acknowledgement.
+  With the server-side fence installed the stale write itself is usually
+  denied (Helm reports `ValidatingAdmissionPolicy
+  'runner-fleet-emergency-stop-fence' ... denied request`); the run still
+  re-applies 0/0 and fails the same way.
+- **Emergency Stop fence missing or different.** Admission fails with
+  `requires the Emergency Stop fence runner-fleet-emergency-stop-fence`. Run
+  Deploy `deploy` (from `density`, `burst` or `burst-stopped`) or `rollback`
+  (from the drain/density states, burst pools absent); both reinstall
+  `deploy/runner-emergency-stop-fence.yaml`. From `drain-stopped` run
+  `remove-burst` first (it does not require the fence), then `rollback`.
 - **`SCALE_TO_ZERO_REJECTED`.** If DigitalOcean refuses a closed (`0/0`) burst
   pool, `create-burst` stops and creates nothing further. Stop the rollout and
   re-plan. Never work around it with `min_nodes=1`: that is a permanent cost
@@ -135,7 +145,8 @@ Rollout record below.
    then Node Pool Sizing `enable-burst` with `apply`.
 5. **Acceptance** phases A–E below.
 6. **Migrate repositories** only after Phase E prints
-   `READY_FOR_MIGRATION=true`, one PR per repository: `keel` CI,
+   `READY_FOR_MIGRATION=true` and the Emergency Stop drill below passed, one
+   PR per repository: `keel` CI,
    `aurolegal.ai` Class A workflows (and re-enable its fleet watchdog
    schedule), `superfood-shred` CI.
 
@@ -307,9 +318,36 @@ Phase A network probe: the evidence workflow reads the `network-probe` job log
 connection that succeeds or is refused (the path is open) fails `A-network`, as
 does a target that does not resolve to the kind of object the spec names.
 
-Only Phase E's `READY_FOR_MIGRATION=true` authorizes repository migration. A
-successful Phase D proves recovery and leaves the fleet drained. If any phase
-fails, run Rollback before any migration PR merges.
+**Emergency Stop drill (after Phase E, before any migration).** Prove the
+server-side fence (Ruling 36) live while only the acceptance probe uses the
+fleet (no probe running):
+
+```bash
+# Read-only: the fence Deploy installed equals the committed file.
+python3 -B scripts/lib/runner_stop_fence.py verify --require-type-checked
+gh workflow run emergency-stop.yml -R "$FLEET" -f confirm=STOP-RUNNERS \
+  -f reason="acceptance drill: server-side stop fence"
+STOP=$(latest emergency-stop.yml)
+gh run watch "$STOP" -R "$FLEET" --exit-status
+gh run view "$STOP" -R "$FLEET" --log | grep -E 'STOP_FENCE_PROBE|API server denies'
+# Recover: burst-stopped -> burst.
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=deploy \
+  -f accept_privileged_runner_co_tenancy=true -f acknowledge_emergency_stop=true -f expected_sha="$SHA"
+```
+
+The drill passes only if the Emergency Stop run is green, its "Verify stop
+fence" step logs `STOP_FENCE_PROBE: a dry-run maxRunners=1 write is denied` and
+"The API server denies non-zero runner writes while the stop marker exists",
+Runner Status shows `burst-stopped` with the marker, and the acknowledged
+Deploy then restores `burst` (its log shows `STOP_FENCE_PROBE: ... allowed`
+after the marker delete). Record both run IDs in the Rollout record. A red
+"Report fence failure" step fails the drill: stop, fix the fence by a reviewed
+change, and repeat the drill.
+
+Only Phase E's `READY_FOR_MIGRATION=true`, followed by a passing Emergency Stop
+drill, authorizes repository migration. A successful Phase D proves recovery
+and leaves the fleet drained. If any phase fails, run Rollback before any
+migration PR merges.
 
 ## Rollback
 
@@ -360,6 +398,25 @@ does not wait for a running Deploy `drain` or Scale Runners Phase C (both hold
   `STOP_FENCE`. A run that reaches its next identity comparison or admission
   first fails there and changes nothing further; its always-run Phase C cleanup
   also refuses.
+- **Server-side fence (Ruling 36).** The marker is also the parameter of the
+  ValidatingAdmissionPolicy `runner-fleet-emergency-stop-fence`
+  (`deploy/runner-emergency-stop-fence.yaml`). While it exists the API server
+  denies every AutoscalingRunnerSet write that is not 0/0, so a run cancelled
+  (or whose runner is lost) right after a stale Helm write cannot leave the
+  fleet reopened. Deploy `deploy` and `rollback` install the fence before
+  their Helm write; every other fleet workflow except Runner Status,
+  `record-density` and `remove-burst` refuses to run while it is missing or
+  differs from the file (an absent fence is tolerated while ARC is `density`
+  or `density-stopped`, before the first burst deploy). Emergency Stop, after
+  writing the marker and before its Helm write, proves the fence enforces (a
+  server-side dry-run patch to `maxRunners=1` must be denied, retried for up
+  to 30 s). If it is missing or not enforcing the stop is still applied and
+  the run fails at "Report fence failure": run Deploy `deploy` (or `rollback`)
+  with `acknowledge_emergency_stop=true` to install it, then re-dispatch
+  Emergency Stop if the fleet must stay stopped. An acknowledging run waits up
+  to 30 s after deleting the marker until the fence allows writes; if it
+  still denies, the run fails before writing: re-dispatch it (the marker is
+  gone, so no acknowledgement is needed).
 
 Treat those failures as expected and recover from the stopped state:
 

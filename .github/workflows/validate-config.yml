@@ -56,7 +56,9 @@ jobs:
 
           for f in files:
               try:
-                  yaml.safe_load(open(f, encoding='utf-8'))
+                  # deploy/runner-emergency-stop-fence.yaml holds two
+                  # documents (the policy and its binding).
+                  list(yaml.safe_load_all(open(f, encoding='utf-8')))
                   print(f'  OK   {f}')
               except Exception as e:
                   failures.append((f, e))

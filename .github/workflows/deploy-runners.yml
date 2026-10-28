@@ -23,6 +23,16 @@ name: Deploy GitHub Runners
 # it immediately re-applies 0/0 with --reuse-values and fails. Every Helm write
 # keeps 100 revisions (--history-max 100).
 #
+# Server-side fence (Ruling 36): `deploy` and `rollback` install
+# deploy/runner-emergency-stop-fence.yaml (server-side dry run compared with the
+# file, then a bracketed server-side apply) before their Helm write. While the
+# marker exists the API server then denies every AutoscalingRunnerSet write
+# that is not 0/0, so a run cancelled after a stale Helm write cannot leave the
+# fleet reopened. An acknowledging run waits (dry runs only, up to 30 s) until
+# the fence allows a non-zero write after deleting the marker; if it still
+# denies, the run fails before writing and is re-dispatched. Every other fleet
+# mutator's admission requires the fence to equal the file.
+#
 # Every run verifies expected_sha first, admits the live state with
 # scripts/verify-runner-pool-state.sh --operation <op>, and brackets each Helm
 # write with the identity contract: an exact comparison and a fresh admission
@@ -940,6 +950,37 @@ jobs:
           # shellcheck source=/dev/null
           source scripts/lib/fleet-ops.sh
           fleet_acknowledge_stop "${RUNNER_TEMP}/pool-identities.json" deploy
+
+      - name: Dry-run Emergency Stop fence
+        run: |
+          # Ruling 36 (spec "Emergency Stop fence"): the server-side fence
+          # deploy/runner-emergency-stop-fence.yaml (a ValidatingAdmissionPolicy
+          # and its binding) is installed before the Helm upgrade. The API
+          # server validates both objects first, and the objects it would store
+          # must keep the file's specs exactly, so a spec the server would
+          # default or rewrite fails here, before anything is applied.
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_fence_dry_run
+
+      - name: Apply Emergency Stop fence
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          # Re-check the SHA in this job, immediately before the step that mutates.
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
+          # Identity bracket (compare none, re-admit deploy, server-side apply,
+          # compare none), then the live specs must equal the file and the
+          # policy must be type checked without expression warnings. No retry:
+          # a second apply would run outside the identity bracket.
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_install_fence "${RUNNER_TEMP}/pool-identities.json" deploy
+          echo "✅ Emergency Stop fence applied"
 
       - name: Dry-run runner network policy
         run: |

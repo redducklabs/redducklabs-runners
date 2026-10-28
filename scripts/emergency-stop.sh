@@ -46,6 +46,20 @@ if ! jq -n --arg time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '{
         data: {"run-id": "local-script", time: $time}}' \
     | kubectl apply --server-side --force-conflicts --field-manager=redducklabs-emergency-stop -f -; then
     echo -e "${RED}Could not write the stop marker; continuing with the stop. An in-flight fleet workflow could reopen runners: dispatch the Emergency Stop workflow too.${NC}"
+    MARKER_FAILED=true
+fi
+
+# Server-side fence (Ruling 36): before the Helm write, prove the API server
+# denies non-zero runner writes while the marker exists (a dry-run patch to
+# maxRunners=1 must be denied, retried for up to 30 s). Never blocks the stop.
+FENCE_OK=false
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/fleet-ops.sh disable=SC1091
+if [ "${MARKER_FAILED:-false}" != true ] \
+    && (cd "$REPO_DIR" && python3 -B scripts/lib/runner_stop_fence.py verify) \
+    && (cd "$REPO_DIR" && source scripts/lib/fleet-ops.sh && fleet_fence_wait denied); then
+    FENCE_OK=true
 fi
 
 # Scale to zero
@@ -102,9 +116,14 @@ echo "  burst-stopped:   Deploy GitHub Runners operation=deploy acknowledge_emer
 echo "  drain-stopped:   Node Pool Sizing remove-burst, then Deploy operation=rollback acknowledge_emergency_stop=true"
 echo "  density-stopped: Deploy GitHub Runners operation=rollback acknowledge_emergency_stop=true"
 echo ""
+if [ "$FENCE_OK" != true ]; then
+    echo -e "${RED}The stop was applied, but the server-side fence (deploy/runner-emergency-stop-fence.yaml) did not prove it enforces it: a stale fleet run could still reopen runners. Dispatch the Emergency Stop workflow after Deploy has installed the fence.${NC}"
+fi
 echo -e "${YELLOW}Remember to investigate what caused the emergency before restarting.${NC}"
 echo ""
 echo "Common investigation commands:"
 echo "  kubectl describe pods -n arc-runners"
 echo "  kubectl logs -n arc-systems -l app.kubernetes.io/name=controller"
 echo "  ./scale-runners.sh status"
+# The run ends red when the fence was not proven (the stop itself was applied).
+[ "$FENCE_OK" = true ] || exit 1

@@ -433,6 +433,26 @@ pool_state_dir() {
     dir="${WORK_DIR}/pool-state/${key}"
     if [ ! -d "$dir" ]; then
         mkdir -p "$dir"
+        # Ruling 36: by default the server-side fence is installed exactly as
+        # committed (layers may replace or patch fence-policy.json and
+        # fence-binding.json; an empty file is an absent object).
+        python3 - "${REPO_ROOT}/deploy/runner-emergency-stop-fence.yaml" "$dir" <<'PY' || return 1
+import json
+import sys
+
+import yaml
+
+documents = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+for document in documents:
+    document["metadata"].update(uid="fence-uid", generation=1, resourceVersion="7")
+    name = "fence-policy.json"
+    if document["kind"] == "ValidatingAdmissionPolicy":
+        document["status"] = {"observedGeneration": 1, "typeChecking": {}}
+    else:
+        name = "fence-binding.json"
+    with open(f"{sys.argv[2]}/{name}", "w", encoding="utf-8") as stream:
+        json.dump(document, stream, indent=2)
+PY
         for layer in "$@"; do
             materialize_layer "$layer" "$dir" || return 1
         done
@@ -452,6 +472,8 @@ get ciliumnetworkpolicies.cilium.io -n arc-runners -o json|cnp.json
 get ciliumclusterwidenetworkpolicies.cilium.io -o json|ccnp.json
 get pods -n arc-runners -o json|pods.json
 get configmap runner-fleet-emergency-stop -n arc-runners --ignore-not-found -o json|stop-marker.json
+get validatingadmissionpolicies.admissionregistration.k8s.io runner-fleet-emergency-stop-fence --ignore-not-found -o json|fence-policy.json
+get validatingadmissionpolicybindings.admissionregistration.k8s.io runner-fleet-emergency-stop-fence --ignore-not-found -o json|fence-binding.json
 ROUTES
         # No Emergency Stop marker (Ruling 33): the read prints nothing.
         : > "${dir}/stop-marker.json"
@@ -1749,9 +1771,9 @@ assert_deploy_ops() {
     dir=$(fleet_dir '{"arc": "arc-density", "runners": [{"name": "base0", "node": "baseline-a"}, {"name": "base1", "node": "baseline-b"}]}' base arc-density pools-closed) \
         || { fail "deploy fixture could not be built"; return; }
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"deploy\",\"accept_privileged_runner_co_tenancy\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "deploy from density" $? 0 apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" - "$dir"
+    expect_fleet "deploy from density" $? 0 apply-fence,apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" - "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"deploy\",\"accept_privileged_runner_co_tenancy\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "deploy re-run on burst" $? 0 apply-netpol,helm-upgrade:burst arc-burst - - "$dir"
+    expect_fleet "deploy re-run on burst" $? 0 apply-fence,apply-netpol,helm-upgrade:burst arc-burst - - "$dir"
 
     # Non-canonical committed bounds never reach Helm.
     for label in "2/10|doc['maxRunners'] = 10" "4/20|doc['minRunners'] = 4" "8/20|doc['minRunners'] = 8"; do
@@ -1881,7 +1903,7 @@ PY
     expect_fleet "drain with no density revision in a >100-revision history" $? 0 helm-upgrade:drain arc-drain "STEP Drain runners: success" "DRAIN_COMPLETE" "$dir"
     remove_burst_pools "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback after more than 100 revisions" $? 0 helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    expect_fleet "rollback after more than 100 revisions" $? 0 apply-fence,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
     if grep -q -- '--values deploy/density-values.yaml' "${dir}/helm.calls" \
         && grep -E '^upgrade .*--values deploy/density-values.yaml' "${dir}/helm.calls" | grep -q -- '--history-max 100' \
         && grep -E '^upgrade .*--values deploy/density-values.yaml' "${dir}/helm.calls" | grep -q -- '--post-renderer' \
@@ -1913,7 +1935,7 @@ PY
     done
     dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}}" base arc-drain)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
-    expect_fleet "rollback from drain without pools" $? 0 helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    expect_fleet "rollback from drain without pools" $? 0 apply-fence,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
     expect_fleet "rollback re-run on density" $? 0 - arc-density "STEP Roll back to committed density values: success" "rollback is a no-op" "$dir"
 
@@ -1931,7 +1953,7 @@ PY
     # The checkout moves after validate-inputs: each mutating job re-checks the SHA first.
     dir=$(fleet_dir '{"arc": "arc-density"}' base arc-density pools-closed)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"deploy\",\"accept_privileged_runner_co_tenancy\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}" "$FLEET_SHA" "$REPO_ROOT" "$FLEET_OTHER_SHA"
-    expect_fleet "deploy with the checkout moved after validation" $? 1 - arc-density "STEP Apply runner network policy: failure" "does not match checked-out SHA" "$dir"
+    expect_fleet "deploy with the checkout moved after validation" $? 1 - arc-density "STEP Apply Emergency Stop fence: failure" "does not match checked-out SHA" "$dir"
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS" "$FLEET_SHA" "$REPO_ROOT" "$FLEET_OTHER_SHA"
     expect_fleet "drain with the checkout moved after validation" $? 1 - arc-burst "STEP Drain runners: failure" "checked-out SHA changed" "$dir"
@@ -2384,7 +2406,7 @@ PY
     # acknowledge_emergency_stop=true, deleting the marker first.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open) || { fail "emergency fixture could not be built"; return; }
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop from burst (marker before the Helm write)" $? 0 stop-marker:set,helm-upgrade:stopped arc-burst-stopped "STEP Read back stopped state: success" - "$dir"
+    expect_fleet "emergency stop from burst (marker before the Helm write)" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-burst-stopped "STEP Read back stopped state: success" - "$dir"
     if [ "$(jq '.runners | length' "${dir}/fleet.json")" = 0 ] \
         && fleet_summary | grep -q 'arc=burst-stopped' \
         && fleet_summary | grep -q 'operation=deploy' && fleet_summary | grep -q 'acknowledge_emergency_stop=true' \
@@ -2405,7 +2427,7 @@ PY
     expect_fleet "deploy without the acknowledgement is refused while the marker exists" $? 1 - arc-burst-stopped \
         "STEP Admit pool state and record identities: failure" "refused while the Emergency Stop marker" "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
-    expect_fleet "deploy with acknowledge_emergency_stop recovers burst-stopped to burst" $? 0 stop-marker:delete,apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" "STOP_MARKER: acknowledged and deleted" "$dir"
+    expect_fleet "deploy with acknowledge_emergency_stop recovers burst-stopped to burst" $? 0 stop-marker:delete,probe:allowed,apply-fence,apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" "STOP_MARKER: acknowledged and deleted" "$dir"
     if [ "$(jq -c '.stop_marker' "${dir}/fleet.json")" = null ]; then
         pass "the acknowledged deploy deleted the stop marker"
     else
@@ -2415,7 +2437,7 @@ PY
     # Emergency Stop from burst: Deploy `drain` is refused while the marker exists.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop before a drain" $? 0 stop-marker:set,helm-upgrade:stopped arc-burst-stopped - - "$dir"
+    expect_fleet "emergency stop before a drain" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-burst-stopped - - "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
     expect_fleet "drain is refused while the marker exists" $? 1 - arc-burst-stopped "STEP Admit pool state and record identities: failure" "refused while the Emergency Stop marker" "$dir"
     # Without a marker (Ruling 26 unchanged), drain still starts from burst-stopped.
@@ -2427,7 +2449,7 @@ PY
     # acknowledged rollback still work.
     dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-drain pools-open)
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop during drain" $? 0 stop-marker:set,helm-upgrade:stopped arc-drain-stopped "STEP Read back stopped state: success" - "$dir"
+    expect_fleet "emergency stop during drain" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-drain-stopped "STEP Read back stopped state: success" - "$dir"
     if fleet_summary | grep -q 'arc=drain-stopped' && fleet_summary | grep -q 'remove-burst' \
         && fleet_summary | grep -q 'operation=rollback'; then
         pass "emergency stop during drain: the summary names drain-stopped and the remove-burst/rollback recovery"
@@ -2447,15 +2469,15 @@ PY
     expect_fleet "rollback without the acknowledgement is refused while the marker exists" $? 1 - arc-drain-stopped \
         "STEP Admit rollback state and record identities: failure" "refused while the Emergency Stop marker" "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$ROLLBACK_ACK_INPUTS"
-    expect_fleet "acknowledged rollback from drain-stopped" $? 0 stop-marker:delete,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    expect_fleet "acknowledged rollback from drain-stopped" $? 0 stop-marker:delete,probe:allowed,apply-fence,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
 
     # Emergency Stop on density without pools -> density-stopped; an
     # acknowledged rollback restores density.
     dir=$(fleet_dir '{"arc": "arc-density", "history": [{"revision": 12, "arc": "arc-density", "status": "deployed"}]}' valid-density-no-burst)
     run_emergency_stop "$dir"
-    expect_fleet "emergency stop on density" $? 0 stop-marker:set,helm-upgrade:stopped arc-density-stopped - - "$dir"
+    expect_fleet "emergency stop on density" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-density-stopped - - "$dir"
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$ROLLBACK_ACK_INPUTS"
-    expect_fleet "acknowledged rollback from density-stopped" $? 0 stop-marker:delete,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    expect_fleet "acknowledged rollback from density-stopped" $? 0 stop-marker:delete,probe:allowed,apply-fence,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
 
     # Rebalance on a stopped fleet: admitted, notice, nothing retired.
     dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
@@ -2497,7 +2519,7 @@ PY
     echo 1 > "${dir}/runner-pods.json.rc"
     run_emergency_stop "$dir"
     rc=$?
-    if [ "$rc" -ne 0 ] && [ "$(fleet_mutations "$dir")" = stop-marker:set,helm-upgrade:stopped ] \
+    if [ "$rc" -ne 0 ] && [ "$(fleet_mutations "$dir")" = stop-marker:set,probe:denied,helm-upgrade:stopped ] \
         && grep -qx 'STEP Verify shutdown: failure' "$FLEET_OUT" \
         && ! grep -q 'All runner pods have been terminated' "$FLEET_ERR"; then
         pass "emergency stop: failed runner-pod reads fail the run (stop still applied, never counted as 0 pods)"
@@ -3322,7 +3344,7 @@ PY
     dir=$(fleet_dir '{"arc": "arc-density"}' base arc-density pools-closed netpol-missing) \
         || { fail "network policy deploy fixture could not be built"; return; }
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$deploy_inputs"
-    expect_fleet "first deploy with no network policy installs it, then Helm" $? 0 apply-netpol,helm-upgrade:burst arc-burst \
+    expect_fleet "first deploy with no network policy installs it, then Helm" $? 0 apply-fence,apply-netpol,helm-upgrade:burst arc-burst \
         "STEP Verify runner network policy set: success" - "$dir"
     if [ "$(jq -r '[.items[].metadata.name] | join(",")' "${dir}/networkpolicies.json")" = redducklabs-runner-isolation ]; then
         pass "first deploy: the live policy set holds exactly the runner policy"
@@ -3332,7 +3354,7 @@ PY
 
     dir=$(fleet_dir '{"arc": "arc-density", "knobs": {"netpol_dry_run": "fail"}}' base arc-density pools-closed netpol-missing)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$deploy_inputs"
-    expect_fleet "network policy dry-run failure" $? 1 - arc-density "STEP Dry-run runner network policy: failure" - "$dir"
+    expect_fleet "network policy dry-run failure" $? 1 apply-fence arc-density "STEP Dry-run runner network policy: failure" - "$dir"
     if grep -q -- '--dry-run=server -f deploy/runner-network-policy.yaml' "${dir}/kubectl.calls" \
         && ! grep -q '^upgrade' "${dir}/helm.calls"; then
         pass "network policy dry-run failure: no apply and no Helm upgrade"
@@ -3344,7 +3366,7 @@ PY
     # run before the real apply, so the policy never lands half-valid.
     dir=$(fleet_dir '{"arc": "arc-density", "knobs": {"netpol_dry_run": "defaulted"}}' base arc-density pools-closed netpol-missing)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$deploy_inputs"
-    expect_fleet "network policy dry run returns a defaulted spec" $? 1 - arc-density "STEP Dry-run runner network policy: failure" \
+    expect_fleet "network policy dry run returns a defaulted spec" $? 1 apply-fence arc-density "STEP Dry-run runner network policy: failure" \
         "the server would store a different runner NetworkPolicy spec" "$dir"
     if grep -q -- '--dry-run=server -f deploy/runner-network-policy.yaml' "${dir}/kubectl.calls" \
         && [ "$(grep -c '^apply --server-side -f deploy/runner-network-policy.yaml' "${dir}/kubectl.calls")" = 0 ] \
@@ -3357,12 +3379,12 @@ PY
 
     dir=$(fleet_dir '{"arc": "arc-density"}' base arc-density pools-closed netpol-second-vpc-egress)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$deploy_inputs"
-    expect_fleet "policy set invalid after apply" $? 1 apply-netpol arc-density "STEP Verify runner network policy set: failure" \
+    expect_fleet "policy set invalid after apply" $? 1 apply-fence,apply-netpol arc-density "STEP Verify runner network policy set: failure" \
         "found ['allow-vpc', 'redducklabs-runner-isolation']" "$dir"
 
     dir=$(fleet_dir '{"arc": "arc-density", "knobs": {"netpol_apply": "drift"}}' base arc-density pools-closed netpol-missing)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$deploy_inputs"
-    expect_fleet "applied policy reads back different" $? 1 apply-netpol arc-density "STEP Verify runner network policy set: failure" \
+    expect_fleet "applied policy reads back different" $? 1 apply-fence,apply-netpol arc-density "STEP Verify runner network policy set: failure" \
         "spec differs" "$dir"
 }
 
@@ -3463,15 +3485,15 @@ PY
     # Codex PR #35 finding 1, the regression: a completed Emergency Stop lands
     # after the run's final admission and before its Helm write. The old run
     # must re-stop and fail, and the fleet must end 0/0.
-    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:burst\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:burst\", \"fence_unenforced\": true}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
     expect_fenced "deploy whose Helm write lands after a completed stop" $? \
-        apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped "$dir"
-    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:drain\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-burst pools-open)
+        apply-fence,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped "$dir"
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:drain\", \"fence_unenforced\": true}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-burst pools-open)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
     expect_fenced "drain whose Helm write lands after a completed stop" $? \
         injected-stop-marker,injected-stop,helm-upgrade:drain,helm-upgrade:stopped arc-drain-stopped "$dir"
-    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:min=8\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:min=8\", \"fence_unenforced\": true}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
     run_fleet_workflow "$SCALE_WORKFLOW" "$dir" "{\"action\":\"acceptance-phase-c\",\"expected_sha\":\"${FLEET_SHA}\"}"
     expect_fenced "Phase C whose Helm write lands after a completed stop" $? \
         injected-stop-marker,injected-stop,helm-upgrade:stopped arc-burst-stopped "$dir"
@@ -3480,19 +3502,19 @@ PY
     else
         fail "Phase C after a stop: restore step $(grep 'Restore burst' "$FLEET_OUT")"
     fi
-    dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"knobs\": {\"stop_before\": \"helm-upgrade:density\"}}" base arc-drain)
+    dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"knobs\": {\"stop_before\": \"helm-upgrade:density\", \"fence_unenforced\": true}}" base arc-drain)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
     expect_fenced "rollback whose Helm write lands after a completed stop" $? \
-        injected-stop-marker,injected-stop,helm-upgrade:density,helm-upgrade:stopped arc-density-stopped "$dir"
+        apply-fence,injected-stop-marker,injected-stop,helm-upgrade:density,helm-upgrade:stopped arc-density-stopped "$dir"
     # A newer stop after the acknowledged delete is not acknowledged by it.
-    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}, \"knobs\": {\"stop_before\": \"helm-upgrade:burst\"}}" base arc-burst-stopped pools-open)
+    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}, \"knobs\": {\"stop_before\": \"helm-upgrade:burst\", \"fence_unenforced\": true}}" base arc-burst-stopped pools-open)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
     expect_fenced "acknowledged deploy with a newer stop before its Helm write" $? \
-        stop-marker:delete,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped "$dir"
+        stop-marker:delete,probe:allowed,apply-fence,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped "$dir"
     # The marker cannot be read after the write: fail closed (re-stop).
     dir=$(fleet_dir '{"arc": "arc-burst", "knobs": {"marker_read": "fail-after-write"}}' base arc-burst pools-open)
     run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
-    expect_fleet "deploy whose post-write marker read fails" $? 1 apply-netpol,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped - "could not be read after the Helm write" "$dir"
+    expect_fleet "deploy whose post-write marker read fails" $? 1 apply-fence,apply-netpol,helm-upgrade:burst,helm-upgrade:stopped arc-burst-stopped - "could not be read after the Helm write" "$dir"
 
     # A newer stop rewrites the marker between the acknowledging read and the
     # delete: the guarded delete fails and nothing is written.
@@ -3535,6 +3557,314 @@ PY
 }
 
 
+# ---------------------------------------------------------------------------
+# Server-side Emergency Stop fence (Ruling 36): the ValidatingAdmissionPolicy
+# and binding in deploy/runner-emergency-stop-fence.yaml make the API server
+# deny every AutoscalingRunnerSet write that is not 0/0 while the stop marker
+# exists. The fleet fake enforces it (test/fixtures/fleet/fleet_sim.py), so a
+# stale writer terminated right after its Helm call is denied by the "server".
+# ---------------------------------------------------------------------------
+
+# fence_gate_dir <mode> <layers...>: a pool-state dir whose fence objects are
+# changed: absent, policy-only, binding-drift, policy-drift, type-warning,
+# read-fail.
+fence_gate_dir() {
+    local mode=$1 src dir
+    shift
+    src=$(pool_state_dir "$@") || return 1
+    dir=$(mktemp -d "${WORK_DIR}/fence.XXXXXX")
+    cp -r "${src}/." "${dir}/"
+    rm -f "$dir"/*.calls
+    case "$mode" in
+        absent) : > "${dir}/fence-policy.json"; : > "${dir}/fence-binding.json" ;;
+        policy-only) : > "${dir}/fence-binding.json" ;;
+        binding-drift)
+            jq '.spec.validationActions = ["Warn"]' "${dir}/fence-binding.json" > "${dir}/next" && mv "${dir}/next" "${dir}/fence-binding.json" ;;
+        policy-drift)
+            jq '.spec.validations[0].expression = "true"' "${dir}/fence-policy.json" > "${dir}/next" && mv "${dir}/next" "${dir}/fence-policy.json" ;;
+        type-warning)
+            jq '.status.typeChecking.expressionWarnings = [{"fieldRef": "spec.validations[0].expression", "warning": "fixture"}]' \
+                "${dir}/fence-policy.json" > "${dir}/next" && mv "${dir}/next" "${dir}/fence-policy.json" ;;
+        read-fail) echo 1 > "${dir}/fence-policy.json.rc" ;;
+    esac
+    printf '%s\n' "$dir"
+}
+
+# expect_fence_gate <label> <dir> <operation> <exit> <stderr-or-STATE-line>
+expect_fence_gate() {
+    local label=$1 dir=$2 operation=$3 expected=$4 text=$5 rc
+    run_gate "$dir" --operation "$operation"
+    rc=$?
+    if [ "$rc" -ne "$expected" ]; then
+        fail "${label}: ${operation} exit ${rc}, expected ${expected} ($(head -c 300 "$GATE_ERR" | tr '\n' ' '))"
+    elif [ "$expected" -eq 0 ] && grep -qxF -- "$text" "$GATE_OUT"; then
+        pass "${label}: ${operation} admitted"
+    elif [ "$expected" -ne 0 ] && grep -qF -- "$text" "$GATE_ERR"; then
+        pass "${label}: ${operation} rejected (${text})"
+    else
+        fail "${label}: ${operation} lacks '${text}' ($(head -c 300 "$GATE_ERR" | tr '\n' ' ') $(tr '\n' ' ' < "$GATE_OUT"))"
+    fi
+}
+
+assert_server_fence() {
+    info "Checking the server-side Emergency Stop fence (Ruling 36)..."
+    local dir op rc mode marker='"stop_marker": {"run-id": "4242", "time": "2026-10-27T10:00:00Z"}'
+    local fenced='requires the Emergency Stop fence runner-fleet-emergency-stop-fence'
+
+    # The exact manifest contract.
+    if (cd "$REPO_ROOT" && python3 -) <<'PY'
+import yaml
+
+documents = [d for d in yaml.safe_load_all(open("deploy/runner-emergency-stop-fence.yaml", encoding="utf-8")) if d]
+assert len(documents) == 2, len(documents)
+policy, binding = documents
+selector = {"matchLabels": {"kubernetes.io/metadata.name": "arc-runners"}}
+assert policy == {
+    "apiVersion": "admissionregistration.k8s.io/v1",
+    "kind": "ValidatingAdmissionPolicy",
+    "metadata": {"name": "runner-fleet-emergency-stop-fence"},
+    "spec": {
+        "failurePolicy": "Fail",
+        "paramKind": {"apiVersion": "v1", "kind": "ConfigMap"},
+        "matchConstraints": {
+            "matchPolicy": "Equivalent",
+            "namespaceSelector": selector,
+            "objectSelector": {},
+            "resourceRules": [{
+                "apiGroups": ["actions.github.com"], "apiVersions": ["v1alpha1"],
+                "operations": ["CREATE", "UPDATE"], "resources": ["autoscalingrunnersets"], "scope": "Namespaced",
+            }],
+        },
+        "validations": [{
+            "expression": "has(object.spec.maxRunners) && object.spec.maxRunners == 0 && "
+                          "(!has(object.spec.minRunners) || object.spec.minRunners == 0)",
+            "message": policy["spec"]["validations"][0]["message"],
+            "reason": "Forbidden",
+        }],
+    },
+}, policy
+message = policy["spec"]["validations"][0]["message"]
+assert message.startswith("runner-fleet-emergency-stop-fence: ") and "arc-runners/runner-fleet-emergency-stop" in message
+assert binding == {
+    "apiVersion": "admissionregistration.k8s.io/v1",
+    "kind": "ValidatingAdmissionPolicyBinding",
+    "metadata": {"name": "runner-fleet-emergency-stop-fence"},
+    "spec": {
+        "policyName": "runner-fleet-emergency-stop-fence",
+        "paramRef": {"name": "runner-fleet-emergency-stop", "namespace": "arc-runners",
+                     "parameterNotFoundAction": "Allow"},
+        "validationActions": ["Deny"],
+        "matchResources": {"matchPolicy": "Equivalent", "namespaceSelector": selector, "objectSelector": {}},
+    },
+}, binding
+PY
+    then
+        pass "fence manifest: VAP (ConfigMap param, Fail, ASRS v1alpha1 CREATE/UPDATE in arc-runners, 0/0 rule) and Deny binding on the marker with parameterNotFoundAction Allow"
+    else
+        fail "deploy/runner-emergency-stop-fence.yaml does not match the Ruling 36 contract"
+    fi
+
+    # The rule itself, evaluated over the shapes ARC writes (a CEL-equivalent
+    # check of the committed expression's three clauses).
+    if python3 - <<'PY'
+def allowed(spec):
+    return "maxRunners" in spec and spec["maxRunners"] == 0 and ("minRunners" not in spec or spec["minRunners"] == 0)
+
+assert allowed({"minRunners": 0, "maxRunners": 0}) and allowed({"maxRunners": 0})
+for spec in ({"minRunners": 2, "maxRunners": 20}, {"minRunners": 0, "maxRunners": 1}, {"minRunners": 2, "maxRunners": 0}, {}):
+    assert not allowed(spec), spec
+PY
+    then
+        pass "fence rule: only 0/0 (or max 0 with min absent) passes while the marker exists"
+    else
+        fail "fence rule truth table is wrong"
+    fi
+
+    # Workflow static order: Deploy installs the fence after the
+    # acknowledgement and before the network policy, the re-admission and Helm.
+    if (cd "$REPO_ROOT" && python3 - "$DEPLOY_WORKFLOW" "$EMERGENCY_WORKFLOW") <<'PY'
+import sys
+
+import yaml
+
+steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["jobs"]["deploy"]["steps"]
+names = [step["name"] for step in steps]
+order = ["Acknowledge Emergency Stop", "Dry-run Emergency Stop fence", "Apply Emergency Stop fence",
+         "Dry-run runner network policy", "Re-admit immediately before Helm", "Deploy runners"]
+indices = [names.index(name) for name in order]
+assert indices == sorted(indices), names
+assert "fleet_fence_dry_run" in steps[indices[1]]["run"]
+apply = steps[indices[2]]["run"]
+assert apply.index("git rev-parse HEAD") < apply.index('fleet_install_fence "${RUNNER_TEMP}/pool-identities.json" deploy')
+stop = yaml.safe_load(open(sys.argv[2], encoding="utf-8"))["jobs"]["emergency-stop"]["steps"]
+names = [step.get("name") for step in stop]
+assert names.index("Write stop marker") < names.index("Verify stop fence") < names.index("Scale to zero")
+fence = stop[names.index("Verify stop fence")]
+assert fence.get("continue-on-error") is True, "the fence check must never block the stop"
+assert "fleet_fence_wait denied" in fence["run"] and "runner_stop_fence.py verify" in fence["run"]
+report = stop[names.index("Report fence failure")]
+assert report["if"] == "always() && steps.fence.outputs.fence_failed == 'true'"
+assert stop[names.index("Scale to zero")]["if"] == "steps.backup.outputs.deployment_exists == 'true'"
+config = yaml.safe_load(open(".github/workflows/validate-config.yml", encoding="utf-8"))
+syntax = next(step["run"] for job in config["jobs"].values() for step in job["steps"]
+              if step.get("name") == "Validate YAML syntax")
+assert "yaml.safe_load_all(" in syntax and "deploy/*.yaml" in syntax, "the two-document fence must be parsed"
+PY
+    then
+        pass "workflows: Deploy installs the fence before the NetworkPolicy and Helm; Emergency Stop proves it between the marker and its write, never blocking the stop"
+    else
+        fail "fence step order in Deploy or Emergency Stop is wrong"
+    fi
+
+    # Gate: mutators require the exact fence; status, record-density, deploy,
+    # rollback and remove-burst do not.
+    dir=$(fence_gate_dir absent valid-burst-mixed) || { fail "fence gate fixture could not be built"; return; }
+    for op in drain rebalance; do
+        expect_fence_gate "fence absent on burst" "$dir" "$op" 1 "$fenced"
+    done
+    expect_fence_gate "fence absent on burst" "$dir" deploy 0 "STATE: arc=burst pools=both burst=open"
+    expect_fence_gate "fence absent on burst" "$dir" status 0 "STATE: arc=burst pools=both burst=open"
+    if ! grep -q validatingadmission "${dir}/kubectl.calls" 2>/dev/null; then
+        pass "fence absent on burst: status does not read the fence"
+    else
+        fail "status read the fence objects"
+    fi
+    dir=$(fence_gate_dir absent base arc-burst pools-open)
+    for op in set-burst-maxima acceptance-phase-c configure-expander create-burst; do
+        expect_fence_gate "fence absent on burst (pools open)" "$dir" "$op" 1 "$fenced"
+    done
+    dir=$(fence_gate_dir absent enable-stage-closed)
+    expect_fence_gate "fence absent on burst (closed stage)" "$dir" enable-burst 1 "$fenced"
+    dir=$(fence_gate_dir absent valid-density-no-burst)
+    expect_fence_gate "fence absent before the first burst deploy" "$dir" create-burst 0 "STATE: arc=density pools=none burst=closed"
+    expect_fence_gate "fence absent before the first burst deploy" "$dir" record-density 0 "STATE: arc=density pools=none burst=closed"
+    dir=$(fence_gate_dir absent drain-for-remove)
+    expect_fence_gate "fence absent on drain" "$dir" remove-burst 0 "STATE: arc=drain pools=both burst=open"
+    for mode in policy-only binding-drift policy-drift type-warning; do
+        dir=$(fence_gate_dir "$mode" valid-burst-mixed)
+        expect_fence_gate "fence ${mode}" "$dir" drain 1 "$fenced"
+        dir=$(fence_gate_dir "$mode" valid-density-no-burst)
+        expect_fence_gate "fence ${mode} before the first burst deploy" "$dir" create-burst 1 "$fenced"
+    done
+    dir=$(fence_gate_dir binding-drift valid-burst-mixed)
+    expect_fence_gate "fence binding-drift" "$dir" drain 1 "ValidatingAdmissionPolicyBinding runner-fleet-emergency-stop-fence spec differs"
+    dir=$(fence_gate_dir read-fail valid-burst-mixed)
+    expect_fence_gate "fence read failure" "$dir" drain 1 "REJECTED: Emergency Stop fence:"
+    expect_fence_gate "fence read failure" "$dir" status 0 "STATE: arc=burst pools=both burst=open"
+
+    # A drain run refuses at admission when the fence is missing.
+    dir=$(fleet_dir '{"arc": "arc-burst", "fence": "absent"}' base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
+    expect_fleet "drain with the fence missing" $? 1 - arc-burst "STEP Admit pool state and record identities: failure" "$fenced" "$dir"
+    dir=$(fleet_dir '{"arc": "arc-burst", "fence": "drift"}' base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
+    expect_fleet "drain with a drifted fence" $? 1 - arc-burst "STEP Admit pool state and record identities: failure" "$fenced" "$dir"
+
+    # Deploy installs the fence (bootstrap) with a dry-run comparison first.
+    dir=$(fleet_dir '{"arc": "arc-density", "fence": "absent"}' base arc-density pools-closed)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "deploy installs a missing fence before Helm" $? 0 apply-fence,apply-netpol,helm-upgrade:burst arc-burst "STEP Apply Emergency Stop fence: success" - "$dir"
+    if [ "$(grep -n -- '--dry-run=server -f deploy/runner-emergency-stop-fence.yaml' "${dir}/kubectl.calls" | cut -d: -f1)" \
+        -lt "$(grep -n -- '^apply --server-side -f deploy/runner-emergency-stop-fence.yaml' "${dir}/kubectl.calls" | cut -d: -f1)" ] \
+        && grep -q 'FENCE: runner-fleet-emergency-stop-fence (policy and binding) matches deploy/runner-emergency-stop-fence.yaml; type checked without expression warnings' "$FLEET_ERR"; then
+        pass "deploy: the fence dry run precedes the apply, and the type-checked readback passed"
+    else
+        fail "deploy fence calls out of order or no type-checked readback ($(grep -n 'fence' "${dir}/kubectl.calls" | head -n 4 | tr '\n' ' '))"
+    fi
+    run_gate "$dir" --operation drain
+    if [ "$?" -eq 0 ]; then
+        pass "after deploy installed it, drain admission accepts the fence"
+    else
+        fail "drain after the fence install: $(head -c 300 "$GATE_ERR")"
+    fi
+    for mode in fail defaulted; do
+        dir=$(fleet_dir "{\"arc\": \"arc-density\", \"fence\": \"absent\", \"knobs\": {\"fence_dry_run\": \"${mode}\"}}" base arc-density pools-closed)
+        run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+        expect_fleet "deploy with a fence dry run that ${mode}s" $? 1 - arc-density "STEP Dry-run Emergency Stop fence: failure" - "$dir"
+    done
+    if grep -qF '"scope": "*"' "$FLEET_ERR" && grep -qF 'the server would store a different ValidatingAdmissionPolicy spec' "$FLEET_ERR"; then
+        pass "defaulted fence dry run: the diff is printed and nothing is applied"
+    else
+        fail "defaulted fence dry run: no diff or wrong message"
+    fi
+    dir=$(fleet_dir '{"arc": "arc-density", "fence": "absent", "knobs": {"fence_apply": "drift"}}' base arc-density pools-closed)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "deploy whose applied fence reads back different" $? 1 apply-fence arc-density "STEP Apply Emergency Stop fence: failure" "spec differs" "$dir"
+    dir=$(fleet_dir '{"arc": "arc-density", "fence": "absent", "knobs": {"fence_type_check": "warning"}}' base arc-density pools-closed)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "deploy whose fence reports a type-check warning" $? 1 apply-fence arc-density "STEP Apply Emergency Stop fence: failure" "type-checking expression warning" "$dir"
+    dir=$(fleet_dir '{"arc": "arc-density", "fence": "absent", "knobs": {"fence_type_check": "pending"}}' base arc-density pools-closed)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "deploy waits for the fence's type checking" $? 0 apply-fence,apply-netpol,helm-upgrade:burst arc-burst - "type checking of its current generation is not reported yet" "$dir"
+    # Rollback (the other installer) from drain-stopped with a drifted fence.
+    dir=$(fleet_dir "{\"arc\": \"arc-drain-stopped\", \"fence\": \"drift\", ${marker}}" base arc-drain-stopped)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$ROLLBACK_ACK_INPUTS"
+    expect_fleet "acknowledged rollback reinstalls a drifted fence" $? 0 stop-marker:delete,probe:allowed,apply-fence,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+
+    # Emergency Stop proves the denial; missing, drifted or unenforced fences
+    # end red with the stop applied.
+    dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
+    run_emergency_stop "$dir"
+    expect_fleet "emergency stop proves the fence" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-burst-stopped "STEP Verify stop fence: success" "STOP_FENCE_PROBE: a dry-run maxRunners=1 write is denied" "$dir"
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"fence_lag\": 2}}" base arc-burst pools-open)
+    run_emergency_stop "$dir"
+    expect_fleet "emergency stop waits out informer lag" $? 0 stop-marker:set,probe:allowed,probe:allowed,probe:denied,helm-upgrade:stopped arc-burst-stopped "STEP Report fence failure: skipped" - "$dir"
+    for mode in absent drift; do
+        dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"fence\": \"${mode}\"}" base arc-burst pools-open)
+        run_emergency_stop "$dir"
+        expect_fleet "emergency stop with the fence ${mode}" $? 1 stop-marker:set,helm-upgrade:stopped arc-burst-stopped "STEP Report fence failure: failure" "this stop is NOT enforced server-side" "$dir"
+    done
+    dir=$(fleet_dir '{"arc": "arc-burst", "knobs": {"fence_unenforced": true}}' base arc-burst pools-open)
+    run_emergency_stop "$dir"
+    expect_fleet "emergency stop whose fence never denies" $? 1 "stop-marker:set,probe:allowed,probe:allowed,*,probe:allowed,helm-upgrade:stopped" arc-burst-stopped "STEP Report fence failure: failure" "still allowed after 30s" "$dir"
+    if grep -qx 'STEP Scale to zero: success' "$FLEET_OUT" && grep -qx 'STEP Read back stopped state: success' "$FLEET_OUT"; then
+        pass "emergency stop whose fence never denies: the stop was still applied and read back"
+    else
+        fail "emergency stop whose fence never denies: $(fleet_steps)"
+    fi
+    dir=$(fleet_dir '{"arc": "arc-burst", "knobs": {"fence_probe": "error"}}' base arc-burst pools-open)
+    run_emergency_stop "$dir"
+    expect_fleet "emergency stop whose fence probe errors" $? 1 stop-marker:set,helm-upgrade:stopped arc-burst-stopped "STEP Report fence failure: failure" "failed for another reason" "$dir"
+
+    # An acknowledged deploy waits until the fence allows writes after the
+    # delete; if it never does, nothing is written.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}, \"knobs\": {\"fence_lag\": 2}}" base arc-burst-stopped pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
+    expect_fleet "acknowledged deploy waits out informer lag" $? 0 stop-marker:delete,probe:denied,probe:denied,probe:allowed,apply-fence,apply-netpol,helm-upgrade:burst arc-burst - - "$dir"
+    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}, \"knobs\": {\"fence_lag\": 100}}" base arc-burst-stopped pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
+    expect_fleet "acknowledged deploy whose fence keeps denying" $? 1 "stop-marker:delete,probe:denied,*,probe:denied" arc-burst-stopped "STEP Acknowledge Emergency Stop: failure" "no acknowledgement is needed" "$dir"
+
+    # Codex PR #35 re-review finding 1: a completed Emergency Stop lands after
+    # the old run's final admission; its stale Helm write follows and the
+    # writer is terminated right after the Helm call, before its client-side
+    # fence. The API server denies the write, so the fleet stays 0/0.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:burst\", \"term_after\": \"helm-upgrade:burst\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"base1\", \"node\": \"baseline-b\"}]}" base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "stale deploy terminated after its denied Helm write" $? 1 \
+        apply-fence,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst:denied,writer-terminated arc-burst-stopped "STEP Deploy runners: cancelled" - "$dir"
+    if [ "$(jq '[.runners[] | select(.busy | not)] | length' "${dir}/fleet.json")" = 0 ] && [ "$(jq -r '.stop_marker.data["run-id"]' "${dir}/fleet.json")" = injected ]; then
+        pass "stale deploy terminated after its Helm call: the fleet is still 0/0 with the marker, no runner started"
+    else
+        fail "stale deploy terminated: runners $(jq -c '.runners' "${dir}/fleet.json")"
+    fi
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:drain\", \"term_after\": \"helm-upgrade:drain\"}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DRAIN_INPUTS"
+    expect_fleet "stale drain terminated after its denied Helm write" $? 1 \
+        injected-stop-marker,injected-stop,helm-upgrade:drain:denied,writer-terminated arc-burst-stopped - - "$dir"
+    dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"knobs\": {\"stop_before\": \"helm-upgrade:density\", \"term_after\": \"helm-upgrade:density\"}}" base arc-drain)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"rollback\",\"expected_sha\":\"${FLEET_SHA}\"}"
+    expect_fleet "stale rollback terminated after its denied Helm write" $? 1 \
+        apply-fence,injected-stop-marker,injected-stop,helm-upgrade:density:denied,writer-terminated arc-drain-stopped - - "$dir"
+    # Control: the same interleaving against an API server that does not
+    # enforce the fence reopens the fleet; this is the gap the fence closes.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"stop_before\": \"helm-upgrade:burst\", \"term_after\": \"helm-upgrade:burst\", \"fence_unenforced\": true}}" base arc-burst pools-open)
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_INPUTS"
+    expect_fleet "control: stale deploy terminated with the fence not enforced" $? 1 \
+        apply-fence,apply-netpol,injected-stop-marker,injected-stop,helm-upgrade:burst,writer-terminated arc-burst - - "$dir"
+}
+
+
 assert_with_fakes_selftest
 assert_burst_contracts
 assert_generated_drain_values
@@ -3554,6 +3884,7 @@ assert_phase_c
 assert_rebalance_workflow
 assert_emergency_stop
 assert_stop_fence
+assert_server_fence
 assert_helm_history_max
 assert_ci_lint_coverage
 assert_admission_docs_name_no_collaborator

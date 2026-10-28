@@ -352,7 +352,12 @@ write keeps 100 revisions (`--history-max 100`). Emergency Stop writes the
 marker `arc-runners/runner-fleet-emergency-stop` before its Helm write; while it
 exists the fleet workflows refuse to run, except Deploy `deploy`/`rollback`
 with `acknowledge_emergency_stop=true`, and every fleet Helm write re-checks it
-afterwards and re-applies the stop.
+afterwards and re-applies the stop. The marker is also the parameter of the
+server-side fence `deploy/runner-emergency-stop-fence.yaml` (a
+ValidatingAdmissionPolicy installed by Deploy `deploy` and `rollback`): while
+it exists the API server denies any runner scale set write that is not 0/0, so
+a cancelled stale run cannot reopen the fleet. Emergency Stop proves the
+denial before its own write and fails red if the fence does not enforce.
 The workflows that mutate fleet capacity or its prerequisites (Deploy, Scale
 Runners, Node Pool Sizing, Prepare Runner Platform, Deploy Cluster Addons)
 share the non-cancelling `runner-fleet-mutation` concurrency group, so their
@@ -416,7 +421,8 @@ The local helper is read-only and accepts only `status`:
 3. **Registry Authentication** - Uses DigitalOcean registry pull secrets
 4. **Resource Limits** - Always set CPU/memory limits
 5. **Network Policies** - Runner pods are isolated by `deploy/runner-network-policy.yaml` (no ingress; egress only to cluster DNS and the public internet), installed by Deploy and validated by `scripts/verify-runner-network-policy.sh` (see `docs/SECURITY.md`)
-6. **RBAC** - Use minimal permissions for service accounts
+6. **Emergency Stop fence** - `deploy/runner-emergency-stop-fence.yaml` (a ValidatingAdmissionPolicy and binding keyed on the stop marker) makes the API server enforce an Emergency Stop; installed by Deploy `deploy`/`rollback` and required by every other fleet mutator (see `docs/SECURITY.md`)
+7. **RBAC** - Use minimal permissions for service accounts
 
 ### Security Documentation
 

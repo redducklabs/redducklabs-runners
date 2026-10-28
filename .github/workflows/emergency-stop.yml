@@ -19,6 +19,17 @@ name: Emergency Stop Runners
 # afterwards: a write from an older run that lands after this stop sees the
 # marker, re-applies 0/0 and fails. A failed marker write does not delay the
 # stop; the run fails afterwards so the missing fence is visible.
+#
+# Server-side fence (Ruling 36): the marker is also the parameter of the
+# ValidatingAdmissionPolicy in deploy/runner-emergency-stop-fence.yaml, which
+# makes the API server deny any AutoscalingRunnerSet write that is not 0/0
+# while the marker exists, so a stale writer that is cancelled (or loses its
+# runner) right after its Helm write cannot leave the fleet reopened. After
+# writing the marker and before its own Helm write this run proves the policy
+# enforces: a server-side dry-run patch to maxRunners=1 must be denied
+# (retried for up to 30 s). If the policy is absent or not enforcing, the stop
+# is still applied and the run fails ("Report fence failure"). This run's own
+# 0/0 write is allowed by the policy.
 
 on:
   workflow_dispatch:
@@ -286,6 +297,46 @@ jobs:
           echo "❌ Error: could not write the stop marker; in-flight fleet mutations are not fenced"
           echo "marker_failed=true" >> "${GITHUB_OUTPUT}"
 
+      - name: Verify stop fence
+        id: fence
+        if: steps.backup.outputs.deployment_exists == 'true'
+        # Never block the stop: whatever happens here, Scale to zero runs and
+        # "Report fence failure" fails the run afterwards.
+        continue-on-error: true
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          MARKER_FAILED: ${{ steps.marker.outputs.marker_failed }}
+        run: |
+          # Ruling 36: the marker is the parameter of the server-side fence
+          # deploy/runner-emergency-stop-fence.yaml. Before this run's Helm
+          # write, prove the API server enforces it: a server-side dry-run
+          # patch of the AutoscalingRunnerSet to maxRunners=1 must be DENIED by
+          # that policy. Waiting here (up to 30 s, for the admission informer
+          # to observe the marker) means every write that lands after the 0/0
+          # write below is denied, including one from a stale fleet run that
+          # is cancelled before its own client-side fence runs.
+          echo "fence_failed=true" >> "${GITHUB_OUTPUT}"
+          if [ "${NAMESPACE}" != arc-runners ]; then
+            echo "❌ Error: the stop fence protects arc-runners only; namespace ${NAMESPACE} is not fenced"
+            exit 0
+          fi
+          if [ "${MARKER_FAILED}" = true ]; then
+            echo "❌ Error: the stop marker was not written, so the fence cannot enforce this stop"
+            exit 0
+          fi
+          if ! python3 -B scripts/lib/runner_stop_fence.py verify; then
+            echo "❌ Error: the Emergency Stop fence is missing or differs from deploy/runner-emergency-stop-fence.yaml; this stop is NOT enforced server-side"
+            exit 0
+          fi
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          if ! fleet_fence_wait denied; then
+            echo "❌ Error: the Emergency Stop fence did not deny a dry-run maxRunners=1 write; this stop is NOT enforced server-side"
+            exit 0
+          fi
+          echo "fence_failed=false" >> "${GITHUB_OUTPUT}"
+          echo "✅ The API server denies non-zero runner writes while the stop marker exists"
+
       - name: Scale to zero
         if: steps.backup.outputs.deployment_exists == 'true'
         env:
@@ -394,6 +445,12 @@ jobs:
         if: always() && steps.marker.outputs.marker_failed == 'true'
         run: |
           echo "❌ Error: the stop was applied but its marker was not written; an older fleet run could reopen runners. Re-dispatch Emergency Stop."
+          exit 1
+
+      - name: Report fence failure
+        if: always() && steps.fence.outputs.fence_failed == 'true'
+        run: |
+          echo "❌ Error: the stop was applied, but the server-side fence did not prove it enforces the stop (see 'Verify stop fence'). A stale fleet run could still reopen runners if it is cancelled after its Helm write. Run Deploy operation=deploy or rollback (with acknowledge_emergency_stop=true) to install deploy/runner-emergency-stop-fence.yaml, or re-dispatch Emergency Stop once it is installed."
           exit 1
 
       - name: Report read failures

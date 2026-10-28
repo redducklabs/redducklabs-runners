@@ -88,6 +88,18 @@ EXPANDER_MANAGED_LABEL = "doks.digitalocean.com/managed"
 STOP_MARKER = "runner-fleet-emergency-stop"
 STOP_ACKNOWLEDGED = {"deploy", "rollback"}
 STOP_TOLERATED = {"status", "rebalance", "remove-burst"}
+# Ruling 36: the server-side fence (deploy/runner-emergency-stop-fence.yaml)
+# must exist with exactly the committed specs before a fleet mutator is
+# admitted. Not required: status and record-density (read-only), Deploy
+# `deploy` and `rollback` (they install it, server dry run first, before their
+# Helm write; `deploy` is the bootstrap path), and remove-burst (for the
+# reason it is admitted under the stop marker: it deletes only empty closed
+# pools and cannot start a runner, and it must stay available to recover from
+# drain-stopped). While ARC is density or density-stopped no deploy has
+# installed the fence yet (rollout steps before Deploy `deploy`), so there an
+# absent fence is tolerated; a present but different one never is.
+FENCE_NOT_REQUIRED = {"status", "record-density", "deploy", "rollback", "remove-burst"}
+FENCE_ABSENT_TOLERATED_ARC = {"density", "density-stopped"}
 
 # (contract, minRunners, maxRunners) states the gate can classify.
 ARC_STATES = (
@@ -131,6 +143,13 @@ ENABLE_BURST_STAGES = ({PRIMARY: 0, FALLBACK: 0}, {PRIMARY: 6, FALLBACK: 0}, {PR
 
 CLUSTER_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 VALIDATOR = pathlib.Path(__file__).resolve().parent.parent / "validate-runner-isolation-contract.py"
+
+# scripts/lib/runner_stop_fence.py, loaded by path without writing bytecode.
+_FENCE_SPEC = importlib.util.spec_from_file_location(
+    "runner_stop_fence", pathlib.Path(__file__).resolve().parent / "runner_stop_fence.py")
+stop_fence = importlib.util.module_from_spec(_FENCE_SPEC)
+sys.dont_write_bytecode = True
+_FENCE_SPEC.loader.exec_module(stop_fence)
 
 
 class ReadError(Exception):
@@ -243,6 +262,24 @@ def stop_errors(operation, marker, acknowledged):
     hint = ("dispatch it with acknowledge_emergency_stop=true to recover" if operation in STOP_ACKNOWLEDGED
             else "recover first with Deploy `deploy` or `rollback` and acknowledge_emergency_stop=true")
     return [f"operation '{operation}' is refused while the Emergency Stop marker {NAMESPACE}/{STOP_MARKER} exists; {hint}"]
+
+
+def fence_errors(operation, arc):
+    """Ruling 36: the Emergency Stop fence must be installed exactly as committed."""
+    if operation in FENCE_NOT_REQUIRED:
+        return []
+    try:
+        state, errors = stop_fence.evaluate(stop_fence.load_fence_file(), stop_fence.read_live())
+    except stop_fence.ReadError as error:
+        raise ReadError(f"Emergency Stop fence: {error}") from error
+    if state == "exact":
+        return []
+    if state == "absent" and arc is not None and arc[0] in FENCE_ABSENT_TOLERATED_ARC:
+        return []
+    hint = ("Deploy `deploy` (or `rollback`) installs it" if state == "absent"
+            else "re-run Deploy `deploy` (or `rollback`) to reinstall the committed fence")
+    return [f"operation '{operation}' requires the Emergency Stop fence {stop_fence.NAME} to equal "
+            f"deploy/runner-emergency-stop-fence.yaml: {error}; {hint}" for error in errors]
 
 
 def verify_release_identity():
@@ -947,6 +984,7 @@ def admit(args):
     errors, facts = evaluate(live, now_seconds())
     errors += stop_errors(args.operation, marker, args.acknowledge_emergency_stop)
     errors += admission_errors(args.operation, live, facts, marker)
+    errors += fence_errors(args.operation, facts["arc"])
     if marker is not None:
         print(stop_line(marker), file=sys.stderr if errors else sys.stdout)
     if errors:

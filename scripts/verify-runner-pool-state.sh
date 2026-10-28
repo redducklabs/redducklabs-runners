@@ -38,6 +38,15 @@
 #   STOP: Emergency Stop marker arc-runners/runner-fleet-emergency-stop present (run <id> at <time>)
 # before the STATE line. A failed marker read fails closed.
 #
+# Server-side fence (Ruling 36): every operation except status, record-density,
+# deploy, rollback (the last two install it before their Helm write) and
+# remove-burst also requires the ValidatingAdmissionPolicy and binding
+# runner-fleet-emergency-stop-fence to exist with exactly the specs of
+# deploy/runner-emergency-stop-fence.yaml (scripts/lib/runner_stop_fence.py).
+# Missing or different rejects, except that an absent fence is tolerated while
+# ARC is density or density-stopped (no deploy has installed it yet). A failed
+# read fails closed.
+#
 # --compare-identities compares live identities with FILE. T is "none" (exact
 # equality) or exactly one declared transition:
 #   pool-created:<name>:<size>:<min>/<max>   pool-deleted:<name>
