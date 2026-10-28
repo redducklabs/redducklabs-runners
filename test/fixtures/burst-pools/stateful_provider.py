@@ -249,7 +249,7 @@ def doctl(directory, args):
         configuration.setdefault("scale_down_utilization_threshold", 0)
         configuration.setdefault("scale_down_unneeded_time", "")
         if os.path.isfile(path(directory, "autoscaler-threshold-changed")):
-            configuration["scale_down_utilization_threshold"] = 0.65
+            configuration["scale_down_utilization_threshold"] = 0.8
         if expanders:
             configuration["expanders"] = expanders
         else:
