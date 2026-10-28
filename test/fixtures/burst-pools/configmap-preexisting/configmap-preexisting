@@ -1,0 +1,1 @@
+Flag: keep the scenario's expander-configmap.json although the cluster expanders lack "priority" (a ConfigMap left from an earlier enable).

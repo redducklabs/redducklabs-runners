@@ -139,6 +139,29 @@ the period (DigitalOcean does not itemize per pool).
   `IDENTITY_DRIFT` or `... is not a non-negative integer` that names an
   explicit `null` (a key that is present) is still a real provider anomaly and
   still fails closed.
+- **Priority-expander ConfigMap not created yet (`configmaps
+  "cluster-autoscaler-priority-expander" not found`).** DOKS creates
+  `kube-system/cluster-autoscaler-priority-expander` only after the priority
+  expander is enabled on the cluster (Ruling 40). Before the fix, the first
+  `configure-expander` dry run (Node Pool Sizing run 40739557666, main
+  `4d7134f`) failed with `ERROR: could not read ConfigMap
+  kube-system/cluster-autoscaler-priority-expander`; nothing was changed.
+  With the fix, the dry run prints `PLAN: wait up to 600s for DOKS to create
+  ConfigMap ...` with the priorities it will write, and succeeds. The apply
+  sets the expanders, prints a `WAIT:` line for each read that still finds
+  no ConfigMap (every 15 s), then patches `data.priorities` and reads it back. If
+  DOKS has not created it within 600 s, the run fails with `RESULT: failed:
+  ConfigMap kube-system/cluster-autoscaler-priority-expander still absent
+  after waiting 600s (41 reads, every 15s) ...`. The expanders are then
+  `priority,random`, but both burst pools are still closed (`0/0`), so no
+  burst node can start and the fleet is unchanged. Re-dispatch
+  `configure-expander` (`apply`): it prints `NOOP: cluster expanders already
+  priority,random`, waits again and writes the priorities. If repeated
+  re-runs time out, check read-only with `kubectl get configmap
+  cluster-autoscaler-priority-expander -n kube-system`. Do not create or
+  rename the ConfigMap by hand, and do not remove its `doks` labels; DOKS
+  manages it. Any other read error, such as `Forbidden` or an unreachable API
+  server, still fails closed straight away.
 - **Baseline node replacement during a shortage.** The baseline pool still
   uses `s-8vcpu-16gb`. Its two existing nodes are unaffected, but if DOKS
   replaces one (node repair, recycle or a cluster upgrade) the new droplet
@@ -556,3 +579,12 @@ pools.github-runners-burst-amd-16g.max_nodes: expected=0 live=null` because
 doctl omits zero-valued pool fields (Ruling 39). The fallback was not created
 and ARC stayed `density`. Re-run step 3 `create-burst` at the reviewed commit
 that contains the Ruling 39 fix; it creates only the fallback.
+
+2026-10-28, at main `4d7134f`: step 3 `create-burst` apply (run 40739372104)
+created the closed fallback `github-runners-burst-intel-16g` (primary NOOP);
+both pools are present and closed. The `configure-expander` dry run (run
+40739557666) failed with `configmaps "cluster-autoscaler-priority-expander"
+not found` because DOKS creates that ConfigMap only after the expander update
+(Ruling 40). Nothing was changed; ARC stayed `density`. Continue step 3 with
+`configure-expander` (dry run, then `apply`) at the reviewed commit that
+contains the Ruling 40 fix.

@@ -19,7 +19,9 @@ removal of the alternate Phase B shape; 2026-10-27, PR #35 re-review Ruling 36
 the stop marker); 2026-10-28, rollout Ruling 38 (the burst pools use
 `s-8vcpu-16gb-amd` and `s-8vcpu-16gb-intel`; see "Burst pool sizes
 (Ruling 38)"); 2026-10-28, rollout Ruling 39 (doctl omits zero-valued
-node-pool fields; see "Node-pool list encoding (Ruling 39)").
+node-pool fields; see "Node-pool list encoding (Ruling 39)"); 2026-10-28,
+rollout Ruling 40 (DOKS creates the priority-expander ConfigMap only after
+the expander update; see "Priority-expander ConfigMap creation (Ruling 40)").
 
 ## Problem
 
@@ -142,6 +144,35 @@ options, so a primary pool failing with a provider error yields to the
 fallback. `worker-pool` matches only the priority-1 catch-all and no runner pod
 fits it, so its behavior is unchanged. Undo is `--expanders ""`, which restores
 DigitalOcean's default.
+
+### Priority-expander ConfigMap creation (Ruling 40)
+
+DOKS creates `kube-system/cluster-autoscaler-priority-expander` only after the
+priority expander is enabled on the cluster. It carries the labels
+`c3.doks.digitalocean.com/component`, `c3.doks.digitalocean.com/plane` and
+`doks.digitalocean.com/managed` and a starter `data.priorities` of `1: [.*]`.
+DigitalOcean's autoscale how-to says to edit `data.priorities` and not to rename the
+ConfigMap or remove its `doks` labels. It does not say how long creation takes.
+The first live `configure-expander` dry run (Node Pool Sizing run
+40739557666, main `4d7134f`) failed with `Error from server (NotFound):
+configmaps "cluster-autoscaler-priority-expander" not found` because the
+script read the ConfigMap as if it already existed.
+
+Ruling: `configure-expander` reads the ConfigMap with `--ignore-not-found` and
+treats only an empty result as absent. Any other read failure still fails
+closed. A dry run that finds it absent prints a `PLAN:` line for the wait and
+the write (`100:` primary ID, `50:` fallback ID, `1: .*`) and succeeds without
+changing anything. An apply, after the expander update (Ruling 13 checks
+unchanged), re-reads the cluster, requires the expanders to be
+`priority,random`, then reads the ConfigMap every 15 s for up to 600 s
+(41 reads). The 30-minute job timeout leaves room for that wait. Once the
+ConfigMap exists, the apply writes `data.priorities` through the usual identity
+bracket with a JSON merge patch, which leaves the name and labels as DOKS set
+them, and reads back the priorities and the managed label. A timeout fails
+the run after the expander update. The pools stay closed (`0/0`), so the fleet
+is unaffected. A re-run finds the expanders already set (`NOOP`) and waits
+again before writing. The test provider models this: no ConfigMap until a
+`priority` expander update, optionally after a few more reads.
 
 The two burst pools use two different droplet sizes, and neither is the
 baseline's `s-8vcpu-16gb`. The September 2026 incident showed the DOKS

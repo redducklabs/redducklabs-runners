@@ -10,7 +10,19 @@ The hook first applies scheduled events, then handles the mutating calls that
 scripts/burst-pools.sh issues by rewriting the fixture files the read routes
 serve (cluster.json, pools.json, expander-configmap.json), so the next read
 returns the mutated state. Exit 100 means "not handled here": the fake falls
-through to its routes. Read calls are never handled here.
+through to its routes. The only read handled here is the priority-expander
+ConfigMap's (see "DOKS ConfigMap model" below); a present ConfigMap is still
+served by the routes.
+
+DOKS ConfigMap model (Ruling 40): DOKS creates
+kube-system/cluster-autoscaler-priority-expander only after the priority
+expander is enabled on the cluster. burst_dir removes expander-configmap.json
+when the scenario's cluster expanders lack "priority" (unless the scenario
+holds "configmap-preexisting"). While the file is absent a read fails with
+kubectl's NotFound error (or prints nothing with --ignore-not-found) and a
+patch fails with NotFound. A cluster update whose expanders include
+"priority" schedules the starter ConfigMap (the doks labels, "1: [.*]"): it
+appears on the first read after "expander-configmap.pending" reaches 0.
 
 Events ("<fixture-dir>/events"): one per line,
     <tool>|<glob over the joined arguments>|<n>|<target file>|<jq patch file>
@@ -25,6 +37,10 @@ Flags (files in the fixture dir):
                              error that mentions "account" and "count"
     reset-maintenance-window cluster update moves the maintenance window to
                              any=00:00 whatever --maintenance-window says
+    configmap-appear-after   holds N: after the expander update, N ConfigMap
+                             reads still see NotFound before it appears
+    configmap-never-created  the expander update never creates the ConfigMap
+    configmap-read-error     every ConfigMap read fails with a Forbidden error
 
 cluster update requires --update-kubeconfig=false and, like doctl, always
 sets the maintenance window (any=00:00 when the flag is omitted).
@@ -42,6 +58,24 @@ POOL_IDS = {
     "github-runners-burst-intel-16g": "9a4b2c6d-1e3f-4a5b-8c7d-0e1f2a3b4c03",
 }
 CLUSTER_TAG = "k8s:c4e1f0a2-6b3d-4f58-9a07-1d2e3f4a5b60"
+CONFIGMAP = "cluster-autoscaler-priority-expander"
+CONFIGMAP_FILE = "expander-configmap.json"
+CONFIGMAP_PENDING = "expander-configmap.pending"
+# What DOKS creates (DigitalOcean "Autoscale" how-to, priority expander).
+STARTER_CONFIGMAP = {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {
+        "name": CONFIGMAP,
+        "namespace": "kube-system",
+        "labels": {
+            "c3.doks.digitalocean.com/component": "cluster-autoscaler",
+            "c3.doks.digitalocean.com/plane": "data",
+            "doks.digitalocean.com/managed": "true",
+        },
+    },
+    "data": {"priorities": "1:\n  - .*\n"},
+}
 
 
 def path(directory, name):
@@ -214,6 +248,15 @@ def doctl(directory, args):
             configuration["expanders"] = expanders
         else:
             configuration.pop("expanders", None)
+        if ("priority" in expanders and not os.path.isfile(path(directory, CONFIGMAP_FILE))
+                and not os.path.isfile(path(directory, CONFIGMAP_PENDING))
+                and not os.path.isfile(path(directory, "configmap-never-created"))):
+            delay = "0"
+            if os.path.isfile(path(directory, "configmap-appear-after")):
+                with open(path(directory, "configmap-appear-after"), encoding="utf-8") as stream:
+                    delay = stream.read().strip()
+            with open(path(directory, CONFIGMAP_PENDING), "w", encoding="utf-8") as stream:
+                stream.write(f"{int(delay)}\n")
         # Like doctl, always send a maintenance window: the flag's default is
         # any=00:00, so omitting it moves the window.
         day, _, start = flags.get("maintenance-window", ["any=00:00"])[-1].partition("=")
@@ -229,12 +272,50 @@ def doctl(directory, args):
     return NOT_HANDLED
 
 
+def configmap_present(directory):
+    """Materializes a scheduled starter ConfigMap when its delay has run out."""
+    if os.path.isfile(path(directory, CONFIGMAP_FILE)):
+        return True
+    pending = path(directory, CONFIGMAP_PENDING)
+    if not os.path.isfile(pending):
+        return False
+    with open(pending, encoding="utf-8") as stream:
+        remaining = int(stream.read().strip())
+    if remaining > 0:
+        with open(pending, "w", encoding="utf-8") as stream:
+            stream.write(f"{remaining - 1}\n")
+        return False
+    save(directory, CONFIGMAP_FILE, STARTER_CONFIGMAP)
+    os.remove(pending)
+    return True
+
+
+def not_found():
+    print(f'Error from server (NotFound): configmaps "{CONFIGMAP}" not found', file=sys.stderr)
+    return 1
+
+
 def kubectl(directory, args):
-    # Only the exact call shape burst-pools.sh issues is accepted.
-    expected = ["patch", "configmap", "cluster-autoscaler-priority-expander",
+    reads = {
+        ("get", "configmap", CONFIGMAP, "-n", "kube-system", "-o", "json"): False,
+        ("get", "configmap", CONFIGMAP, "-n", "kube-system", "--ignore-not-found", "-o", "json"): True,
+    }
+    if tuple(args) in reads:
+        if os.path.isfile(path(directory, "configmap-read-error")):
+            print(f'Error from server (Forbidden): configmaps "{CONFIGMAP}" is forbidden: '
+                  'User "fixture" cannot get resource "configmaps" in API group "" in the namespace "kube-system"',
+                  file=sys.stderr)
+            return 1
+        if configmap_present(directory):
+            return NOT_HANDLED  # the routes serve expander-configmap.json
+        return 0 if reads[tuple(args)] else not_found()
+    # Only the exact patch shape burst-pools.sh issues is accepted.
+    expected = ["patch", "configmap", CONFIGMAP,
                 "-n", "kube-system", "--type", "merge", "-p"]
     if args[:-1] != expected:
         return NOT_HANDLED
+    if not configmap_present(directory):
+        return not_found()
     patch = json.loads(args[-1])
     if not os.path.isfile(path(directory, "configmap-patch-ignored")):
         configmap = load(directory, "expander-configmap.json")

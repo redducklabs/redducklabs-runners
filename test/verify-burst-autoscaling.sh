@@ -487,6 +487,7 @@ get pods -A -o json|pods.json
 get autoscalingrunnersets.actions.github.com -n arc-runners -o json|asrs.json
 get deployment -n arc-systems -l app.kubernetes.io/name=gha-rs-controller -o json|controller-deployment.json
 get configmap cluster-autoscaler-priority-expander -n kube-system -o json|expander-configmap.json
+get configmap cluster-autoscaler-priority-expander -n kube-system --ignore-not-found -o json|expander-configmap.json
 get crd -o name|crds.txt
 get networkpolicies.networking.k8s.io -n arc-runners -o json|networkpolicies.json
 get ciliumnetworkpolicies.cilium.io -n arc-runners -o json|cnp.json
@@ -1296,6 +1297,16 @@ burst_dir() {
     for layer in ${extra[@]+"${extra[@]}"}; do
         materialize_layer "../burst-pools/${layer}" "$dir" || return 1
     done
+    # DOKS model (Ruling 40): the priority-expander ConfigMap exists only once
+    # the priority expander is enabled; the provider creates it on the
+    # expander update. "configmap-preexisting" keeps a scenario's ConfigMap.
+    if [ ! -f "${dir}/configmap-preexisting" ] \
+        && ! jq -e '.[] | select(.name == "redducklabs-cluster") | (.cluster_autoscaler_configuration.expanders // []) | index("priority")' \
+            "${dir}/cluster.json" > /dev/null; then
+        rm -f "${dir}/expander-configmap.json"
+    fi
+    printf '#!/bin/bash\nprintf "%%s\\n" "$1" >> %q\n' "${dir}/sleep.calls" > "${dir}/fakesleep"
+    chmod +x "${dir}/fakesleep"
     printf '%s\n' "$BURST_HOOK" > "${dir}/stateful"
     printf '%s\n' "$dir"
 }
@@ -1343,7 +1354,7 @@ run_burst() {
     rm -f "$dir"/*.calls "${dir}/mutations.log"
     local identities=()
     [ "$snapshot" = - ] || identities=(--identities "$snapshot")
-    with_fakes "$dir" env "NOW_CMD=echo ${POOL_STATE_NOW}" bash "$BURST_SCRIPT" "$@" \
+    with_fakes "$dir" env "NOW_CMD=echo ${POOL_STATE_NOW}" "SLEEP_CMD=${dir}/fakesleep" bash "$BURST_SCRIPT" "$@" \
         --cluster-name redducklabs-cluster ${identities[@]+"${identities[@]}"} > "$BURST_OUT" 2> "$BURST_ERR"
 }
 
@@ -1414,6 +1425,12 @@ create stops on SCALE_TO_ZERO_REJECTED after one attempt|valid-density-no-burst 
 create dry run plans and changes nothing|valid-density-no-burst|-|0|-|primary=absent fallback=absent|PLAN: create closed pool github-runners-burst-amd-16g|create-burst
 expander from unset writes cluster expanders then the ConfigMap|base arc-density pool-primary-closed pool-fallback-closed|configure-expander|0|expanders:priority,random,patch-configmap|-|READBACK: expanders priority,random|configure-expander
 expander already configured is a no-op|base arc-density pools-closed|configure-expander|0|-|-|NOOP: cluster expanders already priority,random|configure-expander
+expander already configured leaves the ConfigMap alone|base arc-density pools-closed|configure-expander|0|-|-|NOOP: priority expander ConfigMap already ranks|configure-expander
+expander dry run from unset with the ConfigMap absent plans the wait and the write|base arc-density pool-primary-closed pool-fallback-closed|-|0|-|-|PLAN: wait up to 600s for DOKS to create ConfigMap kube-system/cluster-autoscaler-priority-expander (it does so only after the priority expander is enabled), then write priorities 100: 3e9d7b20-8c4f-4d1a-a6e5-71f2c0b9d802 (github-runners-burst-amd-16g), 50: 9a4b2c6d-1e3f-4a5b-8c7d-0e1f2a3b4c03 (github-runners-burst-intel-16g), 1: .*|configure-expander
+expander dry run from unset with a ConfigMap present plans the patch|base arc-density pool-primary-closed pool-fallback-closed -- configmap-preexisting|-|0|-|-|PLAN: write priority expander ConfigMap: kubectl patch configmap|configure-expander
+expander dry run fails closed on a ConfigMap read error other than NotFound|base arc-density pool-primary-closed pool-fallback-closed -- configmap-read-error|-|1|-|-|could not read ConfigMap kube-system/cluster-autoscaler-priority-expander (a read error other than NotFound)|configure-expander
+expander apply fails closed on a ConfigMap read error other than NotFound|base arc-density pools-closed -- configmap-read-error|configure-expander|1|-|-|could not read ConfigMap kube-system/cluster-autoscaler-priority-expander (a read error other than NotFound)|configure-expander
+expander apply from unset waits for DOKS to create the ConfigMap, then patches it|base arc-density pool-primary-closed pool-fallback-closed -- configmap-appear-late|configure-expander|0|expanders:priority,random,patch-configmap|-|READBACK: DOKS created ConfigMap kube-system/cluster-autoscaler-priority-expander (read 4)|configure-expander
 expander ConfigMap readback mismatch fails|base arc-density pool-primary-closed pool-fallback-closed -- configmap-patch-ignored|configure-expander|1|expanders:priority,random,patch-configmap|-|ConfigMap mismatch|configure-expander
 expander update that resets the maintenance window fails|base arc-density pool-primary-closed pool-fallback-closed -- maintenance-window-reset|configure-expander|1|expanders:priority,random|-|changed cluster settings other than the expanders|configure-expander
 expander update without a maintenance_policy fails closed before updating|base arc-density pool-primary-closed pool-fallback-closed -- no-maintenance-policy|configure-expander|1|-|-|no readable maintenance_policy|configure-expander
@@ -1455,6 +1472,50 @@ CASES
     else
         fail "burst expander update did not preserve the maintenance window: $(grep 'cluster update' "${dir}/doctl.calls")"
     fi
+
+    # Ruling 40: DOKS creates the priority-expander ConfigMap only after the
+    # expander update. The apply waits for it (bounded), patches data.priorities
+    # with a merge patch that keeps the doks labels, and a re-run continues.
+    dir=$(burst_dir base arc-density pool-primary-closed pool-fallback-closed -- configmap-appear-late) \
+        || { fail "burst ConfigMap wait: fixture could not be built"; return; }
+    expect_burst "expander apply waits three reads for the ConfigMap" "$dir" configure-expander 0 \
+        expanders:priority,random,patch-configmap - "READBACK: expanders priority,random; ConfigMap priorities and managed label verified" configure-expander
+    if [ "$(tr '\n' ' ' < "${dir}/sleep.calls" 2> /dev/null)" = "15 15 15 " ] \
+        && [ "$(grep -c '^WAIT: ConfigMap kube-system/cluster-autoscaler-priority-expander not created by DOKS yet' "$BURST_OUT")" -eq 3 ] \
+        && [ "$(jq -cS '.metadata.labels' "${dir}/expander-configmap.json")" \
+            = '{"c3.doks.digitalocean.com/component":"cluster-autoscaler","c3.doks.digitalocean.com/plane":"data","doks.digitalocean.com/managed":"true"}' ]; then
+        pass "burst ConfigMap wait: three 15 s sleeps, three WAIT lines; the merge patch kept all three doks labels"
+    else
+        fail "burst ConfigMap wait: sleeps '$(tr '\n' ' ' < "${dir}/sleep.calls" 2> /dev/null)', labels $(jq -c '.metadata.labels' "${dir}/expander-configmap.json" 2> /dev/null)"
+    fi
+
+    dir=$(burst_dir base arc-density pool-primary-closed pool-fallback-closed -- configmap-never-created) \
+        || { fail "burst ConfigMap timeout: fixture could not be built"; return; }
+    expect_burst "expander apply times out when DOKS never creates the ConfigMap" "$dir" configure-expander 1 \
+        expanders:priority,random "primary=0/0 fallback=0/0" \
+        "ConfigMap kube-system/cluster-autoscaler-priority-expander still absent after waiting 600s (41 reads, every 15s)" configure-expander
+    if [ "$(wc -l < "${dir}/sleep.calls")" -eq 40 ] && [ "$(sort -u "${dir}/sleep.calls")" = 15 ] \
+        && grep -q '^RESULT: failed: ConfigMap kube-system/cluster-autoscaler-priority-expander still absent' "$BURST_OUT" \
+        && [ "$(jq -c '.[] | select(.name == "redducklabs-cluster") | .cluster_autoscaler_configuration.expanders' "${dir}/cluster.json")" = '["priority","random"]' ]; then
+        pass "burst ConfigMap timeout: 40 sleeps of 15 s (600 s), RESULT failed, expanders set, pools still closed"
+    else
+        fail "burst ConfigMap timeout: $(wc -l < "${dir}/sleep.calls" 2> /dev/null) sleeps; $(grep '^RESULT' "$BURST_OUT")"
+    fi
+    # Re-run with the expanders already set: DOKS is still slow (two more
+    # NotFound reads), so the re-run waits again, then patches.
+    rm -f "${dir}/configmap-never-created"
+    printf '2\n' > "${dir}/expander-configmap.pending"
+    expect_burst "expander re-run after the timeout waits again, then patches" "$dir" configure-expander 0 \
+        patch-configmap - "READBACK: DOKS created ConfigMap kube-system/cluster-autoscaler-priority-expander (read 3)" configure-expander
+    if grep -q '^NOOP: cluster expanders already priority,random' "$BURST_OUT" && [ "$(wc -l < "${dir}/sleep.calls")" -eq 2 ]; then
+        pass "burst ConfigMap re-run: expanders NOOP, two sleeps, then the patch"
+    else
+        fail "burst ConfigMap re-run: $(grep -E '^(NOOP|WAIT)' "$BURST_OUT" | tr '\n' '|')"
+    fi
+    expect_burst "expander re-run after completion is a no-op" "$dir" configure-expander 0 \
+        - - "NOOP: priority expander ConfigMap already ranks" configure-expander
+    [ ! -s "${dir}/sleep.calls" ] && pass "burst ConfigMap: a completed re-run does not sleep" \
+        || fail "burst ConfigMap: a completed re-run slept $(wc -l < "${dir}/sleep.calls") times"
 
     # Identity drift between the admission snapshot and the run: no mutation.
     local operation start drifted
@@ -1559,8 +1620,9 @@ assert_node_pool_workflow() {
     run_node_pool_workflow "$dir" "{\"operation\":\"configure-expander\",\"apply\":\"false\",\"expected_sha\":\"${sha}\"}" "$sha"
     rc=$?
     if [ "$rc" -eq 0 ] && [ "$(burst_mutations "$dir")" = - ] && grep -q '^PLAN: set cluster expanders' "$BURST_ERR" \
+        && grep -q '^PLAN: wait up to 600s for DOKS to create ConfigMap' "$BURST_ERR" \
         && grep -qF '**Dry run** `configure-expander`' "$BURST_OUT"; then
-        pass "workflow: apply=false is a dry run that plans and changes nothing"
+        pass "workflow: apply=false is a dry run that plans and changes nothing (ConfigMap not yet created by DOKS)"
     else
         fail "workflow: dry run -> exit ${rc}, mutations $(burst_mutations "$dir")"
     fi
