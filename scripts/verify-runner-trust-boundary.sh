@@ -146,6 +146,32 @@ resolve_branch_head() {
     jq -r '.[0].sha' <<<"$commits"
 }
 
+# workflow_absent_at_head <repo> <sha> <workflow path>: succeeds only when a
+# listing of .github/workflows at <sha> proves <workflow path> is not there
+# (including a directory that does not exist at <sha>, HTTP 404). Fails on
+# any other read error, an unrecognized schema, or when the file is listed.
+workflow_absent_at_head() {
+    local repo_name=$1 sha=$2 workflow_path=$3 listing errors status=0
+    errors=$(mktemp)
+    listing=$(gh api --method GET \
+        "repos/$(encode_url_component "$ORG")/$(encode_url_component "$repo_name")/contents/.github/workflows" \
+        -f "ref=${sha}" 2>"$errors") || status=$?
+    if [ "$status" -ne 0 ]; then
+        if grep -Fq '(HTTP 404)' "$errors"; then
+            rm -f "$errors"
+            return 0
+        fi
+        rm -f "$errors"
+        return 1
+    fi
+    rm -f "$errors"
+    jq -e --arg path "$workflow_path" '
+        type == "array"
+        and all(.[]; (.path | type == "string"))
+        and all(.[]; .path != $path)
+    ' <<<"$listing" >/dev/null
+}
+
 validate_public_identity() {
     local repository=$1 expected_id=$2 expected_name=$3 expected_branch=${4:-}
     jq -e --argjson id "$expected_id" --arg owner "$ORG" \
@@ -312,6 +338,15 @@ while IFS=$'\t' read -r repo_id repo_name enumerated_branch; do
             "repos/$(encode_url_component "$ORG")/$(encode_url_component "$repo_name")/contents/${encoded_workflow_path}" \
             -f "ref=${head_sha}" >"$workflow_file"; then
             rm -f "$workflow_file"
+            # GitHub keeps a deleted workflow file registered (often still
+            # "active"). The scan covers the default-branch head, so a
+            # registered workflow whose file is absent there is skipped,
+            # but only when a listing of .github/workflows at the same
+            # commit proves the absence; any other failure fails closed.
+            if workflow_absent_at_head "$repo_name" "$head_sha" "$workflow_path"; then
+                echo "Skipping registered workflow ${repo_name}:${workflow_path}: absent at default-branch head ${head_sha}"
+                continue
+            fi
             echo "ERROR: could not read public workflow ${repo_name}:${workflow_path}; failing closed" >&2
             exit 1
         fi
