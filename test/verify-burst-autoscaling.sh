@@ -487,7 +487,7 @@ get pods -A -o json|pods.json
 get autoscalingrunnersets.actions.github.com -n arc-runners -o json|asrs.json
 get deployment -n arc-systems -l app.kubernetes.io/name=gha-rs-controller -o json|controller-deployment.json
 get configmap cluster-autoscaler-priority-expander -n kube-system -o json|expander-configmap.json
-get configmap cluster-autoscaler-priority-expander -n kube-system --ignore-not-found -o json|expander-configmap.json
+get configmap cluster-autoscaler-priority-expander -n kube-system --ignore-not-found --request-timeout=20s -o json|expander-configmap.json
 get crd -o name|crds.txt
 get networkpolicies.networking.k8s.io -n arc-runners -o json|networkpolicies.json
 get ciliumnetworkpolicies.cilium.io -n arc-runners -o json|cnp.json

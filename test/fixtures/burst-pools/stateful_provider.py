@@ -298,7 +298,7 @@ def not_found():
 def kubectl(directory, args):
     reads = {
         ("get", "configmap", CONFIGMAP, "-n", "kube-system", "-o", "json"): False,
-        ("get", "configmap", CONFIGMAP, "-n", "kube-system", "--ignore-not-found", "-o", "json"): True,
+        ("get", "configmap", CONFIGMAP, "-n", "kube-system", "--ignore-not-found", "--request-timeout=20s", "-o", "json"): True,
     }
     if tuple(args) in reads:
         if os.path.isfile(path(directory, "configmap-read-error")):

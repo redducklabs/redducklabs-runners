@@ -220,7 +220,7 @@ render_priorities() {  # primary-id fallback-id
 # failure, which the callers treat as fatal.
 configmap_state() {
     local configmap
-    configmap=$(kubectl get configmap "$EXPANDER_CONFIGMAP" -n "$EXPANDER_NAMESPACE" --ignore-not-found -o json) || return 1
+    configmap=$(kubectl get configmap "$EXPANDER_CONFIGMAP" -n "$EXPANDER_NAMESPACE" --ignore-not-found --request-timeout=20s -o json) || return 1
     [ -n "${configmap//[[:space:]]/}" ] || return 2
     CONFIGMAP_JSON=$configmap python3 -B - "$1" "$2" "$EXPANDER_MANAGED_LABEL" <<'PY' || return 1
 import json
@@ -472,7 +472,10 @@ burst_sleep() {  # seconds; SLEEP_CMD (default "sleep") is the test seam
 # wait_for_configmap <primary-id> <fallback-id>: sets CONFIGMAP_STATE once the
 # ConfigMap exists; any read error other than NotFound fails the run.
 wait_for_configmap() {
-    local poll=1 rc
+    # Each read is bounded by --request-timeout (a timed-out read fails closed),
+    # and the wait stops at whichever comes first: the read budget or the
+    # elapsed-time deadline, so slow reads cannot stretch it past 600 s.
+    local poll=1 rc started=$SECONDS
     while :; do
         rc=0
         CONFIGMAP_STATE=$(configmap_state "$1" "$2") || rc=$?
@@ -486,6 +489,7 @@ wait_for_configmap() {
             *) fail_run "could not read ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} (a read error other than NotFound)" ;;
         esac
         [ "$poll" -lt "$EXPANDER_CONFIGMAP_POLLS" ] \
+          && [ $((SECONDS - started)) -lt "$EXPANDER_CONFIGMAP_WAIT_SECONDS" ] \
             || fail_run "ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} still absent after waiting ${EXPANDER_CONFIGMAP_WAIT_SECONDS}s (${EXPANDER_CONFIGMAP_POLLS} reads, every ${EXPANDER_CONFIGMAP_POLL_SECONDS}s); DOKS creates it after the priority expander is enabled (expanders are '$(cluster_expanders)'); pool bounds were not changed; re-run configure-expander to continue"
         echo "WAIT: ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} not created by DOKS yet (read ${poll}/${EXPANDER_CONFIGMAP_POLLS}); next read in ${EXPANDER_CONFIGMAP_POLL_SECONDS}s"
         burst_sleep "$EXPANDER_CONFIGMAP_POLL_SECONDS"
