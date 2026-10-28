@@ -1,6 +1,6 @@
 # Security Guide - Red Duck Labs GitHub Actions Runners
 
-**Last Updated:** September 7, 2026
+**Last Updated:** October 27, 2026
 
 This document outlines security best practices and guidelines for the Red Duck Labs GitHub Actions self-hosted runners.
 
@@ -50,6 +50,87 @@ githubConfigSecret:
   github_token: ""  # Provided via --set flag
 ```
 
+**`RUNNER_TOKEN` uses beyond ARC registration:**
+- `prepare-trust-boundary` re-reads each member repository's fork-PR workflow
+  policy (`GET /repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos`),
+  which needs repository administration read on every member. Without it the
+  read fails and the operation fails closed before any runner-group change.
+- **Runner Acceptance Evidence** reads `redducklabs/aurolegal.ai` Actions runs,
+  jobs and tags, and cancels the acceptance probe run it has verified. It never
+  cancels a run it has not verified (repository, workflow path, `headSha`,
+  event, attempt, annotated tag resolving to the reviewed commit).
+
+### Burst capacity controls
+
+The burst design (`docs/specs/2026-10-26-runner-burst-autoscaling-design.md`)
+raises the fleet to at most 10 runner nodes and 20 runners. It keeps every
+earlier fail-closed control and adds:
+
+- Provider bounds as the node ceiling: baseline `min=max=count=2`, burst pools
+  0..6 and 0..2, maxima summing to at most 8; every guard rejects anything else.
+- One operation-aware pool-state gate (`scripts/verify-runner-pool-state.sh`)
+  before every fleet mutation, and an identity bracket around every mutation
+  (cluster, baseline pool and baseline node identities must not change).
+- `expected_sha` verified first and the shared non-cancelling
+  `runner-fleet-mutation` concurrency group on every fleet mutator (Deploy,
+  Scale Runners, Node Pool Sizing, Prepare Runner Platform, Deploy Cluster
+  Addons). Two documented exceptions have their own non-cancelling groups:
+  Emergency Stop (`runner-emergency-stop`) runs immediately, and in-flight
+  mutations then fail closed at their next identity comparison or admission;
+  Rebalance (`runner-rebalance`) skips while any fleet mutator is queued or
+  running and still passes the gate and per-deletion identity checks.
+- Emergency Stop leaves a classified `stopped` state (the base template at
+  `minRunners=maxRunners=0`); only the recovery paths admit it, and every other
+  operation rejects it.
+- Every Helm write keeps 100 revisions (`--history-max 100`). Rollback does not
+  depend on Helm history: Deploy `rollback` validates the committed, reviewed
+  `deploy/density-values.yaml` as the `density` contract (values and rendered
+  manifest) and upgrades the release to exactly that render, and Scale Runners
+  `record-density` verifies read-only that the live pre-burst release equals
+  it. Drain takes and verifies no revision.
+- Emergency Stop fence, client side (Ruling 33): Emergency Stop writes the
+  marker ConfigMap `arc-runners/runner-fleet-emergency-stop` before its Helm
+  write. While it exists the pool-state gate refuses every fleet mutator except
+  Deploy `deploy`/`rollback` dispatched with `acknowledge_emergency_stop=true`
+  (they delete the marker with uid/resourceVersion preconditions, inside the
+  identity bracket) and `remove-burst`; every fleet Helm write re-reads the
+  marker afterwards and re-applies 0/0 if it exists.
+- Emergency Stop fence, server side (Ruling 36): the client-side re-check runs
+  only if the writing process survives its Helm call. The
+  ValidatingAdmissionPolicy `runner-fleet-emergency-stop-fence`
+  (`deploy/runner-emergency-stop-fence.yaml`, `failurePolicy: Fail`, binding
+  `validationActions: [Deny]`) takes the marker as its parameter
+  (`paramRef`, `parameterNotFoundAction: Allow`): while the marker exists the
+  API server denies every CREATE or UPDATE of an AutoscalingRunnerSet in
+  `arc-runners` unless it keeps `maxRunners=0` and `minRunners` 0 or absent,
+  whoever sends it. A stale fleet run that is cancelled or loses its runner
+  right after its Helm write therefore cannot leave the fleet reopened.
+  Emergency Stop's own 0/0 write is allowed, the status subresource and DELETE
+  are not matched, and outside a stop the policy is inert. Deploy `deploy` and
+  `rollback` install it before their Helm write (server-side dry run whose
+  returned specs must equal the file, then a bracketed server-side apply and a
+  type-check readback); every other fleet mutator's admission requires the live
+  policy and binding to equal the file (an absent fence is tolerated only while
+  ARC is `density`/`density-stopped`, before the first burst deploy). After
+  writing the marker and before its Helm write, Emergency Stop proves the fence
+  enforces: a server-side dry-run patch of the AutoscalingRunnerSet to
+  `maxRunners=1` must be denied by this policy (retried for up to 30 s for the
+  admission informer); if not, the stop is still applied and the run fails.
+  Residual: while the marker exists the API server also denies the ARC
+  controller's own metadata updates of an AutoscalingRunnerSet that is not yet
+  0/0 (only in the seconds between the marker write and Emergency Stop's
+  write), and a deployment credential able to delete the policy can still
+  remove the fence; a missing or changed fence then fails the admission of
+  every later mutator that requires it, and Emergency Stop reports it red.
+- Runner pods marked `safe-to-evict: "false"`, so no node with a job is scaled
+  down; idle-runner retirement deletes only EphemeralRunners with no job.
+- A read-only acceptance controller: Runner Acceptance Evidence runs only
+  `kubectl get`, `doctl ... list` and read-only gate checks; repositories migrate
+  only after acceptance Phase E reports `READY_FOR_MIGRATION=true`.
+
+The privileged DinD co-tenancy trade-off and the selected-repository trust
+boundary are recorded in `docs/security/vulnerability-dismissals.md` (AOR-2).
+
 ### Container Registry Security
 
 **DigitalOcean Registry:**
@@ -69,51 +150,90 @@ or adopt it. If the object already exists before deploy, its Helm release and
 namespace annotations must identify `redducklabs-runners` in `arc-runners`,
 and its managed-by label must be `Helm`. Runner Pods set
 `automountServiceAccountToken: false`; server-side admission validation rejects
-an injected service-account token volume or mount. For a first install, the
-pinned scale-set chart is bootstrapped at zero runners to create this
-ServiceAccount under Helm ownership; the target Pod is then server-dry-run
-before runner capacity is enabled.
+an injected service-account token volume or mount. Deploy only upgrades an
+existing release; there is no first-install bootstrap (the pool-state gate
+requires exactly one deployed release of the pinned chart). A fresh cluster
+needs a separate, reviewed bootstrap procedure, which is out of scope of the
+burst design (Ruling 15 in the burst autoscaling design record).
 
 ## 🌐 Network Security
 
 ### Network Policies
 
-**Egress Control:**
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: runner-network-policy
-  namespace: arc-runners
-spec:
-  podSelector:
-    matchLabels:
-      actions.github.com/scale-set-name: redducklabs-runners
-  policyTypes:
-  - Egress
-  egress:
-  # Allow GitHub API access
-  - to: []
-    ports:
-    - protocol: TCP
-      port: 443  # HTTPS
-    - protocol: TCP
-      port: 80   # HTTP (for redirects)
-  # Allow DNS
-  - to: []
-    ports:
-    - protocol: UDP
-      port: 53
-```
+Runner network isolation is enforced by
+[`deploy/runner-network-policy.yaml`](../deploy/runner-network-policy.yaml)
+(design: `docs/specs/2026-10-26-runner-burst-autoscaling-design.md`,
+"Runner network isolation"). Runner pods include privileged DinD, so without
+it they could reach production pods and services, node kubelets and the VPC
+(`10.124.0.0/20`, including managed databases).
 
-**Ingress Restrictions:**
-```yaml
-# No ingress required for runners
-spec:
-  policyTypes:
-  - Ingress
-  ingress: []  # Deny all ingress
-```
+- One `networking.k8s.io/v1` NetworkPolicy, `redducklabs-runner-isolation`,
+  in `arc-runners`, selecting
+  `actions.github.com/scale-set-name=redducklabs-runners`, with
+  `policyTypes: [Ingress, Egress]` and no ingress rule (all ingress denied).
+- Egress only to kube-dns pods (`kube-system`, `k8s-app=kube-dns`) on UDP and
+  TCP 53, and to `0.0.0.0/0` except `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`, `100.64.0.0/10` and `169.254.0.0/16`. Those ranges cover the
+  pod CIDR `10.244.0.0/16`, the service CIDR `10.245.0.0/16`, the VPC and node
+  addresses. Jobs keep internet access for GitHub, registries and mirrors.
+- The DigitalOcean metadata service is also blocked by the DOKS-managed
+  CiliumClusterwideNetworkPolicy `deny-imds-egress` for every endpoint not
+  labeled `doks.digitalocean.com/allow-imds-egress=true`; Cilium deny rules
+  take precedence over allows. The `169.254.0.0/16` exception is defense in
+  depth.
+
+Allows are additive, so reading back one object does not prove the boundary.
+`scripts/verify-runner-network-policy.sh` validates the complete applicable
+policy set, read-only:
+
+- NetworkPolicies in `arc-runners`: exactly one, `redducklabs-runner-isolation`,
+  whose `spec` equals the committed file;
+- CiliumNetworkPolicies in `arc-runners`: none;
+- every CiliumClusterwideNetworkPolicy deny-only (only `egressDeny` /
+  `ingressDeny`; any `egress` or `ingress` allow fails, because a clusterwide
+  selector can match runner pods);
+- a Cilium policy CRD that is not installed counts as zero objects; any other
+  API error, including a failed CRD list, fails;
+- no pod in `arc-runners` labeled `doks.digitalocean.com/allow-imds-egress=true`.
+
+Deploy `deploy` installs the policy before the Helm upgrade: a server-side dry
+run, then a server-side apply inside the identity bracket (exact comparison and
+re-admission before it, exact comparison after it), then the policy-set
+validation, which must pass before the Helm upgrade runs. The pool-state gate
+requires the same validation on admission for `enable-burst`, `rebalance` and
+`acceptance-phase-c`; `drain` and `rollback` leave the policy in place.
+Acceptance Phase A runs a network probe from inside a runner pod (criterion
+`A-network`): DNS and HTTPS to github.com must work, and the metadata service, a
+`worker-pool` node's kubelet and SSH, a baseline runner node's kubelet, a
+runner node's public (ExternalIP) kubelet and SSH, `kubernetes.default`, and a
+ClusterIP service and a pod (not a kube-dns pod) in other namespaces must time
+out.
+
+**Scope of the control:** Cilium enforces the policy at the runner pod's
+network interface. A job that escapes the privileged DinD container to the
+node is outside the pod's network namespace and is not constrained by it; that
+path is covered by the accepted privileged-DinD co-tenancy risk (AOR-2 in
+`docs/security/vulnerability-dismissals.md`), not by this policy.
+
+### Docker Hub pull-through mirror
+
+The burst, burst-acceptance and drain contracts start the DinD `dockerd` with
+`--registry-mirror=https://mirror.gcr.io`. Anonymous Docker Hub pulls are
+limited per source IP, and a single CI run makes dozens of pulls, so many
+concurrent jobs on a few node IPs would exhaust the limit.
+
+- `mirror.gcr.io` is a public pull-through cache for Docker Hub operated by
+  Google. It is not a private registry and is not under Red Duck Labs control.
+- Only Docker Hub (`docker.io`) pulls use the mirror; other registries are
+  unaffected. A mirror miss or failure falls back to Docker Hub.
+- Images referenced by digest are still verified by digest: the daemon rejects
+  content whose digest does not match, so a compromised or stale mirror cannot
+  substitute a pinned image. Images referenced only by a mutable tag trust the
+  mirror's copy of that tag, as they would trust Docker Hub's.
+- The mirror is egress to a public Google endpoint and is already within the
+  runner pods' permitted public egress; no NetworkPolicy change is needed.
+- Density and legacy-isolated contracts do not carry the flag, so recorded
+  revisions of earlier releases remain valid rollback targets.
 
 ### Container Network Security
 
@@ -239,8 +359,16 @@ rules:
 ### Security Incident Procedures
 
 **1. Immediate Response:**
+
+Run **Emergency Stop Runners** in GitHub Actions (`confirm=STOP-RUNNERS`). It
+runs immediately in its own `runner-emergency-stop` concurrency group, sets the
+release to 0/0 on the pinned chart, and reads back the `stopped` state; recovery
+is in `docs/runbooks/node-pool-sizing.md`, "Emergency Stop". The local
+`scripts/emergency-stop.sh` is a legacy fallback for when GitHub Actions is
+unavailable.
+
 ```bash
-# Emergency stop all runners
+# Legacy local fallback only
 ./scripts/emergency-stop.sh
 
 # Isolate affected pods

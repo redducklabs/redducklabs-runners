@@ -1,0 +1,1 @@
+.items += [{"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "debug-shell", "namespace": "arc-runners", "labels": {"app": "debug"}}, "spec": {"containers": [{"name": "shell"}]}, "status": {"phase": "Succeeded"}}]

@@ -1,0 +1,46 @@
+# Runner network isolation (docs/specs/2026-10-26-runner-burst-autoscaling-design.md,
+# "Runner network isolation"). Runner pods, which include privileged DinD, get
+# no ingress and egress only to cluster DNS and the public internet. The
+# `except` ranges cover the pod CIDR 10.244.0.0/16, the service CIDR
+# 10.245.0.0/16, the VPC 10.124.0.0/20 (managed databases, node addresses and
+# kubelets), CGNAT and link-local (the DigitalOcean metadata service, which the
+# DOKS-managed CiliumClusterwideNetworkPolicy `deny-imds-egress` also blocks).
+#
+# Deploy `deploy` applies this file server-side before the Helm upgrade, and
+# scripts/verify-runner-network-policy.sh requires the live object's `spec` to
+# equal this file's `spec` exactly, so every field is written in its defaulted
+# form (explicit protocols, explicit policyTypes).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redducklabs-runner-isolation
+  namespace: arc-runners
+spec:
+  podSelector:
+    matchLabels:
+      actions.github.com/scale-set-name: redducklabs-runners
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16

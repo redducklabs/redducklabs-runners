@@ -1,135 +1,497 @@
-# Runbook: Runner Node Pool Sizing
+# Runbook: Runner Node Pools and Burst Autoscaling
 
-Reviewed target operating contract for the GitHub Actions runner pool. It is
-pending CI deployment and external live acceptance.
+Operating contract for the GitHub Actions runner fleet after the burst design
+(`docs/specs/2026-10-26-runner-burst-autoscaling-design.md`). It supersedes the
+fixed two-node / four-runner cap. Every change runs through CI from a reviewed
+commit, passed as `expected_sha`; nothing here is done from a workstation.
 
 - **Cluster:** `redducklabs-cluster` (context `do-sfo3-redducklabs-cluster`, region sfo3)
-- **Pool:** `github-runners-pool-16g`
-- **Node size:** `s-8vcpu-16gb` — 8 vCPU, 16 GB, **$96/node/month**
-- **Pool labels/taints:** `node-type=github-runner`, `workload-type=ci-cd`,
-  taint `github-runner=true:NoSchedule`
+- **Runner labels/taint (every runner pool):** `node-type=github-runner`,
+  `workload-type=ci-cd`, single taint `github-runner=true:NoSchedule`
+- **Pod budget (unchanged):** 3 CPU / 5 GiB request, 6 GiB shared limit for the
+  runner and its privileged DinD sidecar; two pods fit one 16 GB node.
 
-## Reviewed target invariant: two runner pods per node
+## Pools
 
-The August one-pod-per-node design is superseded. In the reviewed target, the
-runner and privileged DinD sidecar share a pod-level request of **3 CPU / 5 GiB
-memory** and a shared **6 GiB memory limit**. Neither container defines a
-competing CPU or memory budget.
+| Pool | Size | min | max | Role | Cost |
+|---|---|---|---|---|---|
+| `github-runners-pool-16g` | `s-8vcpu-16gb` | 2 | 2 (`count=2`) | baseline, two warm runners | $192/month fixed |
+| `github-runners-burst-16g` | `s-8vcpu-16gb` | 0 | 6 | primary burst (priority 100) | $0.143/node-hour |
+| `github-runners-burst-amd-16g` | `s-8vcpu-16gb-amd` | 0 | 2 | fallback burst (priority 50) | $0.167/node-hour |
 
-On a measured node with 13.32 GiB and 7880m allocatable, two target pods reserve
-10 GiB and 6 CPU. A third pod does not fit. Two $96 nodes would provide four
-self-hosted jobs with a fixed **$192 monthly cap**.
+The burst maxima sum to at most 8, so the autoscaler can never run more than
+10 runner nodes (worst case $992/month if every node ran all month). ARC runs
+`minRunners=2`, `maxRunners=20`: two warm runners prefer baseline (weight-100
+affinity) and every runner pod carries
+`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, so a node with a job
+on it is never scaled down. Idle runners stranded on burst nodes are retired by
+**Rebalance Runners** (hourly) and by Deploy `drain`.
 
-The reviewed pool and scale-set target is:
+A DOKS surge upgrade temporarily adds duplicate nodes; while one exists the
+pool-state gate (cluster not `running`, or more registered nodes than a pool's
+`count`) fails every fleet mutation until maintenance finishes.
 
+## ARC contracts
+
+| Contract | min/max | Placement | Reached by |
+|---|---|---|---|
+| `density` | 2/4 | no pool preference | the pre-burst release, committed as `deploy/density-values.yaml`; Deploy `rollback` |
+| `burst` | 2/20 | preferred baseline, safe-to-evict | Deploy `deploy` |
+| `burst-acceptance` | 8/20 or 4/20 | as `burst` | only inside Scale Runners `acceptance-phase-c` |
+| `drain` | 2/4 | **required** baseline, safe-to-evict | Deploy `drain` |
+| `burst-stopped` | 0/0 | the `burst` template | Emergency Stop from `burst` or `burst-acceptance` |
+| `density-stopped` | 0/0 | the `density` template | Emergency Stop from `density` |
+| `drain-stopped` | 0/0 | the `drain` template | Emergency Stop from `drain` |
+
+There is no ordinary min/max scaling: bounds change only by a reviewed commit to
+`deploy/dind-values.yaml` followed by Deploy. The three `stopped` states are
+what Emergency Stop leaves (see "Emergency Stop" below); only the recovery
+paths admit them.
+
+## Operations
+
+All mutating workflows verify `expected_sha` first, share the non-cancelling
+`runner-fleet-mutation` concurrency group (except Emergency Stop,
+`runner-emergency-stop`, and Rebalance, `runner-rebalance`; see below), admit
+the live state with
+`scripts/verify-runner-pool-state.sh --operation <op>`, and bracket every
+mutation with the identity contract (cluster ID, baseline pool ID and baseline
+node UID/providerID pairs never change; only the declared transition may).
+Every Helm write passes `--history-max 100`. Rollback does not depend on Helm
+history: it upgrades to the committed `deploy/density-values.yaml` (the
+reviewed values of the pre-burst release), so no revision has to survive the
+rollout. While an Emergency Stop marker exists, every workflow below refuses to
+run except as described in "Emergency Stop".
+
+| Workflow / input | Operation | Admits | Effect |
+|---|---|---|---|
+| Deploy GitHub Runners `operation=prepare-trust-boundary` (co-tenancy accepted) | trust boundary | admission evidence committed | runner group readback equals `deploy/trusted-runner-repositories.txt` |
+| Scale Runners `action=record-density` | read-only | `density` | verifies the live release is density 2/4 and equals the render of `deploy/density-values.yaml` (the rollback target) |
+| Node Pool Sizing `create-burst` (`apply`) | create pools closed | `density`/`burst`, 0–2 closed pools | both burst pools at `min=max=count=0` |
+| Node Pool Sizing `configure-expander` (`apply`) | expander | both pools present | `--expanders priority,random` and the priority ConfigMap |
+| Deploy GitHub Runners `operation=deploy` (co-tenancy accepted; `acknowledge_emergency_stop` to recover from a stop) | Emergency Stop fence and runner NetworkPolicy, then Helm to `burst` | `density`/`burst`/`burst-stopped`, pools present, expander configured | fence equals `deploy/runner-emergency-stop-fence.yaml` and runner network policy set valid (both checked before Helm); ASRS, values and manifest equal `burst` |
+| Node Pool Sizing `enable-burst` (`apply`) | open pools | `burst`; stages 0/0+0/0, 0/6+0/0, 0/6+0/2; runner network policy set valid | primary 0/6, then fallback 0/2 |
+| Node Pool Sizing `set-burst-maxima` (`primary_max`, `fallback_max`, `apply`) | move allowance | `burst`, both pools | lowers the donor first, reads back, then raises |
+| Rebalance Runners (hourly; dispatch with `expected_sha`) | retire idle burst runners | `burst`, `drain`; the stopped states or the Emergency Stop marker (notice only); runner network policy set valid | deletes idle burst-node EphemeralRunners only; skips with a notice while any fleet mutator is queued or running |
+| Scale Runners `action=acceptance-phase-c` | acceptance Phase C | `burst` (or interrupted `burst-acceptance`), burst enabled, runner network policy set valid | one lock-owning run; ends at `burst`; uploads `phase-c-evidence` |
+| Deploy GitHub Runners `operation=drain` | Helm to `drain`, wait | `burst`, `burst-acceptance`, `drain`, `burst-stopped` (no stop marker) | no runner pod on a burst node; burst pools at zero nodes |
+| Node Pool Sizing `remove-burst` (`apply`) | delete pools | `drain`/`drain-stopped`, or `density`/`density-stopped` with closed empty pools (also while the stop marker exists) | expanders reset; only baseline remains |
+| Deploy GitHub Runners `operation=rollback` (`acknowledge_emergency_stop` to recover from a stop) | Emergency Stop fence, then Helm upgrade to `deploy/density-values.yaml` | `drain`/`drain-stopped`/`density-stopped`/`density`, burst pools absent, the committed values validate as `density` | `density` readback, trust readback |
+| Emergency Stop Runners (`confirm=STOP-RUNNERS`) | stop marker, fence enforcement proof (dry-run denial), then Helm `--reuse-values` to 0/0 | any release (runs immediately, own group) | a `stopped` state and marker readback and the recovery to use; red if the fence did not deny the probe |
+| Runner Acceptance Evidence (`phase`, run IDs, `expected_sha`) | read-only evidence | any | acceptance verdict; cancels only its verified probe |
+| Runner Status | read-only | any | pools, burst node count per pool, ARC state |
+
+Node Pool Sizing runs without `apply` are dry runs that print the planned calls;
+run one first and read it. `scripts/runner-cost-report.sh --month YYYY-MM`
+reports runner node-hours and cost per cluster and node size from the invoice,
+with burst node-hours derived as runner node-hours minus two baseline nodes for
+the period (DigitalOcean does not itemize per pool).
+
+### Failure rules
+
+- **No Helm retry.** A failed Helm upgrade inside the identity bracket fails
+  the run. Read the failure, then re-dispatch the same operation: the re-run
+  re-admits the live state and is a no-op on its own postcondition.
+- **`STOP_FENCE`.** A Deploy, drain, Phase C or rollback run whose Helm write
+  found an Emergency Stop in effect (or could not read the stop marker)
+  re-applied 0/0 and failed. The fleet is stopped; recover as in "Emergency
+  Stop". Do not re-dispatch the failed operation without the acknowledgement.
+  With the server-side fence installed the stale write itself is usually
+  denied (Helm reports `ValidatingAdmissionPolicy
+  'runner-fleet-emergency-stop-fence' ... denied request`); the run still
+  re-applies 0/0 and fails the same way.
+- **Emergency Stop fence missing or different.** Admission fails with
+  `requires the Emergency Stop fence runner-fleet-emergency-stop-fence`. Run
+  Deploy `deploy` (from `density`, `burst` or `burst-stopped`) or `rollback`
+  (from the drain/density states, burst pools absent); both reinstall
+  `deploy/runner-emergency-stop-fence.yaml`. From `drain-stopped` run
+  `remove-burst` first (it does not require the fence), then `rollback`.
+- **`SCALE_TO_ZERO_REJECTED`.** If DigitalOcean refuses a closed (`0/0`) burst
+  pool, `create-burst` stops and creates nothing further. Stop the rollout and
+  re-plan. Never work around it with `min_nodes=1`: that is a permanent cost
+  floor the design rejects. Recover with `remove-burst` if one pool was created.
+- **Fork-PR policy read.** `prepare-trust-boundary` re-reads
+  `GET /repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos`
+  for every member with `RUNNER_TOKEN`, which therefore needs repository
+  administration read access on every member. Without it the read fails and
+  the operation fails closed with no runner-group change; grant the read and
+  re-dispatch. Do not remove the check.
+- **Phase C restore.** The always-run "Restore burst after Phase C" step
+  re-checks release identity and the live contract before returning ARC to
+  `burst`, but it does not repeat the full pool-state admission (the run already
+  holds the lock and was admitted at its start). If it fails, the fleet may be
+  left at `burst-acceptance`; recover with a re-run of `acceptance-phase-c`
+  (which restores `burst` first) or with Deploy `drain`.
+- **Fresh cluster.** The gate requires an existing ARC release
+  (`redducklabs-runners`, chart `gha-runner-scale-set-0.14.2`, `deployed`) and
+  controller release. A new or rebuilt cluster cannot be brought up with these
+  workflows; it needs a separate, reviewed bootstrap procedure (first Helm
+  install) before this runbook applies.
+
+## Rollout order
+
+Run every step from the same reviewed `main` commit and record it in the
+Rollout record below.
+
+1. **Verify the rollback target.** Scale Runners `action=record-density`. It
+   verifies that the live release equals the render of
+   `deploy/density-values.yaml`, the target Deploy `rollback` restores; if it
+   fails, stop and reconcile that file by a reviewed commit first.
+2. **Trust boundary.** Deploy GitHub Runners `operation=prepare-trust-boundary`,
+   co-tenancy accepted.
+3. **Pools.** Node Pool Sizing `create-burst` (dry run, then `apply`), then
+   `configure-expander` (dry run, then `apply`).
+4. **Deploy.** Deploy GitHub Runners `operation=deploy`, co-tenancy accepted,
+   then Node Pool Sizing `enable-burst` with `apply`.
+5. **Acceptance** phases A–E below.
+6. **Migrate repositories** only after Phase E prints
+   `READY_FOR_MIGRATION=true` and the Emergency Stop drill below passed, one
+   PR per repository: `keel` CI,
+   `aurolegal.ai` Class A workflows (and re-enable its fleet watchdog
+   schedule), `superfood-shred` CI.
+
+A rollout that failed before `deploy` (ARC `density`, pools closed) recovers
+with `remove-burst` alone. One that failed after `deploy` recovers with the
+Rollback sequence. Each step is a no-op on its own postcondition.
+
+## Acceptance
+
+The probe is `.github/workflows/runner-burst-acceptance.yml` in private
+`redducklabs/aurolegal.ai`, merged to its `main` by the owner. It is always
+dispatched from a **new annotated tag** on the reviewed commit and receives that
+commit as `expected_workflow_sha`; it fails before any work if `github.sha`
+differs. Modes: `batch` (`jobs` 1..20 entries; each waits until `jobs` entries
+are in progress on distinct runners, then runs a Docker build and container and
+holds 10 minutes) and `continuous` (64 entries, `max-parallel: 12`, each runs
+Docker and holds 4 minutes). In `batch` mode with `network_targets` set
+(Phase A), a `network-probe` job runs after the entries and checks the runner
+network isolation from inside a runner pod (spec "Runner network isolation"):
+DNS and HTTPS to github.com must work; the metadata service
+`169.254.169.254:80`, a `worker-pool` node's kubelet (`10250`) and SSH (`22`),
+a baseline runner node's kubelet on its VPC address, a runner node's public
+(ExternalIP) address on `10250` and `22`, `kubernetes.default:443`, a ClusterIP
+service and a pod in other namespaces must time out. It prints one
+`NETWORK_PROBE_RESULT` line and fails on any mismatch.
+
+The controller is **Runner Acceptance Evidence** in this repository. It verifies
+the probe run (repository, workflow path, `headSha`, `event=workflow_dispatch`,
+attempt 1, dispatch tag resolving to `expected_workflow_sha`) before reading the
+cluster, captures runner PodSpecs, node and pool placement, node creation times
+and events while the probe holds, evaluates `scripts/acceptance-verdict.py`, and
+uploads `acceptance-<phase>.json`. On a failure or its deadline (batch 45
+minutes, continuous 150, Phase C 300) it runs `gh run cancel` on the probe,
+waits up to 10 minutes for `completed`, and verifies that no probe job is queued
+or running and no runner is assigned to it. Its GitHub reads, the cancel, and
+the trust readback use `RUNNER_TOKEN`, which needs read access to
+`redducklabs/aurolegal.ai` Actions plus permission to cancel its runs.
+
+Pickup thresholds for phases A, B and E: warm pickup p95 ≤ 90 s, cold pickup
+p95 ≤ 8 minutes (a job is cold when its runner's node was created after the job
+was queued). Phase D has no pickup criterion: the drain caps the fleet at four
+runners by design. Every phase also fails if a runner container was OOMKilled,
+restarted or evicted (container statuses and events). The record keeps every
+runner PodSpec with literal env values redacted.
+
+Dispatch pattern (replace the tag, SHAs and run IDs; `$AURO` is the reviewed
+aurolegal.ai commit, `$SHA` this repository's reviewed commit):
+
+```bash
+# Phase A network probe targets (read-only lookups; addresses only):
+# a worker-pool node's VPC address, a baseline runner node's VPC and public
+# addresses, the metrics-server ClusterIP service, and the metrics-server pod
+# on its container port. Do not use a kube-dns pod: the runner policy allows
+# egress to kube-dns, and the verdict rejects it as a forbidden target.
+WORKER=$(kubectl get nodes -l doks.digitalocean.com/node-pool=worker-pool \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+RUNNER_NODE=$(kubectl get nodes -l doks.digitalocean.com/node-pool=github-runners-pool-16g \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+RUNNER_PUBLIC=$(kubectl get nodes -l doks.digitalocean.com/node-pool=github-runners-pool-16g \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+SERVICE=$(kubectl get service metrics-server -n kube-system -o jsonpath='{.spec.clusterIP}:{.spec.ports[0].port}')
+POD=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=metrics-server \
+  -o jsonpath='{.items[0].status.podIP}:{.items[0].spec.containers[0].ports[0].containerPort}')
+TARGETS="worker_node=${WORKER} runner_node=${RUNNER_NODE} runner_node_public=${RUNNER_PUBLIC} service=${SERVICE} pod=${POD}"
+
+TAG=runner-burst-acceptance-$(date -u +%Y%m%d-%H%M%S)
+git -C aurolegal.ai tag -a "$TAG" "$AURO" -m "runner burst acceptance"
+git -C aurolegal.ai push origin "$TAG"
+gh workflow run runner-burst-acceptance.yml -R redducklabs/aurolegal.ai --ref "$TAG" \
+  -f expected_workflow_sha="$AURO" -f mode=batch -f jobs=16 -f network_targets="$TARGETS"
+PROBE=$(gh run list -R redducklabs/aurolegal.ai -w runner-burst-acceptance.yml -b "$TAG" \
+  -L 1 --json databaseId -q '.[0].databaseId')
+gh workflow run runner-acceptance-evidence.yml -R redducklabs/redducklabs-runners \
+  -f phase=A -f probe_run_id="$PROBE" -f dispatch_tag="$TAG" \
+  -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
 ```
-minRunners=2  maxRunners=4
-min_nodes=2   max_nodes=2   count=2
+
+Dispatch the evidence workflow immediately after the probe; it must observe the
+probe while it holds. Use a new tag for every probe run (set `TAG`, push it, and
+look up `PROBE` as above before each phase). Shared variables:
+
+```bash
+FLEET=redducklabs/redducklabs-runners
+AURO_REPO=redducklabs/aurolegal.ai
+probe() {  # mode [jobs]
+  gh workflow run runner-burst-acceptance.yml -R "$AURO_REPO" --ref "$TAG" \
+    -f expected_workflow_sha="$AURO" -f mode="$1" -f jobs="${2:-16}"
+}
+latest() {  # workflow file in $FLEET -> newest run ID
+  gh run list -R "$FLEET" -w "$1" -L 1 --json databaseId -q '.[0].databaseId'
+}
 ```
 
-`deploy/dind-values.yaml` is the source of truth. The CI workflows reject
-larger runner bounds, node-pool values other than 2/2, and live-capacity drift.
+Phase B (fallback from zero):
 
-## Reviewed target configuration
+```bash
+gh workflow run node-pool-sizing.yml -R "$FLEET" -f operation=set-burst-maxima \
+  -f primary_max=0 -f fallback_max=2 -f apply=true -f expected_sha="$SHA"
+# wait for that run to succeed and both burst pools to show 0 nodes, then:
+probe batch 8    # then set PROBE as above
+gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=B \
+  -f probe_run_id="$PROBE" -f dispatch_tag="$TAG" -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
+# when the probe run completes (the evidence run waits up to 30 minutes):
+gh workflow run node-pool-sizing.yml -R "$FLEET" -f operation=set-burst-maxima \
+  -f primary_max=6 -f fallback_max=2 -f apply=true -f expected_sha="$SHA"
+```
 
-| Setting | Value | Where it lives |
-|---|---|---|
-| `minRunners` | 2 | `deploy/dind-values.yaml` |
-| `maxRunners` | 4 | `deploy/dind-values.yaml` |
-| `min_nodes` | 2 | node pool (applied by the workflow below) |
-| `max_nodes` | 2 | node pool (applied by the workflow below) |
-| Per pod | 3 CPU / 5 GiB request; 6 GiB shared memory limit | `deploy/dind-values.yaml` |
+Phase C (idle retirement; no probe):
 
-**Target cost floor and ceiling: $192/month** (two fixed nodes).
+```bash
+gh workflow run scale-runners.yml -R "$FLEET" -f action=acceptance-phase-c -f expected_sha="$SHA"
+PHASE_C=$(latest scale-runners.yml)
+gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=C \
+  -f phase_c_run_id="$PHASE_C" -f expected_sha="$SHA"
+```
 
-The recorded GitHub-hosted comparison is 3,000 Team-plan included private
-minutes plus $0.006 per standard Linux private minute. $192 equals 35,000
-private hosted minutes per month. The `admin:org` credential could not retrieve
-organization billing totals, so this does not measure actual usage. Standard
-GitHub-hosted minutes for public repositories are free.
+Phase D (drain under continuing load):
 
-## CI-only change and rollback path
+```bash
+probe continuous    # then set PROBE as above; wait until about 12 entries run
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=drain -f expected_sha="$SHA"
+DRAIN=$(latest deploy-runners.yml)
+gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=D \
+  -f probe_run_id="$PROBE" -f drain_run_id="$DRAIN" -f dispatch_tag="$TAG" \
+  -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
+```
 
-Do not resize the runner pool, alter runner bounds, or change the memory budget
-from a workstation. The local `scripts/scale-runners.sh` helper accepts only
-`status`. CI uses the reviewed commit's `expected_sha` for all mutation paths:
+Phase E (restore and ready-for-migration): after Phase D, run Node Pool Sizing
+`remove-burst` (`apply=true`), Deploy `rollback`, then rollout steps 3–4.
 
-1. Run Deploy GitHub Runners with `operation=prepare-trust-boundary` and explicit
-   privileged co-tenancy acceptance. It reconciles and reads back the private
-   runner group without Helm, Kubernetes, or DigitalOcean mutation.
-2. Run Scale Runners with `action=rollout-quiesce` from that same SHA. Record
-   the emitted post-quiesce Helm revision before any node-pool mutation. The
-   emitted revision is the private 2/2 legacy-isolated rollback target.
-3. Run Node Pool Sizing from that same SHA. Node Pool Sizing accepts only 2/2.
-   Before lowering `max_nodes`, it performs two complete
-   observations of the pool, exact Helm values and manifest plus live ASRS in
-   the private 2/2 legacy-isolated state produced by rollout-quiesce, queue
-   demand, and two Ready nodes. It verifies that same legacy-isolated state
-   immediately after lowering the maximum; pod-level density state cannot
-   authorize this transition. The provider pool must expose
-   exactly the two intended custom labels and the single
-   `github-runner=true:NoSchedule` taint. Each live runner node must carry both
-   labels and that taint, with no additional `NoSchedule`/`NoExecute` taint the
-   runner does not tolerate. Cluster ID, pool ID, and sorted node
-   UID/providerID pairs must remain identical between observations.
-4. Run Deploy GitHub Runners with `operation=deploy` from the same SHA. It runs
-   server-side dry-runs of the rendered scale set and representative Pod before
-   Helm mutation. Deploy does not create a rollback revision; rollback mode
-   consumes the recorded rollback revision from rollout-quiesce.
-5. Use Deploy GitHub Runners with `operation=rollback`, that saved revision,
-   and the same SHA to restore the isolated 2/2 runner template. CI reads back
-   the runner group and public-workflow scan after rollback.
+```bash
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=rollback -f expected_sha="$SHA"
+ROLLBACK=$(latest deploy-runners.yml)   # wait for it to succeed, then rollout steps 3-4
+BASELINE_RUN=<the passing Phase A Runner Acceptance Evidence run ID>
+probe batch 8    # then set PROBE as above
+gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=E \
+  -f probe_run_id="$PROBE" -f rollback_run_id="$ROLLBACK" -f baseline_run_id="$BASELINE_RUN" \
+  -f dispatch_tag="$TAG" -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
+```
 
-The trust boundary is `redducklabs-private-runners`, `visibility=selected`,
-public access disabled, and exactly `aurolegal.ai`, `autoduck`, `manager`,
-`platform-observability`, `redducklabs`, `redducklaw`, `therapy-link`,
-`zipbot-internal`, and `zipbot-v2`. CI scans all public organization workflows;
-any direct or unresolved dynamic use of `redducklabs-runners` fails closed.
-The only workflow entries skipped without a contents read are GitHub's exact
-managed dynamic paths `dynamic/agents/copilot-pull-request-reviewer`,
-`dynamic/dependabot/dependabot-updates`, and
-`dynamic/github-code-scanning/codeql`; every unknown or near-miss
-non-repository path fails closed. Fleet and prerequisite mutation workflows
-share the non-cancelling `runner-fleet-mutation` concurrency group.
+The evidence run verifies the probe first and marks it for cleanup, then the
+anchor runs; a rejected anchor run still cancels the verified probe.
 
-## Deterministic acceptance and end-of-feature audit
+| Phase | Setup | Probe | Evidence dispatch | Pass criteria |
+|---|---|---|---|---|
+| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=16`, `network_targets` | `phase=A`, probe | 16 distinct concurrent runners; exactly 4 on baseline; every burst node in the primary pool; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
+| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=8` | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 4 runners on baseline and 4 on exactly two new fallback nodes; a passing pool-state check (compatibility, headroom) covering both fallback nodes; primary back at 0/6; pickup thresholds |
+| C. Idle retirement and return to zero | after A, pools at 0 nodes | none | dispatch Scale Runners `acceptance-phase-c`, then `phase=C`, `phase_c_run_id` | every cycle 4 baseline + 4 burst at minRunners=8 with nothing retired; a burst survivor retired (or three cycles recorded `fixture-only`, which passes with a tracked follow-up); burst pools at zero nodes within 60 minutes; `jobs_killed=0` (fleet jobs, on `redducklabs-runners-*` runners, cancelled or failed with `completed_at` inside the Phase C run, in every attempt of every workflow run created up to 65 days before it, measured by the evidence workflow); ARC `burst` |
+| D. Drain under continuing load | after C | `continuous` | start the probe, wait until about 12 entries run, dispatch Deploy `drain`, then `phase=D`, probe, `drain_run_id` | drain run is this repository's Deploy `drain` at `$SHA`, success; ≥ 8 entries in progress when its "Drain runners" step started; ≥ 1 in progress throughout until it completed; entries still queued or running when it completed; every entry succeeded; every scheduled runner pod created after the drain READBACK is on baseline (pods never seen scheduled are reported, not failed); no `TriggeredScaleUp` for a runner pod after it; burst pools at zero nodes; ARC `drain` |
+| E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` | `phase=E`, probe, `rollback_run_id`, `baseline_run_id` | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline, observed in the evidence workflow's final collection (`latest_collection_at`): Running, Ready, not terminating and idle; smoke run passes; prints `READY_FOR_MIGRATION=true` |
 
-Acceptance begins only after trust preparation and the fixed-capacity deployment
-complete from the same reviewed SHA. The private
-`redducklabs/aurolegal.ai` workflow is dispatched from a unique annotated tag
-whose target is the reviewed workflow SHA, accepts that SHA as
-`expected_workflow_sha`, and proves four overlapping jobs on four distinct
-ephemeral runners with 2+2 placement across the two existing nodes. The
-migrated toolkit workflow is dispatched from its reviewed tag and SHA, checks
-out source `f042c7192797e59b9c10ab034a4d4c2bbcaee1ca`, and runs its four-version
-matrix on GitHub-hosted runners. The controller verifies each run's `headSha`;
-the toolkit workload must not use ARC.
+Phase B note: there is no alternate Phase B shape. `create-burst` already
+created both pools at `max_nodes=0`, so DigitalOcean accepts a closed primary. If
+the `set-burst-maxima primary_max=0` run is nevertheless rejected, stop
+acceptance: Phase B needs a reviewed change to this procedure and to
+`scripts/acceptance-verdict.py` (which accepts only primary 0/0, eight jobs and
+4 baseline + 4 fallback runners) before it is re-run. A provider 422/backoff is
+not reproduced live; that path is covered by fixtures and the documented
+autoscaler behavior and is recorded as untested live.
 
-The end-of-feature audit records the user’s explicit privileged co-tenancy
-acceptance; runner group name, selected/private-only policy, and exact
-repository list; public-workflow scan results; reviewed and dispatched SHAs;
-the rollback Helm revision; four-runner overlap and 2+2 placement; actual
-PodSpecs; workload results; node count; OOM, restart, eviction, and scheduling
-events from deployment through completion.
+Phase C note: ARC chooses which surplus runners to remove. If no idle runner is
+left on a burst node in three cycles, the result is `fixture-only`; record it
+and track a follow-up. Phase C never passes on node scale-down alone without
+recording which path occurred.
 
-## Diagnostics and shared-budget OOM investigation
+Phase A network probe: the evidence workflow reads the `network-probe` job log
+(`NETWORK_PROBE_RESULT`) and checks the targets read-only (`kubectl get nodes`,
+`kubectl get services -A`, and the pod by `status.podIP`). A forbidden
+connection that succeeds or is refused (the path is open) fails `A-network`, as
+does a target that does not resolve to the kind of object the spec names.
 
-Run **Runner Status** first. It reports pod and container metrics, restarts,
-OOM kills, evictions, node headroom, fixed-capacity drift, and provider-capacity
-diagnostics. Its provider data is an allow-listed, redacted subset of the DOKS
-autoscaler ConfigMap: `Healthy`, `NoCandidates`, `NoActivity`, or `Backoff`,
-with a capacity-related `cloudProviderError` only. Missing or changed provider
-text produces `Autoscaler diagnostics unavailable` and does not bypass the hard
-capacity gates.
+**Emergency Stop drill (after Phase E, before any migration).** Prove the
+server-side fence (Ruling 36) live while only the acceptance probe uses the
+fleet (no probe running):
 
-An `OOMKilled` result identifies the killed process, not the component that
-used most of the shared 6 GiB budget. Attribute an incident only after reviewing
-aggregate pod use, both containers' use and restarts, headroom, and events.
+```bash
+# Read-only: the fence Deploy installed equals the committed file.
+python3 -B scripts/lib/runner_stop_fence.py verify --require-type-checked
+gh workflow run emergency-stop.yml -R "$FLEET" -f confirm=STOP-RUNNERS \
+  -f reason="acceptance drill: server-side stop fence"
+STOP=$(latest emergency-stop.yml)
+gh run watch "$STOP" -R "$FLEET" --exit-status
+gh run view "$STOP" -R "$FLEET" --log | grep -E 'STOP_FENCE_PROBE|API server denies'
+# Recover: burst-stopped -> burst.
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=deploy \
+  -f accept_privileged_runner_co_tenancy=true -f acknowledge_emergency_stop=true -f expected_sha="$SHA"
+```
+
+The drill passes only if the Emergency Stop run is green, its "Verify stop
+fence" step logs `STOP_FENCE_PROBE: a dry-run maxRunners=1 write is denied` and
+"The API server denies non-zero runner writes while the stop marker exists",
+Runner Status shows `burst-stopped` with the marker, and the acknowledged
+Deploy then restores `burst` (its log shows `STOP_FENCE_PROBE: ... allowed`
+after the marker delete). Record both run IDs in the Rollout record. A red
+"Report fence failure" step fails the drill: stop, fix the fence by a reviewed
+change, and repeat the drill.
+
+Only Phase E's `READY_FOR_MIGRATION=true`, followed by a passing Emergency Stop
+drill, authorizes repository migration. A successful Phase D proves recovery
+and leaves the fleet drained. If any phase fails, run Rollback before any
+migration PR merges.
+
+## Rollback
+
+Ordered CI recovery; each step reads back its postcondition before the next.
+
+1. Deploy GitHub Runners `operation=drain`. It moves ARC to `drain` (max 4,
+   required baseline affinity), retires idle burst runners every 2 minutes and
+   waits until no runner pod is on a burst node and both burst pools report zero
+   nodes. Busy jobs are never interrupted. A run waits at most 300 minutes; on
+   timeout it fails and leaves `drain`; re-dispatch to resume the wait.
+2. Node Pool Sizing `remove-burst` with `apply`. It observes zero nodes and no
+   runner pods in both burst pools twice, resets the expanders to the default
+   and deletes the pools.
+3. Deploy GitHub Runners `operation=rollback`. It validates the committed
+   `deploy/density-values.yaml` as the `density` contract (values and rendered
+   manifest) and upgrades the release to exactly that render, independent of
+   Helm history. With the burst pools gone, the `density` template can only
+   schedule on baseline.
+
+Migrated repositories revert their `runs-on` PRs.
+
+## Emergency Stop
+
+**Emergency Stop Runners** (`confirm=STOP-RUNNERS`) first writes the stop
+marker, the ConfigMap `arc-runners/runner-fleet-emergency-stop` (the run id and
+the time), then sets the release to `minRunners=maxRunners=0` with
+`--reuse-values` on the pinned chart, so the template is unchanged and the gate
+classifies the result as `burst-stopped`, `density-stopped` or `drain-stopped`.
+ARC deletes idle runners at once; a busy runner finishes its job first. The run
+reads the stopped state and the marker back and its summary names the recovery
+below. If the marker write fails, the stop is still applied and the run fails;
+re-dispatch Emergency Stop.
+
+It uses its own non-cancelling concurrency group, `runner-emergency-stop`, and
+does not wait for a running Deploy `drain` or Scale Runners Phase C (both hold
+`runner-fleet-mutation` for hours). The marker fences them (Ruling 33):
+
+- While the marker exists, every fleet workflow is refused at admission,
+  except Runner Status and Rebalance (both report the stop; Rebalance retires
+  nothing), Node Pool Sizing `remove-burst` (it deletes only empty closed pools
+  and is the first recovery step from `drain-stopped`), and Deploy `deploy` or
+  `rollback` dispatched with `acknowledge_emergency_stop=true`.
+- An acknowledging run deletes the marker inside its identity bracket before
+  its first write; if a newer stop rewrote the marker in between, the delete
+  fails and the fleet stays stopped.
+- Every fleet Helm write re-reads the marker afterwards. A run interrupted by
+  the stop that still reaches Helm sees it, re-applies 0/0 and fails with
+  `STOP_FENCE`. A run that reaches its next identity comparison or admission
+  first fails there and changes nothing further; its always-run Phase C cleanup
+  also refuses.
+- **Server-side fence (Ruling 36).** The marker is also the parameter of the
+  ValidatingAdmissionPolicy `runner-fleet-emergency-stop-fence`
+  (`deploy/runner-emergency-stop-fence.yaml`). While it exists the API server
+  denies every AutoscalingRunnerSet write that is not 0/0, so a run cancelled
+  (or whose runner is lost) right after a stale Helm write cannot leave the
+  fleet reopened. Deploy `deploy` and `rollback` install the fence before
+  their Helm write; every other fleet workflow except Runner Status,
+  `record-density` and `remove-burst` refuses to run while it is missing or
+  differs from the file (an absent fence is tolerated while ARC is `density`
+  or `density-stopped`, before the first burst deploy). Emergency Stop, after
+  writing the marker and before its Helm write, proves the fence enforces (a
+  server-side dry-run patch to `maxRunners=1` must be denied, retried for up
+  to 30 s). If it is missing or not enforcing the stop is still applied and
+  the run fails at "Report fence failure": run Deploy `deploy` (or `rollback`)
+  with `acknowledge_emergency_stop=true` to install it, then re-dispatch
+  Emergency Stop if the fleet must stay stopped. An acknowledging run waits up
+  to 30 s after deleting the marker until the fence allows writes; if it
+  still denies, the run fails before writing: re-dispatch it (the marker is
+  gone, so no acknowledgement is needed).
+- **Order of an acknowledged Deploy `deploy`.** The fence judges server-side
+  dry runs like real writes, so the nonzero ASRS compatibility preflight
+  cannot run while the marker exists. The run therefore does every local check
+  first ("Render and validate candidate": render, burst-contract validation,
+  manifest hash; the admission and `expected_sha` checks before it), then
+  "Acknowledge Emergency Stop" (preconditioned delete and the wait above),
+  then "Server-side preflight candidate", then the fence and NetworkPolicy
+  steps, the re-admission and Helm. Rollback renders and validates locally
+  before its acknowledgement and has no ASRS server dry run. Without the
+  acknowledgement the order is the same with the acknowledgement skipped.
+- **Stopped without a marker.** If anything after the acknowledgement fails
+  before the Helm write (the server-side preflight, the fence or NetworkPolicy
+  steps, a re-admission or identity comparison), nothing was written to the
+  release: the fleet stays at its stopped state (0/0) but the marker is gone,
+  so the server-side fence no longer holds it. Runner Status shows the
+  `*-stopped` state with no `STOP:` line. Fix the cause, then re-dispatch the
+  same recovery (Deploy `deploy` from `burst-stopped`, `rollback` from
+  `drain-stopped`/`density-stopped`); `acknowledge_emergency_stop` is not
+  needed and is a no-op without a marker. If the fleet must stay stopped
+  until then, re-dispatch Emergency Stop, which writes a new marker.
+
+Treat those failures as expected and recover from the stopped state:
+
+| Stopped state | Recovery (CI only, reviewed `expected_sha`) |
+|---|---|
+| `burst-stopped` | Deploy `operation=deploy`, `acknowledge_emergency_stop=true`, restores `burst` (2/20). To leave burst afterwards: Deploy `operation=drain`, then `remove-burst`, then Deploy `rollback`. |
+| `drain-stopped` (stopped during a drain) | Node Pool Sizing `remove-burst` once both burst pools have zero nodes (busy jobs finish first), then Deploy `operation=rollback`, `acknowledge_emergency_stop=true`. Deploy `drain` does not admit `drain-stopped`. |
+| `density-stopped` | `remove-burst` if closed burst pools exist, then Deploy `operation=rollback`, `acknowledge_emergency_stop=true` (restores `deploy/density-values.yaml`). |
+
+```bash
+gh workflow run deploy-runners.yml -R "$FLEET" -f operation=rollback \
+  -f acknowledge_emergency_stop=true -f expected_sha="$SHA"
+```
+
+Rebalance treats a stopped state or the marker as nothing to rebalance. Every
+other operation rejects them. If the stop itself fails part-way, re-dispatch
+Emergency Stop; it is idempotent on a stopped release.
+
+Rebalance Runners uses its own group, `runner-rebalance`, so an hourly run never
+queues behind (or displaces a pending run of) a fleet mutation. Each run first
+lists queued and running Deploy, Scale Runners, Node Pool Sizing and Emergency
+Stop runs and ends with a "nothing to rebalance" notice if any exists.
+
+## Diagnostics
+
+Run **Runner Status** first: pod and container metrics, restarts, OOM kills,
+evictions, node headroom, pool state, burst node count per pool, and redacted
+autoscaler status (`Healthy`, `NoCandidates`, `NoActivity`, `Backoff`). An
+`OOMKilled` result names the killed process, not the component that used most of
+the shared 6 GiB budget; attribute it only after reviewing both containers' use,
+restarts, headroom and events.
 
 ## Security trade-off
 
-Two jobs share each runner node while each pod includes privileged DinD. That
-restores cross-job co-tenancy and its larger kernel-level blast radius. The
-explicit user acceptance, selected-repository trust boundary, public-workflow
-scan, and CI-only rollout records are required controls; see
+Two jobs share each runner node while each pod includes privileged DinD. The
+explicit co-tenancy acceptance, the selected-repository trust boundary with
+re-read fork-PR policies, the public-workflow scan and CI-only rollout records
+are the required controls; see
 [`docs/security/vulnerability-dismissals.md`](../security/vulnerability-dismissals.md).
+
+## Rollout record
+
+One row per CI run. Record the reviewed SHA, the run URL and the result before
+starting the next step.
+
+| Date (UTC) | Step | Workflow / operation | `expected_sha` | Run URL | Result / notes |
+|---|---|---|---|---|---|
+| | 1 | Scale Runners `record-density` | | | live release equals `deploy/density-values.yaml` |
+| | 2 | Deploy `prepare-trust-boundary` | | | |
+| | 3 | Node Pool Sizing `create-burst` | | | |
+| | 3 | Node Pool Sizing `configure-expander` | | | |
+| | 4 | Deploy `deploy` | | | |
+| | 4 | Node Pool Sizing `enable-burst` | | | |
+| | 5A | Acceptance A (probe tag / evidence run) | | | |
+| | 5B | Acceptance B + `set-burst-maxima` restore | | | |
+| | 5C | Scale Runners `acceptance-phase-c` + evidence | | | result `retired` / `fixture-only` |
+| | 5D | Deploy `drain` + evidence | | | |
+| | 5E | `remove-burst`, `rollback`, steps 3–4, evidence | | | `READY_FOR_MIGRATION=` |

@@ -1,0 +1,41 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumClusterwideNetworkPolicy",
+      "metadata": {
+        "name": "deny-imds-egress",
+        "labels": {
+          "doks.digitalocean.com/managed": "true"
+        },
+        "generation": 1,
+        "resourceVersion": "1500"
+      },
+      "spec": {
+        "egressDeny": [
+          {
+            "toCIDR": [
+              "169.254.169.254/32"
+            ]
+          }
+        ],
+        "endpointSelector": {
+          "matchExpressions": [
+            {
+              "key": "doks.digitalocean.com/allow-imds-egress",
+              "operator": "NotIn",
+              "values": [
+                "true"
+              ]
+            }
+          ]
+        },
+        "enableDefaultDeny": {
+          "egress": false
+        }
+      }
+    }
+  ]
+}

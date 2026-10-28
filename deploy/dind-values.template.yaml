@@ -11,10 +11,10 @@ githubConfigSecret:
   github_token: ""  # SET VIA ENVIRONMENT VARIABLE
 
 # Runner scaling configuration.
-# Size these against your node pool: the resource requests below decide how many
+# Size these against your node pools: the resource requests below decide how many
 # runner pods fit on a node, and therefore how many nodes maxRunners needs.
 minRunners: 2
-maxRunners: 4
+maxRunners: 20
 
 # Runner scale set name (used in workflows as: runs-on: your-runner-name)
 runnerScaleSetName: "YOUR-RUNNER-NAME"
@@ -45,7 +45,24 @@ runnerGroup: "YOUR-RUNNER-GROUP"
 
 # Runner template configuration
 template:
+  metadata:
+    annotations:
+      # Keep the cluster autoscaler from evicting a runner pod mid-job.
+      cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
   spec:
+    # Prefer a baseline node pool; burst nodes are used only when it is full.
+    # REPLACE: the node-pool name must match your baseline pool.
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: doks.digitalocean.com/node-pool
+              operator: In
+              values:
+              - YOUR_BASELINE_POOL
+
     # Runner jobs do not need Kubernetes API credentials.
     automountServiceAccountToken: false
 
@@ -84,6 +101,7 @@ template:
         - dockerd
         - --host=unix:///var/run/docker.sock
         - --group=$(DOCKER_GROUP_GID)
+        - --registry-mirror=https://mirror.gcr.io
       env:
         - name: DOCKER_GROUP_GID
           value: "123"

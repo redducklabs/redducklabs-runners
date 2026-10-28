@@ -1,0 +1,290 @@
+# Rendered with helm template (gha-runner-scale-set 0.14.2, kube 1.36.3) from
+# deploy/dind-values.yaml with minRunners=8 maxRunners=20. The token is a placeholder.
+---
+# Source: gha-runner-scale-set/templates/no_permission_serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redducklabs-runners-gha-rs-no-permission
+  namespace: arc-runners
+  labels:
+    helm.sh/chart: gha-rs-0.14.2
+    app.kubernetes.io/name: redducklabs-runners
+    app.kubernetes.io/instance: redducklabs-runners
+    app.kubernetes.io/version: "0.14.2"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gha-rs
+    actions.github.com/scale-set-name: redducklabs-runners
+    actions.github.com/scale-set-namespace: arc-runners
+  annotations:
+  finalizers:
+    - actions.github.com/cleanup-protection
+---
+# Source: gha-runner-scale-set/templates/githubsecret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redducklabs-runners-gha-rs-github-secret
+  namespace: arc-runners
+  labels:
+    helm.sh/chart: gha-rs-0.14.2
+    app.kubernetes.io/name: redducklabs-runners
+    app.kubernetes.io/instance: redducklabs-runners
+    app.kubernetes.io/version: "0.14.2"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gha-rs
+    actions.github.com/scale-set-name: redducklabs-runners
+    actions.github.com/scale-set-namespace: arc-runners
+  annotations:
+  finalizers:
+    - actions.github.com/cleanup-protection
+data:
+  github_token: RklYVFVSRS1QTEFDRUhPTERFUg==
+---
+# Source: gha-runner-scale-set/templates/manager_role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: redducklabs-runners-gha-rs-manager
+  namespace: arc-runners
+  labels:
+    helm.sh/chart: gha-rs-0.14.2
+    app.kubernetes.io/name: redducklabs-runners
+    app.kubernetes.io/instance: redducklabs-runners
+    app.kubernetes.io/version: "0.14.2"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gha-rs
+    actions.github.com/scale-set-name: redducklabs-runners
+    actions.github.com/scale-set-namespace: arc-runners
+    app.kubernetes.io/component: manager-role
+  annotations:
+  finalizers:
+    - actions.github.com/cleanup-protection
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - pods/status
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - delete
+  - get
+  - patch
+  - update
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - patch
+  - update
+---
+# Source: gha-runner-scale-set/templates/manager_role_binding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redducklabs-runners-gha-rs-manager
+  namespace: arc-runners
+  labels:
+    helm.sh/chart: gha-rs-0.14.2
+    app.kubernetes.io/name: redducklabs-runners
+    app.kubernetes.io/instance: redducklabs-runners
+    app.kubernetes.io/version: "0.14.2"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gha-rs
+    actions.github.com/scale-set-name: redducklabs-runners
+    actions.github.com/scale-set-namespace: arc-runners
+    app.kubernetes.io/component: manager-role-binding
+  annotations:
+  finalizers:
+    - actions.github.com/cleanup-protection
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: redducklabs-runners-gha-rs-manager
+subjects:
+- kind: ServiceAccount
+  name: 
+    arc-gha-rs-controller
+  namespace: 
+    arc-systems
+---
+# Source: gha-runner-scale-set/templates/autoscalingrunnerset.yaml
+apiVersion: actions.github.com/v1alpha1
+kind: AutoscalingRunnerSet
+metadata:
+  name: redducklabs-runners
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/component: "autoscaling-runner-set"
+    helm.sh/chart: gha-rs-0.14.2
+    app.kubernetes.io/name: redducklabs-runners
+    app.kubernetes.io/instance: redducklabs-runners
+    app.kubernetes.io/version: "0.14.2"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gha-rs
+    actions.github.com/scale-set-name: redducklabs-runners
+    actions.github.com/scale-set-namespace: arc-runners
+  annotations:
+    actions.github.com/values-hash: 67e44c426b3a06d59d00a9e13c85513b72219f783db74a4708f9beab02e9f21
+    actions.github.com/cleanup-github-secret-name: redducklabs-runners-gha-rs-github-secret
+    actions.github.com/cleanup-manager-role-binding: redducklabs-runners-gha-rs-manager
+    actions.github.com/cleanup-manager-role-name: redducklabs-runners-gha-rs-manager
+    actions.github.com/cleanup-no-permission-service-account-name: redducklabs-runners-gha-rs-no-permission
+
+spec:
+  githubConfigUrl: https://github.com/redducklabs
+  githubConfigSecret: redducklabs-runners-gha-rs-github-secret
+  runnerGroup: redducklabs-private-runners
+  runnerScaleSetName: redducklabs-runners
+  maxRunners: 20
+  minRunners: 8
+
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      affinity: 
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: doks.digitalocean.com/node-pool
+                operator: In
+                values:
+                - github-runners-pool-16g
+            weight: 100
+      automountServiceAccountToken: 
+        false
+      imagePullSecrets: 
+        - name: do-registry-secret
+      nodeSelector: 
+        node-type: github-runner
+      resources: 
+        limits:
+          memory: 6Gi
+        requests:
+          cpu: "3"
+          memory: 5Gi
+      tolerations: 
+        - effect: NoSchedule
+          key: github-runner
+          operator: Equal
+          value: "true"
+      restartPolicy: Never
+      serviceAccountName: redducklabs-runners-gha-rs-no-permission
+      initContainers:
+      - args:
+        - -r
+        - /home/runner/externals/.
+        - /home/runner/tmpDir/
+        command:
+        - cp
+        image: registry.digitalocean.com/redducklabs/github-runner:latest
+        name: init-dind-externals
+        volumeMounts:
+        - mountPath: /home/runner/tmpDir
+          name: dind-externals
+      - args:
+        - dockerd
+        - --host=unix:///var/run/docker.sock
+        - --group=$(DOCKER_GROUP_GID)
+        - --registry-mirror=https://mirror.gcr.io
+        env:
+        - name: DOCKER_GROUP_GID
+          value: "123"
+        image: docker:29.7.2-dind
+        name: dind
+        restartPolicy: Always
+        securityContext:
+          privileged: true
+        startupProbe:
+          exec:
+            command:
+            - docker
+            - info
+          failureThreshold: 24
+          initialDelaySeconds: 0
+          periodSeconds: 5
+        volumeMounts:
+        - mountPath: /home/runner/_work
+          name: work
+        - mountPath: /var/run
+          name: dind-sock
+        - mountPath: /home/runner/externals
+          name: dind-externals
+      containers:
+      
+      - name: runner
+        command: 
+          - /home/runner/run.sh
+        image: 
+          registry.digitalocean.com/redducklabs/github-runner:latest
+        imagePullPolicy: 
+          Always
+        securityContext: 
+          allowPrivilegeEscalation: true
+          readOnlyRootFilesystem: false
+          runAsGroup: 121
+          runAsUser: 1001
+        env:
+          - 
+            name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - 
+            name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        volumeMounts:
+          - 
+            mountPath: /home/runner/_work
+            name: work
+          - 
+            mountPath: /var/run
+            name: dind-sock
+      volumes:
+      - emptyDir: {}
+        name: work
+      - emptyDir: {}
+        name: dind-sock
+      - emptyDir: {}
+        name: dind-externals

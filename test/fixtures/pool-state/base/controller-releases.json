@@ -1,0 +1,11 @@
+[
+  {
+    "name": "arc",
+    "namespace": "arc-systems",
+    "revision": "3",
+    "updated": "2026-09-14 16:01:02.123456789 +0000 UTC",
+    "status": "deployed",
+    "chart": "gha-runner-scale-set-controller-0.14.2",
+    "app_version": "0.14.2"
+  }
+]

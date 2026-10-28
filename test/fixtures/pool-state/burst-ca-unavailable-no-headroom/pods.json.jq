@@ -1,0 +1,1 @@
+.items += [{"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "fixture-heavy-burst", "namespace": "default", "labels": {}}, "spec": {"nodeName": "github-runners-burst-16g-p1q2r", "containers": [{"name": "main", "resources": {"requests": {"cpu": "100m", "memory": "3000Mi"}}}]}, "status": {"phase": "Running"}}]

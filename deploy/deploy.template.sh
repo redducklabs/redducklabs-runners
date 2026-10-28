@@ -40,6 +40,7 @@ helm upgrade --install "${RELEASE_NAME}" \
   --namespace "${NAMESPACE}" \
   --values "${VALUES_FILE}" \
   --set githubConfigSecret.github_token="${GITHUB_TOKEN}" \
+  --history-max 100 \
   --wait
 
 if [ $? -eq 0 ]; then

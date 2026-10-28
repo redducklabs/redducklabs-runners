@@ -1,0 +1,381 @@
+name: Runner Acceptance Evidence
+
+# Acceptance controller for the burst rollout
+# (docs/specs/2026-10-26-runner-burst-autoscaling-design.md, "Acceptance";
+# operator steps in docs/runbooks/node-pool-sizing.md).
+#
+# Read-only on the cluster and DigitalOcean: kubectl get, doctl list, the
+# pool-state gate with --operation status and the trust-boundary readback with
+# --verify-only (scripts/acceptance-evidence.py). Its only write anywhere is
+# `gh run cancel` of the verified probe run in redducklabs/aurolegal.ai, during
+# cleanup. It therefore does not join the runner-fleet-mutation group: it must
+# run beside Deploy `drain` (phase D) and Scale Runners `acceptance-phase-c`
+# (phase C), which hold that lock.
+#
+#   A, B, E  probe_run_id: a batch runner-burst-acceptance.yml run
+#   C        phase_c_run_id: this repository's Scale Runners acceptance-phase-c run
+#   D        probe_run_id (continuous) and drain_run_id (Deploy drain here)
+#   E        also rollback_run_id (the completed Deploy rollback before
+#            re-rollout) and baseline_run_id (the passing Phase A evidence run,
+#            whose record holds the baseline pool ID E compares against)
+#
+# The probe run is verified (repository, workflow path, headSha, event,
+# attempt, and the annotated dispatch tag resolving to expected_workflow_sha)
+# before any evidence is collected, and saved at once, so a later failure
+# (including an anchor-run rejection) still cancels it. A failure or the
+# evidence deadline (batch
+# 45 minutes, continuous 150, Phase C 300) cancels the verified probe run and
+# verifies cleanup. Only a verified probe is ever cancelled: an unverified run
+# ID could name an unrelated run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Acceptance phase'
+        required: true
+        type: choice
+        options: ['A', 'B', 'C', 'D', 'E']
+      probe_run_id:
+        description: 'runner-burst-acceptance.yml run ID in redducklabs/aurolegal.ai (A, B, D, E)'
+        required: false
+        default: ''
+        type: string
+      drain_run_id:
+        description: 'Deploy GitHub Runners drain run ID in this repository (D only)'
+        required: false
+        default: ''
+        type: string
+      phase_c_run_id:
+        description: 'Scale Runners acceptance-phase-c run ID in this repository (C only)'
+        required: false
+        default: ''
+        type: string
+      rollback_run_id:
+        description: 'Deploy GitHub Runners rollback run ID in this repository (E only)'
+        required: false
+        default: ''
+        type: string
+      baseline_run_id:
+        description: 'Passing Phase A Runner Acceptance Evidence run ID in this repository (E only)'
+        required: false
+        default: ''
+        type: string
+      dispatch_tag:
+        description: 'Annotated tag the probe was dispatched from (A, B, D, E)'
+        required: false
+        default: ''
+        type: string
+      expected_workflow_sha:
+        description: 'Reviewed aurolegal.ai commit the tag targets (A, B, D, E)'
+        required: false
+        default: ''
+        type: string
+      expected_sha:
+        description: 'Exact commit SHA of this repository to run'
+        required: true
+        type: string
+
+concurrency:
+  group: runner-acceptance-evidence
+  cancel-in-progress: false
+
+env:
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
+  CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    name: Acceptance evidence - phase ${{ inputs.phase }}
+    runs-on: ubuntu-latest
+    # Phase C watches a run that stops itself at 270 minutes; the job fits
+    # inside GitHub-hosted runners' six-hour limit.
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      ready_for_migration: ${{ steps.ready.outputs.ready_for_migration }}
+      cleanup_status: ${{ steps.cleanup.outputs.cleanup_status }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
+
+      - name: Validate and sanitize inputs
+        id: validate
+        env:
+          INPUT_PHASE: ${{ inputs.phase }}
+          INPUT_PROBE_RUN_ID: ${{ inputs.probe_run_id }}
+          INPUT_DRAIN_RUN_ID: ${{ inputs.drain_run_id }}
+          INPUT_PHASE_C_RUN_ID: ${{ inputs.phase_c_run_id }}
+          INPUT_ROLLBACK_RUN_ID: ${{ inputs.rollback_run_id }}
+          INPUT_BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+          INPUT_DISPATCH_TAG: ${{ inputs.dispatch_tag }}
+          INPUT_EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          # The SHA is verified before any other input and before any read.
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if ! [[ "${INPUT_EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "❌ Error: expected_sha must be a 40-character commit SHA"
+            exit 1
+          fi
+          if [ "${INPUT_EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${INPUT_EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
+          need_id() {  # name value
+            if ! [[ "$2" =~ ^[1-9][0-9]{0,19}$ ]]; then
+              echo "❌ Error: phase ${INPUT_PHASE} requires a numeric $1"
+              exit 1
+            fi
+          }
+          need_empty() {  # name value
+            if [ -n "$2" ]; then
+              echo "❌ Error: $1 is not used by phase ${INPUT_PHASE}; leave it empty"
+              exit 1
+            fi
+          }
+          case "${INPUT_PHASE}" in
+            A|B|D|E)
+              need_id probe_run_id "${INPUT_PROBE_RUN_ID}"
+              if ! [[ "${INPUT_DISPATCH_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
+                echo "❌ Error: dispatch_tag must be a tag name of letters, digits, '.', '_' and '-'"
+                exit 1
+              fi
+              if ! [[ "${INPUT_EXPECTED_WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "❌ Error: expected_workflow_sha must be a 40-character commit SHA"
+                exit 1
+              fi
+              need_empty phase_c_run_id "${INPUT_PHASE_C_RUN_ID}"
+              ;;
+            C)
+              need_id phase_c_run_id "${INPUT_PHASE_C_RUN_ID}"
+              need_empty probe_run_id "${INPUT_PROBE_RUN_ID}"
+              need_empty dispatch_tag "${INPUT_DISPATCH_TAG}"
+              need_empty expected_workflow_sha "${INPUT_EXPECTED_WORKFLOW_SHA}"
+              ;;
+            *)
+              echo "❌ Error: phase must be A, B, C, D or E"
+              exit 1
+              ;;
+          esac
+          if [ "${INPUT_PHASE}" = D ]; then
+            need_id drain_run_id "${INPUT_DRAIN_RUN_ID}"
+          else
+            need_empty drain_run_id "${INPUT_DRAIN_RUN_ID}"
+          fi
+          if [ "${INPUT_PHASE}" = E ]; then
+            need_id rollback_run_id "${INPUT_ROLLBACK_RUN_ID}"
+            need_id baseline_run_id "${INPUT_BASELINE_RUN_ID}"
+          else
+            need_empty rollback_run_id "${INPUT_ROLLBACK_RUN_ID}"
+            need_empty baseline_run_id "${INPUT_BASELINE_RUN_ID}"
+          fi
+          case "${INPUT_PHASE}" in
+            C) DEADLINE=300 ;;
+            D) DEADLINE=150 ;;
+            *) DEADLINE=45 ;;
+          esac
+          {
+            echo "phase=${INPUT_PHASE}"
+            echo "deadline_minutes=${DEADLINE}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "✅ Phase ${INPUT_PHASE} at ${ACTUAL_SHA}; evidence deadline ${DEADLINE} minutes"
+
+      - name: Verify probe run
+        id: verify
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          PHASE: ${{ steps.validate.outputs.phase }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          PROBE_RUN_ID: ${{ inputs.probe_run_id }}
+          DISPATCH_TAG: ${{ inputs.dispatch_tag }}
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+        run: |
+          # Repository, workflow path, headSha, event, attempt, and the annotated
+          # tag resolving to expected_workflow_sha. The verified probe is marked
+          # at once, so every later failure cancels it. Nothing is read from
+          # the cluster before the identities pass.
+          ARGS=(--phase "${PHASE}" --state "${RUNNER_TEMP}/acceptance-state.json"
+                --expected-sha "${EXPECTED_SHA}")
+          [ -z "${PROBE_RUN_ID}" ] || ARGS+=(--probe-run-id "${PROBE_RUN_ID}"
+                --dispatch-tag "${DISPATCH_TAG}" --expected-workflow-sha "${EXPECTED_WORKFLOW_SHA}")
+          python3 scripts/acceptance-evidence.py verify-probe "${ARGS[@]}"
+          if [ -n "${PROBE_RUN_ID}" ]; then
+            echo "probe_verified=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Verify anchor runs
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          DRAIN_RUN_ID: ${{ inputs.drain_run_id }}
+          PHASE_C_RUN_ID: ${{ inputs.phase_c_run_id }}
+          ROLLBACK_RUN_ID: ${{ inputs.rollback_run_id }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+        run: |
+          # Runs in this repository: workflow path and the reviewed SHA
+          # (D drain; C acceptance-phase-c; E completed rollback and the Phase A
+          # evidence record holding the baseline pool ID).
+          ARGS=(--state "${RUNNER_TEMP}/acceptance-state.json")
+          [ -z "${DRAIN_RUN_ID}" ] || ARGS+=(--drain-run-id "${DRAIN_RUN_ID}")
+          [ -z "${PHASE_C_RUN_ID}" ] || ARGS+=(--phase-c-run-id "${PHASE_C_RUN_ID}")
+          [ -z "${ROLLBACK_RUN_ID}" ] || ARGS+=(--rollback-run-id "${ROLLBACK_RUN_ID}")
+          [ -z "${BASELINE_RUN_ID}" ] || ARGS+=(--baseline-run-id "${BASELINE_RUN_ID}")
+          python3 scripts/acceptance-evidence.py verify-anchors "${ARGS[@]}"
+
+      - name: Configure Kubernetes access (read-only)
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+        run: |
+          if [ -z "${DO_TOKEN}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+          doctl auth init --access-token "${DO_TOKEN}" > /dev/null
+          # kubeconfig save takes the cluster NAME; use-context takes the context.
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
+
+      - name: Capture evidence while the probe holds
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          DEADLINE_MINUTES: ${{ steps.validate.outputs.deadline_minutes }}
+        run: |
+          python3 scripts/acceptance-evidence.py watch \
+            --state "${RUNNER_TEMP}/acceptance-state.json" \
+            --deadline-minutes "${DEADLINE_MINUTES}"
+
+      - name: Capture after-state and assemble evidence
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          EVIDENCE: acceptance-${{ steps.validate.outputs.phase }}.json
+        run: |
+          python3 scripts/acceptance-evidence.py finalize \
+            --state "${RUNNER_TEMP}/acceptance-state.json" --out "${EVIDENCE}"
+
+      - name: Evaluate acceptance verdict
+        id: verdict
+        env:
+          PHASE: ${{ steps.validate.outputs.phase }}
+          EVIDENCE: acceptance-${{ steps.validate.outputs.phase }}.json
+        run: |
+          set +e
+          python3 scripts/acceptance-verdict.py --phase "${PHASE}" "${EVIDENCE}" \
+            --out "${RUNNER_TEMP}/verdict.json" > /dev/null
+          rc=$?
+          set -e
+          if [ "${rc}" -gt 1 ]; then
+            echo "❌ Error: the verdict could not be evaluated (exit ${rc})"
+            exit 1
+          fi
+          PASS=$(jq -r '.pass' "${RUNNER_TEMP}/verdict.json")
+          READY=$(jq -r '.ready_for_migration' "${RUNNER_TEMP}/verdict.json")
+          {
+            echo "## Acceptance phase ${PHASE}: $([ "${PASS}" = true ] && echo PASS || echo FAIL)"
+            echo ""
+            jq -r '.failures[] | "- ❌ " + .' "${RUNNER_TEMP}/verdict.json"
+            jq -r '.notes[] | "- 📝 " + .' "${RUNNER_TEMP}/verdict.json"
+            echo ""
+            echo '```json'
+            jq '.pickup' "${RUNNER_TEMP}/verdict.json"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "ready_for_migration=${READY}" >> "${GITHUB_OUTPUT}"
+          if [ "${PASS}" != true ]; then
+            jq -r '.failures[]' "${RUNNER_TEMP}/verdict.json"
+            echo "❌ Phase ${PHASE} failed acceptance"
+            exit 1
+          fi
+          echo "✅ Phase ${PHASE} passed acceptance"
+
+      - name: Report migration readiness
+        id: ready
+        if: always() && steps.validate.outputs.phase == 'E'
+        env:
+          VERDICT_READY: ${{ steps.verdict.outputs.ready_for_migration }}
+        run: |
+          # true only from a passing phase E verdict; false whenever finalize or
+          # the verdict did not run or did not pass.
+          READY=false
+          if [ "${VERDICT_READY}" = true ]; then
+            READY=true
+          fi
+          echo "READY_FOR_MIGRATION=${READY}"
+          echo "ready_for_migration=${READY}" >> "${GITHUB_OUTPUT}"
+          {
+            echo ""
+            echo "READY_FOR_MIGRATION=${READY}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cancel the probe and verify cleanup
+        id: cleanup
+        if: always() && steps.verify.outputs.probe_verified == 'true' && (failure() || cancelled())
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          set +e
+          python3 scripts/acceptance-evidence.py cleanup \
+            --state "${RUNNER_TEMP}/acceptance-state.json" --out "${RUNNER_TEMP}/cleanup.json"
+          rc=$?
+          set -e
+          STATUS=$(jq -r '.status // "failed"' "${RUNNER_TEMP}/cleanup.json" 2>/dev/null || echo failed)
+          echo "cleanup_status=${STATUS}" >> "${GITHUB_OUTPUT}"
+          {
+            echo ""
+            echo "### Probe cleanup: ${STATUS}"
+            jq -r '.reason // empty' "${RUNNER_TEMP}/cleanup.json" 2>/dev/null || true
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${rc}"
+
+      - name: Assemble acceptance record
+        if: always() && steps.validate.outputs.phase != ''
+        env:
+          EVIDENCE: acceptance-${{ steps.validate.outputs.phase }}.json
+        run: |
+          # The uploaded record carries the verdict and the cleanup status
+          # beside the evidence, so a failed run still leaves its reason.
+          python3 - "${EVIDENCE}" "${RUNNER_TEMP}/verdict.json" "${RUNNER_TEMP}/cleanup.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          path, verdict_path, cleanup_path = sys.argv[1:4]
+
+          def load(name):
+              if not os.path.exists(name):
+                  return None
+              with open(name, encoding="utf-8") as stream:
+                  return json.load(stream)
+
+          record = load(path) or {"evidence": "not collected"}
+          record["verdict"] = load(verdict_path)
+          record["cleanup"] = load(cleanup_path)
+          with open(path, "w", encoding="utf-8") as stream:
+              json.dump(record, stream, indent=1, sort_keys=True)
+              stream.write("\n")
+          PY
+
+      - name: Upload acceptance record
+        if: always() && steps.validate.outputs.phase != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: acceptance-${{ steps.validate.outputs.phase }}
+          path: acceptance-${{ steps.validate.outputs.phase }}.json
+          if-no-files-found: error
+          retention-days: 90

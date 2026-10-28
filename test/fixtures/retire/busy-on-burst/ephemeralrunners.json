@@ -1,0 +1,18 @@
+{
+  "apiVersion": "actions.github.com/v1alpha1",
+  "items": [
+    {
+      "apiVersion": "actions.github.com/v1alpha1",
+      "kind": "EphemeralRunner",
+      "metadata": {
+        "name": "redducklabs-runners-7xk2p-runner-burstaa",
+        "namespace": "arc-runners",
+        "creationTimestamp": "2026-10-26T10:00:00Z"
+      },
+      "status": {
+        "phase": "Running",
+        "runnerName": "redducklabs-runners-7xk2p-runner-burstaa"
+      }
+    }
+  ]
+}

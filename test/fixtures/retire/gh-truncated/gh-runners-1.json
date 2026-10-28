@@ -1,0 +1,16 @@
+{
+  "total_count": 2,
+  "runners": [
+    {
+      "id": 1,
+      "name": "redducklabs-runners-7xk2p-runner-burstaa",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "name": "redducklabs-runners"
+        }
+      ]
+    }
+  ]
+}

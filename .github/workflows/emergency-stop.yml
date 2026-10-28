@@ -1,5 +1,36 @@
 name: Emergency Stop Runners
 
+# Sets the runner scale set to minRunners=maxRunners=0 with --reuse-values, so
+# the release keeps its base template (burst, density or drain) and the
+# pool-state gate classifies the result as the matching `stopped` state
+# (burst-stopped, density-stopped or drain-stopped; Ruling 26 in
+# docs/specs/2026-10-26-runner-burst-autoscaling-design.md). The recovery
+# paths admit those states; the summary names the one that applies.
+#
+# Concurrency (Ruling 28): Emergency Stop uses its own non-cancelling group,
+# runner-emergency-stop, so it runs immediately instead of waiting behind a
+# multi-hour Deploy drain or Scale Runners Phase C in runner-fleet-mutation.
+#
+# Stop fence (Ruling 33): BEFORE its Helm write it writes the marker ConfigMap
+# runner-fleet-emergency-stop (run id and time) in the stopped namespace
+# (arc-runners). While the marker exists the pool-state gate refuses every
+# fleet mutator except Deploy `deploy`/`rollback` dispatched with
+# acknowledge_emergency_stop=true, and every fleet Helm write re-reads it
+# afterwards: a write from an older run that lands after this stop sees the
+# marker, re-applies 0/0 and fails. A failed marker write does not delay the
+# stop; the run fails afterwards so the missing fence is visible.
+#
+# Server-side fence (Ruling 36): the marker is also the parameter of the
+# ValidatingAdmissionPolicy in deploy/runner-emergency-stop-fence.yaml, which
+# makes the API server deny any AutoscalingRunnerSet write that is not 0/0
+# while the marker exists, so a stale writer that is cancelled (or loses its
+# runner) right after its Helm write cannot leave the fleet reopened. After
+# writing the marker and before its own Helm write this run proves the policy
+# enforces: a server-side dry-run patch to maxRunners=1 must be denied
+# (retried for up to 30 s). If the policy is absent or not enforcing, the stop
+# is still applied and the run fails ("Report fence failure"). This run's own
+# 0/0 write is allowed by the policy.
+
 on:
   workflow_dispatch:
     inputs:
@@ -19,7 +50,7 @@ on:
         type: string
 
 concurrency:
-  group: runner-fleet-mutation
+  group: runner-emergency-stop
   cancel-in-progress: false
 
 env:
@@ -30,6 +61,10 @@ env:
   CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
   CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
   RELEASE_NAME: ${{ vars.RELEASE_NAME || 'redducklabs-runners' }}
+  # The release's pinned chart (deploy-runners.yml ARC_CHART_VERSION). An
+  # unpinned upgrade would move the release to another chart version, which
+  # the ARC identity check rejects for every recovery path.
+  ARC_CHART_VERSION: '0.14.2'
 
 # Use minimal permissions
 permissions:
@@ -39,10 +74,15 @@ jobs:
   validate-inputs:
     name: Validate Emergency Stop Inputs
     runs-on: ubuntu-latest
+    # Explicit bash runs every step as "bash --noprofile --norc -eo pipefail",
+    # so a failing command inside a pipeline fails the step.
+    defaults:
+      run:
+        shell: bash
     outputs:
       namespace: ${{ steps.validate.outputs.namespace }}
       reason: ${{ steps.validate.outputs.reason }}
-    
+
     steps:
       - name: Validate confirmation and inputs
         id: validate
@@ -52,12 +92,12 @@ jobs:
           INPUT_REASON: ${{ inputs.reason }}
         run: |
           echo "🔍 Validating emergency stop inputs..."
-          
+
           # Get inputs
           CONFIRM="${INPUT_CONFIRM}"
           NAMESPACE="${INPUT_NAMESPACE}"
           REASON="${INPUT_REASON}"
-          
+
           # Validate confirmation text
           if [ "${CONFIRM}" != "STOP-RUNNERS" ]; then
             echo "❌ Confirmation text does not match!"
@@ -65,13 +105,13 @@ jobs:
             echo "Received: '${CONFIRM}'"
             exit 1
           fi
-          
+
           # Validate namespace format (DNS-1123 label)
           if ! [[ "${NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
             echo "❌ Error: namespace must be a valid DNS-1123 label"
             exit 1
           fi
-          
+
           # Validate reason is not empty and reasonable length
           if [ -z "${REASON}" ]; then
             echo "❌ Error: reason cannot be empty"
@@ -81,19 +121,19 @@ jobs:
             echo "❌ Error: reason must be a single line"
             exit 1
           fi
-          
+
           if [ ${#REASON} -gt 200 ]; then
             echo "❌ Error: reason must be 200 characters or less"
             exit 1
           fi
-          
+
           # Sanitize reason (remove potentially dangerous characters)
           CLEAN_REASON=$(printf '%s' "${REASON}" | tr -cd '[:alnum:][:space:][:punct:]' | head -c 200)
-          
+
           # Set validated outputs
           printf 'namespace=%s\n' "${NAMESPACE}" >> "${GITHUB_OUTPUT}"
           printf 'reason=%s\n' "${CLEAN_REASON}" >> "${GITHUB_OUTPUT}"
-          
+
           echo "⚠️ EMERGENCY STOP CONFIRMED"
           echo "  Namespace: ${NAMESPACE}"
           echo "  Reason: ${CLEAN_REASON}"
@@ -103,30 +143,37 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-inputs
     timeout-minutes: 10
-    
+    # Explicit bash (pipefail): a failed read inside a pipeline fails the step
+    # instead of being counted as "no deployment" or "0 pods".
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-      
+
       - name: Setup infrastructure tools
         uses: ./.github/actions/setup-tools
         with:
           install-jq: 'true'
-      
+
       - name: Configure Kubernetes access
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
           echo "🔧 Configuring Kubernetes access..."
-          
+
           # Validate DO_TOKEN
-          if [ -z "${{ secrets.DO_TOKEN }}" ]; then
+          if [ -z "${DO_TOKEN}" ]; then
             echo "❌ Error: DO_TOKEN secret is not set!"
             exit 1
           fi
-          
+
           # Initialize doctl with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring doctl..."
-            if doctl auth init --access-token "${{ secrets.DO_TOKEN }}"; then
+            if doctl auth init --access-token "${DO_TOKEN}" > /dev/null; then
               echo "✅ DigitalOcean authentication configured"
               break
             elif [ "${attempt}" = "3" ]; then
@@ -137,7 +184,7 @@ jobs:
               sleep 5
             fi
           done
-          
+
           # Configure kubectl with retry logic.
           # kubeconfig save takes the cluster NAME; use-context takes the context.
           echo "Configuring kubectl for cluster ${CLUSTER_NAME} (context ${CLUSTER_CONTEXT})..."
@@ -155,58 +202,141 @@ jobs:
               sleep 5
             fi
           done
-      
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+
       - name: Record current state
         id: backup
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "📸 Recording current state before shutdown..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
-          
-          # Check if deployment exists
-          if ! helm list -n "${NAMESPACE}" 2>/dev/null | grep -q "${RELEASE_NAME}"; then
+
+          # A failed release list fails the run: it is never reported as
+          # "no deployment".
+          if ! RELEASES=$(helm list -n "${NAMESPACE}" -a -o json); then
+            echo "❌ Error: could not list Helm releases in ${NAMESPACE}; nothing was changed"
+            exit 1
+          fi
+          if ! MATCHES=$(jq -er --arg name "${RELEASE_NAME}" \
+            'if type == "array" then [.[] | select(.name == $name)] | length else error("not an array") end' \
+            <<<"${RELEASES}"); then
+            echo "❌ Error: the Helm release list is not a JSON array; nothing was changed"
+            exit 1
+          fi
+          if [ "${MATCHES}" = 0 ]; then
             echo "⚠️ Warning: Runner deployment '${RELEASE_NAME}' not found in namespace '${NAMESPACE}'"
-            echo "deployment_exists=false" >> $GITHUB_OUTPUT
-            echo "current_min=0" >> $GITHUB_OUTPUT
-            echo "current_max=0" >> $GITHUB_OUTPUT
-            echo "pod_count=0" >> $GITHUB_OUTPUT
+            echo "deployment_exists=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          
-          echo "deployment_exists=true" >> $GITHUB_OUTPUT
-          
-          # Save current configuration with error handling
-          VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
-          if [ $? -eq 0 ]; then
-            # Save values to file for potential recovery
-            echo "${VALUES_JSON}" > /tmp/runner-values-backup.json
-            
-            CURRENT_MIN=$(echo "${VALUES_JSON}" | jq -r '.minRunners // 2')
-            CURRENT_MAX=$(echo "${VALUES_JSON}" | jq -r '.maxRunners // 4')
-            
-            # Validate retrieved values
-            if ! [[ "${CURRENT_MIN}" =~ ^[0-9]+$ ]] || ! [[ "${CURRENT_MAX}" =~ ^[0-9]+$ ]]; then
-              echo "⚠️ Warning: Could not parse current configuration, using defaults"
-              CURRENT_MIN=2
-              CURRENT_MAX=4
-            fi
+          echo "deployment_exists=true" >> "${GITHUB_OUTPUT}"
+          REVISION=$(jq -r --arg name "${RELEASE_NAME}" \
+            '[.[] | select(.name == $name)][0].revision // "unknown"' <<<"${RELEASES}")
+          echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
+
+          # The stop must not wait on these reads: a failure is recorded as
+          # "unknown" and fails the run after the stop (Report read failures).
+          if VALUES_JSON=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json) \
+            && CURRENT_MIN=$(jq -er '.minRunners | numbers' <<<"${VALUES_JSON}") \
+            && CURRENT_MAX=$(jq -er '.maxRunners | numbers' <<<"${VALUES_JSON}"); then
+            :
           else
-            echo "⚠️ Warning: Could not retrieve current configuration"
-            CURRENT_MIN=2
-            CURRENT_MAX=4
+            echo "❌ Error: could not read the current runner bounds"
+            CURRENT_MIN=unknown
+            CURRENT_MAX=unknown
+            echo "read_failed=true" >> "${GITHUB_OUTPUT}"
           fi
-          
-          echo "current_min=${CURRENT_MIN}" >> $GITHUB_OUTPUT
-          echo "current_max=${CURRENT_MAX}" >> $GITHUB_OUTPUT
-          
-          # Count running pods
-          POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
-          echo "pod_count=${POD_COUNT}" >> $GITHUB_OUTPUT
-          
-          echo "Current state saved:"
+          if ! POD_COUNT=$(kubectl get pods -n "${NAMESPACE}" \
+            -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json | jq -er '.items | length'); then
+            echo "❌ Error: could not read the runner pods"
+            POD_COUNT=unknown
+            echo "read_failed=true" >> "${GITHUB_OUTPUT}"
+          fi
+          {
+            echo "current_min=${CURRENT_MIN}"
+            echo "current_max=${CURRENT_MAX}"
+            echo "pod_count=${POD_COUNT}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Current state recorded:"
+          echo "  Helm revision: ${REVISION}"
           echo "  Min runners: ${CURRENT_MIN}"
           echo "  Max runners: ${CURRENT_MAX}"
-          echo "  Active pods: ${POD_COUNT}"
-      
+          echo "  Runner pods: ${POD_COUNT}"
+
+      - name: Write stop marker
+        id: marker
+        if: steps.backup.outputs.deployment_exists == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # Ruling 33: the marker precedes the Helm write, so any fleet Helm
+          # write that lands after this stop sees it in its post-write fence.
+          # No secret or free text: only the run id and the time.
+          MARKER=$(jq -n --arg namespace "${NAMESPACE}" --arg run "${RUN_ID}" \
+            --arg time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '{
+              apiVersion: "v1", kind: "ConfigMap",
+              metadata: {name: "runner-fleet-emergency-stop", namespace: $namespace,
+                         labels: {"app.kubernetes.io/managed-by": "redducklabs-emergency-stop"}},
+              data: {"run-id": $run, time: $time}}')
+          for attempt in 1 2 3; do
+            if kubectl apply --server-side --force-conflicts \
+              --field-manager=redducklabs-emergency-stop -f - <<<"${MARKER}"; then
+              echo "✅ Stop marker ${NAMESPACE}/runner-fleet-emergency-stop written (run ${RUN_ID})"
+              exit 0
+            fi
+            echo "⚠️ Writing the stop marker failed (attempt ${attempt}/3)"
+            [ "${attempt}" = 3 ] || sleep 2
+          done
+          # The stop must not wait on the marker: record the failure and fail
+          # the run after the stop (Report marker failure).
+          echo "❌ Error: could not write the stop marker; in-flight fleet mutations are not fenced"
+          echo "marker_failed=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify stop fence
+        id: fence
+        if: steps.backup.outputs.deployment_exists == 'true'
+        # Never block the stop: whatever happens here, Scale to zero runs and
+        # "Report fence failure" fails the run afterwards.
+        continue-on-error: true
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          MARKER_FAILED: ${{ steps.marker.outputs.marker_failed }}
+        run: |
+          # Ruling 36: the marker is the parameter of the server-side fence
+          # deploy/runner-emergency-stop-fence.yaml. Before this run's Helm
+          # write, prove the API server enforces it: a server-side dry-run
+          # patch of the AutoscalingRunnerSet to maxRunners=1 must be DENIED by
+          # that policy. Waiting here (up to 30 s, for the admission informer
+          # to observe the marker) means every write that lands after the 0/0
+          # write below is denied, including one from a stale fleet run that
+          # is cancelled before its own client-side fence runs.
+          echo "fence_failed=true" >> "${GITHUB_OUTPUT}"
+          if [ "${NAMESPACE}" != arc-runners ]; then
+            echo "❌ Error: the stop fence protects arc-runners only; namespace ${NAMESPACE} is not fenced"
+            exit 0
+          fi
+          if [ "${MARKER_FAILED}" = true ]; then
+            echo "❌ Error: the stop marker was not written, so the fence cannot enforce this stop"
+            exit 0
+          fi
+          if ! python3 -B scripts/lib/runner_stop_fence.py verify; then
+            echo "❌ Error: the Emergency Stop fence is missing or differs from deploy/runner-emergency-stop-fence.yaml; this stop is NOT enforced server-side"
+            exit 0
+          fi
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          if ! fleet_fence_wait denied; then
+            echo "❌ Error: the Emergency Stop fence did not deny a dry-run maxRunners=1 write; this stop is NOT enforced server-side"
+            exit 0
+          fi
+          echo "fence_failed=false" >> "${GITHUB_OUTPUT}"
+          echo "✅ The API server denies non-zero runner writes while the stop marker exists"
+
       - name: Scale to zero
         if: steps.backup.outputs.deployment_exists == 'true'
         env:
@@ -215,19 +345,23 @@ jobs:
         run: |
           echo "🛑 INITIATING EMERGENCY STOP..."
           echo "Reason: ${STOP_REASON}"
-          
-          # Scale to zero with retry logic
+
+          # Scale to zero with retry logic. --reuse-values keeps the base
+          # template; the chart version stays pinned; 100 revisions are kept
+          # (Ruling 27).
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Scaling to zero..."
             if helm upgrade "${RELEASE_NAME}" \
               oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
               --namespace "${NAMESPACE}" \
+              --version "${ARC_CHART_VERSION}" \
               --reuse-values \
               --set minRunners=0 \
               --set maxRunners=0 \
+              --history-max 100 \
               --wait \
               --timeout 120s; then
-              
+
               echo "✅ Runners scaled to zero"
               break
             elif [ "${attempt}" = "3" ]; then
@@ -239,107 +373,181 @@ jobs:
               sleep 5
             fi
           done
-      
+
       - name: Verify shutdown
         if: steps.backup.outputs.deployment_exists == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "🔍 Verifying shutdown..."
-          NAMESPACE="${{ needs.validate-inputs.outputs.namespace }}"
-          
+
+          # runner_pods: prints the runner pod count; a failed read fails the
+          # step (pipefail) instead of counting as zero pods.
+          runner_pods() {
+            kubectl get pods -n "${NAMESPACE}" \
+              -l actions.github.com/scale-set-name="${RELEASE_NAME}" -o json | jq -er '.items | length'
+          }
+
           # Wait for pods to terminate with timeout
           echo "Waiting for pods to terminate..."
           timeout=60
-          while [ $timeout -gt 0 ]; do
-            REMAINING=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
-            
+          while [ "${timeout}" -gt 0 ]; do
+            if ! REMAINING=$(runner_pods); then
+              echo "❌ Error: could not read the runner pods"
+              exit 1
+            fi
             if [ "${REMAINING}" -eq 0 ]; then
               echo "✅ All runner pods have been terminated"
               break
-            else
-              echo "⏳ ${REMAINING} pod(s) still terminating... (${timeout}s remaining)"
-              sleep 5
-              timeout=$((timeout - 5))
             fi
+            echo "⏳ ${REMAINING} pod(s) still terminating... (${timeout}s remaining)"
+            sleep 5
+            timeout=$((timeout - 5))
           done
-          
+
           # Final check
-          FINAL_COUNT=$(kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" --no-headers 2>/dev/null | wc -l)
-          
+          if ! FINAL_COUNT=$(runner_pods); then
+            echo "❌ Error: could not read the runner pods"
+            exit 1
+          fi
           if [ "${FINAL_COUNT}" -eq 0 ]; then
             echo "✅ Emergency stop completed successfully"
           else
+            # A busy runner finishes its job before ARC deletes it.
             echo "⚠️ Warning: ${FINAL_COUNT} pod(s) may still be terminating"
             echo "Pod status:"
-            kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}" 2>/dev/null || true
+            kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}"
           fi
-      
+
+      - name: Read back stopped state
+        id: readback
+        if: steps.backup.outputs.deployment_exists == 'true'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+        run: |
+          # Read-only pool-state gate: the release must now be one of the
+          # stopped states the recovery paths admit, with the stop marker.
+          GATE_OUT=$(./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" --operation status)
+          echo "${GATE_OUT}"
+          STATE_LINE=$(grep -E '^STATE: ' <<<"${GATE_OUT}" || true)
+          if [ "${NAMESPACE}" = arc-runners ] && ! grep -qE '^STOP: Emergency Stop marker ' <<<"${GATE_OUT}"; then
+            echo "❌ Error: the stop marker did not read back; in-flight fleet mutations are not fenced"
+            exit 1
+          fi
+          if ! [[ "${STATE_LINE}" =~ ^STATE:\ arc=(burst|density|drain)-stopped\ pools=(none|primary|fallback|both)\ burst=(open|closed)$ ]]; then
+            echo "❌ Error: the stopped release is not a stopped state the recovery paths admit: ${STATE_LINE}"
+            exit 1
+          fi
+          echo "state=${STATE_LINE#STATE: }" >> "${GITHUB_OUTPUT}"
+
+      - name: Report marker failure
+        if: always() && steps.marker.outputs.marker_failed == 'true'
+        run: |
+          echo "❌ Error: the stop was applied but its marker was not written; an older fleet run could reopen runners. Re-dispatch Emergency Stop."
+          exit 1
+
+      - name: Report fence failure
+        if: always() && steps.fence.outputs.fence_failed == 'true'
+        run: |
+          echo "❌ Error: the stop was applied, but the server-side fence did not prove it enforces the stop (see 'Verify stop fence'). A stale fleet run could still reopen runners if it is cancelled after its Helm write. Run Deploy operation=deploy or rollback (with acknowledge_emergency_stop=true) to install deploy/runner-emergency-stop-fence.yaml, or re-dispatch Emergency Stop once it is installed."
+          exit 1
+
+      - name: Report read failures
+        if: steps.backup.outputs.read_failed == 'true'
+        run: |
+          echo "❌ Error: the runner bounds or pods could not be read before the stop; see 'Record current state'"
+          exit 1
+
       - name: Handle non-existent deployment
         if: steps.backup.outputs.deployment_exists == 'false'
         run: |
           echo "ℹ️ No active runner deployment found to stop"
-          echo "## ℹ️ No Active Deployment" >> $GITHUB_STEP_SUMMARY
-          echo "No runner deployment was found in the specified namespace." >> $GITHUB_STEP_SUMMARY
-          echo "This may indicate that runners were not deployed or already stopped." >> $GITHUB_STEP_SUMMARY
-      
+          {
+            echo "## ℹ️ No Active Deployment"
+            echo "No runner deployment was found in the specified namespace."
+            echo "This may indicate that runners were not deployed or already stopped."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Create recovery instructions
         if: always()
         env:
           STOP_REASON: ${{ needs.validate-inputs.outputs.reason }}
+          ACTOR: ${{ github.actor }}
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          DEPLOYMENT_EXISTS: ${{ steps.backup.outputs.deployment_exists }}
+          PREVIOUS_REVISION: ${{ steps.backup.outputs.revision }}
+          CURRENT_MIN: ${{ steps.backup.outputs.current_min }}
+          CURRENT_MAX: ${{ steps.backup.outputs.current_max }}
+          POD_COUNT: ${{ steps.backup.outputs.pod_count }}
+          STOPPED_STATE: ${{ steps.readback.outputs.state }}
         run: |
-          echo "## 🛑 Emergency Stop Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Stop Details" >> $GITHUB_STEP_SUMMARY
-          echo "- **Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Initiated by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Reason**: ${STOP_REASON}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Namespace**: \`${{ needs.validate-inputs.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ steps.backup.outputs.deployment_exists }}" = "true" ]; then
-            echo "### Previous Configuration" >> $GITHUB_STEP_SUMMARY
-            echo "- **Min Runners**: ${{ steps.backup.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Max Runners**: ${{ steps.backup.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Active Pods**: ${{ steps.backup.outputs.pod_count }}" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Recovery Instructions" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "To restore runners to previous configuration:" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "1. **Via GitHub Actions**:" >> $GITHUB_STEP_SUMMARY
-            echo "   - Go to Actions → Scale GitHub Runners" >> $GITHUB_STEP_SUMMARY
-            echo "   - Select 'scale-custom'" >> $GITHUB_STEP_SUMMARY
-            echo "   - Set min_runners: ${{ steps.backup.outputs.current_min }}" >> $GITHUB_STEP_SUMMARY
-            echo "   - Set max_runners: ${{ steps.backup.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "2. **Via Command Line**:" >> $GITHUB_STEP_SUMMARY
-            echo "   \`\`\`bash" >> $GITHUB_STEP_SUMMARY
-            echo "   helm upgrade ${RELEASE_NAME} \\" >> $GITHUB_STEP_SUMMARY
-            echo "     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \\" >> $GITHUB_STEP_SUMMARY
-            echo "     --namespace ${{ needs.validate-inputs.outputs.namespace }} \\" >> $GITHUB_STEP_SUMMARY
-            echo "     --reuse-values \\" >> $GITHUB_STEP_SUMMARY
-            echo "     --set minRunners=${{ steps.backup.outputs.current_min }} \\" >> $GITHUB_STEP_SUMMARY
-            echo "     --set maxRunners=${{ steps.backup.outputs.current_max }}" >> $GITHUB_STEP_SUMMARY
-            echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "⚠️ **All GitHub Actions workflows using these runners will fail until restored!**" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### Status" >> $GITHUB_STEP_SUMMARY
-            echo "No active runner deployment was found to stop." >> $GITHUB_STEP_SUMMARY
-          fi
-      
+          {
+            echo "## 🛑 Emergency Stop Report"
+            echo ""
+            echo "### Stop Details"
+            echo "- **Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "- **Initiated by**: @${ACTOR}"
+            echo "- **Reason**: ${STOP_REASON}"
+            echo "- **Namespace**: \`${NAMESPACE}\`"
+            echo ""
+            if [ "${DEPLOYMENT_EXISTS}" = "true" ]; then
+              echo "### Previous Configuration"
+              echo "- **Helm revision before the stop**: ${PREVIOUS_REVISION}"
+              echo "- **Min Runners**: ${CURRENT_MIN}"
+              echo "- **Max Runners**: ${CURRENT_MAX}"
+              echo "- **Runner Pods**: ${POD_COUNT}"
+              echo ""
+              echo "### Stopped state"
+              echo "\`${STOPPED_STATE:-not read back; run Runner Status}\`"
+              echo ""
+              echo "### Recovery Instructions"
+              echo ""
+              echo "Restore runners only through the reviewed CI path (\`docs/runbooks/node-pool-sizing.md\`, \"Emergency Stop\"). While the stop marker \`${NAMESPACE}/runner-fleet-emergency-stop\` exists, every fleet workflow refuses to run except Deploy \`deploy\` and \`rollback\` dispatched with \`acknowledge_emergency_stop=true\` (and Node Pool Sizing \`remove-burst\`, which only deletes empty closed pools). The acknowledging run deletes the marker before its Helm write:"
+              echo ""
+              case "${STOPPED_STATE}" in
+                arc=burst-stopped*)
+                  echo "- **Resume burst**: Deploy GitHub Runners \`operation=deploy\`, \`acknowledge_emergency_stop=true\`, with the reviewed commit's \`expected_sha\` restores \`burst\` (2/20)."
+                  echo "- **Leave burst instead**: after that, Deploy \`operation=drain\`, then Node Pool Sizing \`remove-burst\`, then Deploy \`operation=rollback\`."
+                  ;;
+                arc=drain-stopped*)
+                  echo "- Node Pool Sizing \`remove-burst\` (when the burst pools have zero nodes), then Deploy GitHub Runners \`operation=rollback\`, \`acknowledge_emergency_stop=true\` (restores the committed \`deploy/density-values.yaml\`)."
+                  ;;
+                arc=density-stopped*)
+                  echo "- If closed burst pools exist, Node Pool Sizing \`remove-burst\` first; then Deploy GitHub Runners \`operation=rollback\`, \`acknowledge_emergency_stop=true\` (restores the committed \`deploy/density-values.yaml\`)."
+                  ;;
+                *)
+                  echo "- The stopped state was not read back. Run **Runner Status**, then follow the runbook's Emergency Stop section."
+                  ;;
+              esac
+              echo ""
+              echo "Do not change the release from a workstation."
+              echo ""
+              echo "⚠️ **All GitHub Actions workflows using these runners will fail until restored!**"
+            else
+              echo "### Status"
+              echo "No active runner deployment was found to stop."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Send notification
         if: always()
         env:
           STOP_REASON: ${{ needs.validate-inputs.outputs.reason }}
+          ACTOR: ${{ github.actor }}
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          DEPLOYMENT_EXISTS: ${{ steps.backup.outputs.deployment_exists }}
+          CURRENT_MIN: ${{ steps.backup.outputs.current_min }}
+          CURRENT_MAX: ${{ steps.backup.outputs.current_max }}
         run: |
           echo "📧 Emergency stop notification:"
           echo "  - Emergency stop procedure completed"
-          echo "  - Initiated by: @${{ github.actor }}"
+          echo "  - Initiated by: @${ACTOR}"
           echo "  - Reason: ${STOP_REASON}"
           echo "  - Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "  - Namespace: ${{ needs.validate-inputs.outputs.namespace }}"
-          if [ "${{ steps.backup.outputs.deployment_exists }}" = "true" ]; then
-            echo "  - Previous config: Min=${{ steps.backup.outputs.current_min }}, Max=${{ steps.backup.outputs.current_max }}"
+          echo "  - Namespace: ${NAMESPACE}"
+          if [ "${DEPLOYMENT_EXISTS}" = "true" ]; then
+            echo "  - Previous config: Min=${CURRENT_MIN}, Max=${CURRENT_MAX}"
           else
             echo "  - No deployment found to stop"
           fi

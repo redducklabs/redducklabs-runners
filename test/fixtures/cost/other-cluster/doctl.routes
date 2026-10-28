@@ -1,0 +1,3 @@
+invoice list -o json|invoice-list.json
+invoice get 00000000-0000-4000-8000-000000000009 -o json|invoice-get.json
+balance get -o json|balance.json

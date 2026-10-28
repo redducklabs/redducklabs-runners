@@ -1,0 +1,1 @@
+doctl|kubernetes cluster node-pool list * -o json|4|pools.json|delete-primary.jqpatch

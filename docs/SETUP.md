@@ -36,11 +36,13 @@ prerequisites. Deploy validates the registry secret type, Docker config, and
 non-empty `registry.digitalocean.com` auth without logging credential data. A
 pre-existing no-permission ServiceAccount is accepted only with exact Helm
 ownership for release `redducklabs-runners` in `arc-runners`. Missing, stale,
-foreign-owned, or malformed prerequisites fail closed before Helm. If the
-ServiceAccount is absent on the first install, deploy installs the pinned
-scale-set chart with `minRunners=0` and `maxRunners=0`, verifies exact Helm
-ownership, and only then server-dry-runs the admitted target Pod. The final
-Helm operation enables the requested runner count after preflight succeeds.
+foreign-owned, or malformed prerequisites fail closed before Helm.
+
+Deploy only upgrades an existing `redducklabs-runners` release. The pool-state
+gate admits an operation only when exactly one deployed release of the pinned
+chart exists, so there is no first-install bootstrap: a fresh cluster needs a
+separate, reviewed bootstrap procedure, which is out of scope of the burst
+design (Ruling 15 in the burst autoscaling design record).
 
 ### Step 3: Deploy Runners
 
@@ -48,13 +50,18 @@ Helm operation enables the requested runner count after preflight succeeds.
 2. Select **"Deploy GitHub Runners"** workflow from the left sidebar
 3. Click **"Run workflow"** button
 4. Configure deployment options:
-   - **Min runners**: Minimum number of runners (default: 2)
-   - **Max runners**: Maximum number of runners (default and ceiling: 4)
+   - **Operation**: `deploy` (also `prepare-trust-boundary`, `drain`, `rollback`)
    - **Expected SHA**: Exact reviewed commit SHA
    - **Accept privileged runner co-tenancy**: Required for trust preparation or deployment
-   - **Runner image**: Fixed canonical value `registry.digitalocean.com/redducklabs/github-runner:latest`; deployment rejects alternatives so ordinary scaling always validates the same lifecycle contract.
+   - **Acknowledge emergency stop**: For `deploy` and `rollback` only - recover
+     from an Emergency Stop; the run deletes the stop marker before its Helm
+     write (see `docs/runbooks/node-pool-sizing.md`, "Emergency Stop")
+   - **Runner image**: Fixed canonical value `registry.digitalocean.com/redducklabs/github-runner:latest`; deployment rejects alternatives so every deploy validates the same lifecycle contract.
    - **Namespace**: Kubernetes namespace (default: `arc-runners`)
 5. Click **"Run workflow"** to start deployment
+
+Runner bounds are not inputs. Deploy renders exactly the `burst` contract
+committed in `deploy/dind-values.yaml` (`minRunners: 2`, `maxRunners: 20`).
 
 `arc-runners` is the only accepted runner namespace. Helm ownership annotations
 and prepared platform resources use that canonical namespace, so deploy and
@@ -67,13 +74,31 @@ group, performs server-side dry-runs of the rendered `AutoscalingRunnerSet` and
 representative Pod, checks live node capacity, then deploys only when those
 gates pass. The `prepare-trust-boundary` operation performs the runner-group
 and public-workflow checks without Helm, Kubernetes, or DigitalOcean mutation.
-Ordinary scaling accepts only a pinned deployed chart in the private runner
-group whose Helm values, rendered ASRS, and live ASRS exactly match the current
-pod-level density contract. That complete contract is read back after scaling;
-legacy-isolated values are accepted only by rollout-quiesce, Node Pool Sizing,
-and rollback. Node Pool Sizing requires the private 2/2 legacy-isolated values,
-manifest, and live ASRS before and immediately after lowering the pool maximum;
-density state cannot authorize that transition.
+Ordinary min/max scaling is retired: runner bounds change only through a
+reviewed commit to `deploy/dind-values.yaml` followed by Deploy, which renders
+and reads back exactly the `burst` contract. Scale Runners keeps only
+`record-density` (read-only: verifies the live release equals the render of
+the committed `deploy/density-values.yaml`) and `acceptance-phase-c`. Recovery
+is Deploy `drain`, Node Pool Sizing `remove-burst`, then Deploy `rollback`,
+which upgrades to `deploy/density-values.yaml` (validated as `density`;
+independent of Helm history); the legacy-isolated rollback target is retired.
+Every Helm write keeps 100 revisions (`--history-max 100`). Emergency Stop
+writes the marker `arc-runners/runner-fleet-emergency-stop` before its Helm
+write; while it exists the fleet workflows refuse to run (except recovery with
+`acknowledge_emergency_stop=true`), and every fleet Helm write re-checks it
+afterwards and re-applies the stop. Deploy `deploy` and `rollback` also
+install the server-side fence `deploy/runner-emergency-stop-fence.yaml` (a
+ValidatingAdmissionPolicy and binding: while the marker exists the API server
+denies any AutoscalingRunnerSet write that is not 0/0) before their Helm
+write, and every other fleet mutator requires it to equal the file; the
+deployment credential must be allowed to create cluster-scoped
+`admissionregistration.k8s.io` policies and bindings. Every
+operation is admitted by `scripts/verify-runner-pool-state.sh` under its own
+name. Deploy also installs the runner NetworkPolicy
+(`deploy/runner-network-policy.yaml`) before its Helm upgrade, and
+`enable-burst`, `rebalance` and `acceptance-phase-c` are admitted only while
+`scripts/verify-runner-network-policy.sh` validates the runner network policy
+set (see `docs/SECURITY.md`, "Network Policies").
 
 ### Step 5: Manage Runners
 
@@ -81,9 +106,14 @@ Use the GitHub Actions workflows to manage your runners:
 
 - **Prepare trust boundary / deploy / rollback**: Actions → "Deploy GitHub Runners" → Run workflow
 - **Initial platform/controller preparation**: Actions → "Prepare Runner Platform" → Run workflow
-- **Node-pool bounds**: Actions → "Node Pool Sizing" → Run workflow (`min_nodes=2`, `max_nodes=2`)
+- **Burst node pools**: Actions → "Node Pool Sizing" → Run workflow (`operation` = `create-burst`, `configure-expander`, `enable-burst`, `set-burst-maxima` or `remove-burst`; the baseline pool stays `min=max=count=2`)
+- **Idle burst runners**: Actions → "Rebalance Runners" (hourly; dispatch with `expected_sha`)
+- **Acceptance**: Actions → "Runner Acceptance Evidence" (phases A-E; see the runbook)
 - **Check Status**: Actions → "Runner Status" → Run workflow
-- **Emergency Stop**: Actions → "Emergency Stop Runners" → Run workflow
+- **Emergency Stop**: Actions → "Emergency Stop Runners" → Run workflow. It
+  runs immediately (its own `runner-emergency-stop` concurrency group, not the
+  shared fleet lock) and leaves a `stopped` state; recovery is in
+  `docs/runbooks/node-pool-sizing.md`, "Emergency Stop"
 
 ## 🔧 Configuration Details
 
@@ -101,7 +131,7 @@ runnerScaleSetName: "redducklabs-runners"
 
 # Scaling settings
 minRunners: 2
-maxRunners: 4
+maxRunners: 20
 runnerGroup: "redducklabs-private-runners"
 
 # NOTE: containerMode.type is deliberately NOT "dind" - see below.
@@ -129,7 +159,9 @@ template:
 
 ### Key Configuration Options
 
-- **minRunners / maxRunners**: 2 warm runners and a fixed maximum of 4.
+- **minRunners / maxRunners**: 2 warm runners and a maximum of 20 (two pods on
+  each of up to 10 runner nodes). Warm runners prefer the baseline pool; runner
+  pods carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`.
 - **pod resources**: the scheduler reserves 3 CPU and 5 GiB for the whole pod;
   the runner and DinD sidecar share its 6 GiB memory limit. Neither container
   defines a competing CPU or memory budget.
@@ -164,15 +196,21 @@ helm template redducklabs-runners \
   -f deploy/dind-values.yaml
 ```
 
-### Reviewed target: capacity and diagnostics
+### Reviewed target: capacity, cost and diagnostics
 
-Pending CI deployment and external live acceptance, the reviewed target fits two
-3 CPU / 5 GiB pods on each measured 13.32 GiB / 7880m dedicated node; a third
-does not fit. Its pool target is two $96 nodes, so its four self-hosted runner
-ceiling is also a $192 monthly cost cap. Runner Status reports sanitized DOKS
-autoscaler `Backoff` diagnostics when its known provider text format is
-available. It reports diagnostics unavailable for missing or changed provider
-data and never treats those diagnostics as a capacity gate.
+Each 13.32 GiB / 7880m runner node fits two 3 CPU / 5 GiB pods; a third does
+not fit. The baseline pool `github-runners-pool-16g` keeps two `s-8vcpu-16gb`
+nodes ($192/month). The burst pools `github-runners-burst-16g` (0..6) and
+`github-runners-burst-amd-16g` (0..2) are opened by Node Pool Sizing
+`enable-burst` and scale from zero with the cluster autoscaler, primary first
+(priority expander). The billed ceiling is 10 runner nodes ($992/month only if
+all ran all month); the estimate from measured demand is about $150/month of
+burst nodes. `scripts/runner-cost-report.sh --month YYYY-MM` reports measured
+runner node-hours and cost from the DigitalOcean invoice. Runner Status reports
+burst node counts per pool and sanitized DOKS autoscaler `Backoff` diagnostics
+when its known provider text format is available; it reports diagnostics
+unavailable for missing or changed provider data and never treats those
+diagnostics as a capacity gate.
 
 An OOM kill identifies the killed container but does not attribute aggregate
 shared-budget consumption. Diagnose from pod aggregate use, both containers'
@@ -263,8 +301,10 @@ compensating controls are recorded in
 [`docs/security/vulnerability-dismissals.md`](security/vulnerability-dismissals.md).
 The CI trust-boundary step uses `RUNNER_TOKEN` to reconcile the named runner
 group, selected visibility, disabled public access, and the committed private
-repository allow-list. It scans every public organization workflow and fails
-closed on a direct or dynamic self-hosted runner selector.
+repository allow-list. It reads each allow-listed repository's fork-PR workflow
+policy and fails closed unless workflows from fork pull requests are disabled.
+It scans every public organization workflow and fails closed on a direct or
+dynamic self-hosted runner selector.
 
 ## 🚨 Troubleshooting Setup
 
@@ -284,9 +324,16 @@ closed on a direct or dynamic self-hosted runner selector.
    pod budget. Use Runner Status aggregate and per-container diagnostics.
 
 4. **Rollback**
-   Use Deploy GitHub Runners' `rollback` operation with the recorded
-   post-quiesce Helm revision and the reviewed `expected_sha`. CI verifies the
-   restored isolated 2/2 runner template and the private runner-group boundary.
+   Run Deploy GitHub Runners `drain`, then Node Pool Sizing `remove-burst`,
+   then Deploy GitHub Runners `rollback` with the reviewed `expected_sha`; it
+   upgrades to the committed `deploy/density-values.yaml`. CI
+   verifies the restored `density` (2/4) template and the private runner-group
+   boundary.
+
+5. **After an Emergency Stop**
+   The release is in a `stopped` state (`burst-stopped`, `density-stopped` or
+   `drain-stopped`); the Emergency Stop summary names it and the recovery that
+   admits it. See `docs/runbooks/node-pool-sizing.md`, "Emergency Stop".
 
 ### Getting Help
 
@@ -301,6 +348,6 @@ closed on a direct or dynamic self-hosted runner selector.
 - [ ] `prepare-trust-boundary` completed with explicit co-tenancy acceptance
 - [ ] Prepare Runner Platform produced the typed `do-registry-secret`, all four
   Established ARC CRDs, and the Ready pinned controller
-- [ ] Node Pool Sizing confirms `min_nodes=max_nodes=count=2`
+- [ ] Runner Status shows the baseline pool at `min_nodes=max_nodes=count=2`
 - [ ] Deploy preflight and deployment completed from the same `expected_sha`
-- [ ] Runner Status reports the expected four-runner/two-node contract
+- [ ] Runner Status reports an admitted pool state (the `STATE:` line), the per-pool node counts and bounds, and no `EXPANDER drift` line

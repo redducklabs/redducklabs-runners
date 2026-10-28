@@ -1,0 +1,1 @@
+.items += [{"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "fixture-heavy", "namespace": "default", "labels": {}}, "spec": {"nodeName": "github-runners-pool-16g-a1b2c", "containers": [{"name": "main", "resources": {"requests": {"cpu": "100m", "memory": "1483Mi"}}}]}, "status": {"phase": "Running"}}]

@@ -1,0 +1,38 @@
+{
+  "total_count": 4,
+  "runners": [
+    {
+      "id": 1,
+      "name": "redducklabs-runners-7xk2p-runner-burstaa",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "name": "redducklabs-runners"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "redducklabs-runners-7xk2p-runner-f0",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "name": "redducklabs-runners"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "redducklabs-runners-7xk2p-runner-f1",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "name": "redducklabs-runners"
+        }
+      ]
+    }
+  ]
+}

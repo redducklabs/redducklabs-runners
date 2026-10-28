@@ -108,16 +108,30 @@ YAML
     done
 }
 
-# Node budget for github-runners-pool-16g (s-8vcpu-16gb).
-NODE_ALLOCATABLE_MI=13639     # 13967028Ki
-NODE_ALLOCATABLE_CPU_M=7880
+# Node budgets. Both burst sizes use published allocatable figures; the
+# baseline pool and the primary burst pool are s-8vcpu-16gb (measured 13967028Ki
+# / 7880m). The fallback burst pool is s-8vcpu-16gb-amd (same 16 GiB / 8 vCPU
+# class; the allocatable below is the same published figure and must be
+# re-measured if DigitalOcean publishes a different one).
+# The four values below are read through ${!alloc_mi_var} / ${!alloc_cpu_var}.
+# shellcheck disable=SC2034
+NODE_ALLOCATABLE_MI_s_8vcpu_16gb=13639     # 13967028Ki
+# shellcheck disable=SC2034
+NODE_ALLOCATABLE_CPU_M_s_8vcpu_16gb=7880
+# shellcheck disable=SC2034
+NODE_ALLOCATABLE_MI_s_8vcpu_16gb_amd=13639
+# shellcheck disable=SC2034
+NODE_ALLOCATABLE_CPU_M_s_8vcpu_16gb_amd=7880
 SYSTEM_OVERHEAD_MI=694        # cilium, kube-proxy, csi, do-node-agent
 SYSTEM_OVERHEAD_CPU_M=522
 REQUIRED_HEADROOM_MI=2048
 REQUIRED_HEADROOM_CPU_M=1000
 PODS_PER_NODE=2
-MAX_RUNNERS=4
-POOL_MAX_NODES=2
+# Burst capacity: baseline pool 2 nodes plus burst pools 6 + 2 nodes.
+BASELINE_NODES=2
+BURST_MAX_NODES=8
+MAX_RUNNERS=20
+MAX_MIN_RUNNERS=4
 
 FAILURES=0
 
@@ -326,34 +340,40 @@ to_millicpu() {  # accepts whole CPU or millicpu values
 
 REQ_TOTAL_MI=$(to_mi "$POD_REQ_MEM")
 REQ_TOTAL_CPU_M=$(to_millicpu "$POD_REQ_CPU")
-BUDGET_MI=$(( NODE_ALLOCATABLE_MI - SYSTEM_OVERHEAD_MI ))
-BUDGET_CPU_M=$(( NODE_ALLOCATABLE_CPU_M - SYSTEM_OVERHEAD_CPU_M ))
 TWO_POD_MI=$(( PODS_PER_NODE * REQ_TOTAL_MI ))
 TWO_POD_CPU_M=$(( PODS_PER_NODE * REQ_TOTAL_CPU_M ))
 THREE_POD_MI=$(( (PODS_PER_NODE + 1) * REQ_TOTAL_MI ))
 THREE_POD_CPU_M=$(( (PODS_PER_NODE + 1) * REQ_TOTAL_CPU_M ))
 
-echo "  pod requests:         ${REQ_TOTAL_MI}Mi / ${REQ_TOTAL_CPU_M}m"
-echo "  node allocatable:     ${NODE_ALLOCATABLE_MI}Mi / ${NODE_ALLOCATABLE_CPU_M}m"
-echo "  usable after system:  ${BUDGET_MI}Mi / ${BUDGET_CPU_M}m"
-echo "  required headroom:    ${REQUIRED_HEADROOM_MI}Mi / ${REQUIRED_HEADROOM_CPU_M}m"
+for node_size in s_8vcpu_16gb s_8vcpu_16gb_amd; do
+    size_label=${node_size//_/-}
+    alloc_mi_var="NODE_ALLOCATABLE_MI_${node_size}"
+    alloc_cpu_var="NODE_ALLOCATABLE_CPU_M_${node_size}"
+    BUDGET_MI=$(( ${!alloc_mi_var} - SYSTEM_OVERHEAD_MI ))
+    BUDGET_CPU_M=$(( ${!alloc_cpu_var} - SYSTEM_OVERHEAD_CPU_M ))
 
-if [ "$REQ_TOTAL_MI" -eq 0 ] || [ "$REQ_TOTAL_CPU_M" -eq 0 ]; then
-    fail "cannot prove two-pod scheduling without pod-level CPU and memory requests"
-elif [ $(( TWO_POD_MI + REQUIRED_HEADROOM_MI )) -le "$BUDGET_MI" ] \
-   && [ $(( TWO_POD_CPU_M + REQUIRED_HEADROOM_CPU_M )) -le "$BUDGET_CPU_M" ]; then
-    pass "two pods retain at least 2Gi memory and 1000m CPU headroom"
-else
-    fail "two pods plus required headroom do not fit the recorded node budget"
-fi
+    echo "  [${size_label}] pod requests:        ${REQ_TOTAL_MI}Mi / ${REQ_TOTAL_CPU_M}m"
+    echo "  [${size_label}] node allocatable:    ${!alloc_mi_var}Mi / ${!alloc_cpu_var}m"
+    echo "  [${size_label}] usable after system: ${BUDGET_MI}Mi / ${BUDGET_CPU_M}m"
+    echo "  [${size_label}] required headroom:   ${REQUIRED_HEADROOM_MI}Mi / ${REQUIRED_HEADROOM_CPU_M}m"
 
-if [ "$REQ_TOTAL_MI" -eq 0 ] || [ "$REQ_TOTAL_CPU_M" -eq 0 ]; then
-    fail "cannot prove that a third pod is unschedulable without pod-level resource requests"
-elif [ "$THREE_POD_MI" -gt "$BUDGET_MI" ] || [ "$THREE_POD_CPU_M" -gt "$BUDGET_CPU_M" ]; then
-    pass "a third pod cannot fit the recorded node budget"
-else
-    fail "a third pod fits the recorded node budget; packing would exceed two pods per node"
-fi
+    if [ "$REQ_TOTAL_MI" -eq 0 ] || [ "$REQ_TOTAL_CPU_M" -eq 0 ]; then
+        fail "${size_label}: cannot prove two-pod scheduling without pod-level CPU and memory requests"
+    elif [ $(( TWO_POD_MI + REQUIRED_HEADROOM_MI )) -le "$BUDGET_MI" ] \
+       && [ $(( TWO_POD_CPU_M + REQUIRED_HEADROOM_CPU_M )) -le "$BUDGET_CPU_M" ]; then
+        pass "${size_label}: two pods retain at least 2Gi memory and 1000m CPU headroom"
+    else
+        fail "${size_label}: two pods plus required headroom do not fit the recorded node budget"
+    fi
+
+    if [ "$REQ_TOTAL_MI" -eq 0 ] || [ "$REQ_TOTAL_CPU_M" -eq 0 ]; then
+        fail "${size_label}: cannot prove that a third pod is unschedulable without pod-level resource requests"
+    elif [ "$THREE_POD_MI" -gt "$BUDGET_MI" ] || [ "$THREE_POD_CPU_M" -gt "$BUDGET_CPU_M" ]; then
+        pass "${size_label}: a third pod cannot fit the recorded node budget"
+    else
+        fail "${size_label}: a third pod fits the recorded node budget; packing would exceed two pods per node"
+    fi
+done
 echo ""
 
 # --- Scale set vs pool coupling ---------------------------------------------
@@ -362,17 +382,111 @@ MAXR=$(printf '%s' "$SPEC_JSON" | jq -r '.spec.maxRunners // 0')
 MINR=$(printf '%s' "$SPEC_JSON" | jq -r '.spec.minRunners // 0')
 echo "  minRunners=${MINR} maxRunners=${MAXR}"
 if [ "$MAXR" = "$MAX_RUNNERS" ]; then
-    pass "maxRunners is capped at ${MAX_RUNNERS}"
+    pass "maxRunners is ${MAX_RUNNERS}"
 else
     fail "maxRunners is ${MAXR}, expected ${MAX_RUNNERS}"
 fi
 
-REQUIRED_NODES=$(( (MAXR + PODS_PER_NODE - 1) / PODS_PER_NODE ))
-if [ "$REQUIRED_NODES" -eq "$POOL_MAX_NODES" ]; then
-    pass "maxRunners=${MAXR} maps to ${REQUIRED_NODES} nodes at ${PODS_PER_NODE} pods per node"
+CEILING=$(( PODS_PER_NODE * (BASELINE_NODES + BURST_MAX_NODES) ))
+if [ "$MAXR" -le "$CEILING" ]; then
+    pass "maxRunners=${MAXR} fits ${PODS_PER_NODE} x (${BASELINE_NODES} baseline + ${BURST_MAX_NODES} burst) = ${CEILING} pod slots"
 else
-    fail "maxRunners=${MAXR} maps to ${REQUIRED_NODES} nodes, expected ${POOL_MAX_NODES}"
+    fail "maxRunners=${MAXR} exceeds the ${CEILING} pod slots the pools can host"
 fi
+
+if [ "$MINR" -le "$MAX_MIN_RUNNERS" ]; then
+    pass "minRunners=${MINR} is at most ${MAX_MIN_RUNNERS}"
+else
+    fail "minRunners=${MINR} exceeds ${MAX_MIN_RUNNERS}"
+fi
+echo ""
+
+# --- Burst and drain contracts on the real rendered manifest -------------------
+CONTRACT_TOOL="${REPO_ROOT}/scripts/validate-runner-isolation-contract.py"
+
+render_values() {  # values file, extra helm args...
+    local values_file=$1
+    shift
+    helm template redducklabs-runners "$CHART" \
+        --version "$CHART_VERSION" \
+        --kube-version "$KUBE_VERSION" \
+        -f "$values_file" "$@" \
+        --set githubConfigSecret.github_token=PLACEHOLDER \
+        --set controllerServiceAccount.name=arc-gha-rs-controller \
+        --set controllerServiceAccount.namespace=arc-systems
+}
+
+assert_burst_render() {
+    if printf '%s' "$RENDER" | python -B "$CONTRACT_TOOL" \
+        --contract burst --kind manifest --min-runners 2 --max-runners 20 \
+        --runner-group private; then
+        pass "rendered manifest satisfies the burst contract (2/20)"
+    else
+        fail "rendered manifest does not satisfy the burst contract (2/20)"
+    fi
+}
+
+assert_drain_render() {
+    local generated drain_render
+    generated="$(mktemp)"
+    if ! python -B "${REPO_ROOT}/scripts/render-drain-values.py" "$generated"; then
+        fail "scripts/render-drain-values.py failed"
+        rm -f "$generated"
+        return
+    fi
+    if python -B "$CONTRACT_TOOL" \
+        --contract drain --kind values --min-runners 2 --max-runners 4 \
+        --runner-group private < "$generated"; then
+        pass "generated drain values satisfy the drain contract (2/4, helm get values shape)"
+    else
+        fail "generated drain values do not satisfy the drain contract (2/4)"
+    fi
+    if ! drain_render=$(render_values "$generated" 2>&1); then
+        fail "helm template with the generated drain values failed"
+        rm -f "$generated"
+        return
+    fi
+    rm -f "$generated"
+    if printf '%s' "$drain_render" | python -B "$CONTRACT_TOOL" \
+        --contract drain --kind manifest --min-runners 2 --max-runners 4 \
+        --runner-group private; then
+        pass "rendered manifest from the generated values satisfies the drain contract (2/4)"
+    else
+        fail "rendered manifest from the generated values does not satisfy the drain contract (2/4)"
+    fi
+    if printf '%s' "$drain_render" | python -B "$CONTRACT_TOOL" \
+        --contract burst --kind manifest --min-runners 2 --max-runners 4 \
+        --runner-group private 2>/dev/null; then
+        fail "drain render is also accepted as burst; the contracts are not distinct"
+    else
+        pass "drain render is not accepted as burst"
+    fi
+}
+
+assert_null_for_required_value_is_rejected() {
+    local mutated
+    mutated=$(printf '%s' "$RENDER" | python -c '
+import sys
+import yaml
+
+docs = list(yaml.safe_load_all(sys.stdin))
+for doc in docs:
+    if doc and doc.get("kind") == "AutoscalingRunnerSet":
+        doc["spec"]["template"]["spec"]["nodeSelector"] = None
+sys.stdout.write(yaml.safe_dump_all(docs))
+')
+    if printf '%s' "$mutated" | python -B "$CONTRACT_TOOL" \
+        --contract burst --kind manifest --min-runners 2 --max-runners 20 \
+        --runner-group private 2>/dev/null; then
+        fail "burst contract accepts a manifest with nodeSelector: null"
+    else
+        pass "burst contract rejects a manifest with nodeSelector: null"
+    fi
+}
+
+assert_burst_render
+assert_drain_render
+assert_null_for_required_value_is_rejected
 echo ""
 
 # --- Offline workflow fixtures ----------------------------------------------
@@ -414,7 +528,7 @@ for job in (document.get("jobs") or {}).values():
                 "inputs.pool_name": "github-runners-pool-16g",
                 "inputs.operation": "deploy",
                 "inputs.accept_privileged_runner_co_tenancy": "true",
-                "inputs.rollback_revision": "7",
+                "inputs.acknowledge_emergency_stop": "false",
                 "inputs.min_runners": "2",
                 "inputs.max_runners": max_runners,
                 "inputs.expected_sha": expected_sha,
@@ -422,7 +536,7 @@ for job in (document.get("jobs") or {}).values():
                 "inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "github.event.inputs.operation": "deploy",
                 "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
-                "github.event.inputs.rollback_revision": "7",
+                "github.event.inputs.acknowledge_emergency_stop": "false",
                 "github.event.inputs.apply": "true",
                 "github.event.inputs.expected_sha": expected_sha,
                 "github.event.inputs.max_runners": max_runners,
@@ -436,7 +550,7 @@ for job in (document.get("jobs") or {}).values():
                 "needs.validate-inputs.outputs.min_runners": "2",
                 "needs.validate-inputs.outputs.expected_sha": expected_sha,
                 "needs.validate-inputs.outputs.operation": "deploy",
-                "needs.validate-inputs.outputs.rollback_revision": "7",
+                "needs.validate-inputs.outputs.acknowledge_emergency_stop": "false",
                 "needs.validate-inputs.outputs.namespace": "arc-runners",
                 "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
                 "steps.validate.outputs.max_nodes": max_nodes,
@@ -494,7 +608,7 @@ for job in (document.get("jobs") or {}).values():
             "inputs.pool_name": "github-runners-pool-16g",
             "inputs.operation": "deploy",
             "inputs.accept_privileged_runner_co_tenancy": "true",
-            "inputs.rollback_revision": "7",
+            "inputs.acknowledge_emergency_stop": "false",
             "inputs.min_runners": "2",
             "inputs.max_runners": max_runners,
             "inputs.expected_sha": expected_sha,
@@ -502,7 +616,7 @@ for job in (document.get("jobs") or {}).values():
             "inputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "github.event.inputs.operation": "deploy",
             "github.event.inputs.accept_privileged_runner_co_tenancy": "true",
-            "github.event.inputs.rollback_revision": "7",
+            "github.event.inputs.acknowledge_emergency_stop": "false",
             "github.event.inputs.max_runners": max_runners,
             "github.event.inputs.min_runners": "2",
             "github.event.inputs.max_nodes": max_nodes,
@@ -512,7 +626,7 @@ for job in (document.get("jobs") or {}).values():
             "needs.validate-inputs.outputs.min_runners": "2",
             "needs.validate-inputs.outputs.expected_sha": expected_sha,
             "needs.validate-inputs.outputs.operation": "deploy",
-            "needs.validate-inputs.outputs.rollback_revision": "7",
+            "needs.validate-inputs.outputs.acknowledge_emergency_stop": "false",
             "needs.validate-inputs.outputs.namespace": "arc-runners",
             "needs.validate-inputs.outputs.runner_image": "registry.digitalocean.com/redducklabs/github-runner:latest",
             "steps.validate.outputs.max_nodes": max_nodes,
@@ -1035,7 +1149,7 @@ PY
                     local node_reads first_uid
                     node_reads=$(wc -l < "$FIXTURE_NODE_READ_COUNT")
                     echo read >> "$FIXTURE_NODE_READ_COUNT"
-                    first_uid=fixture-node-a-uid
+                    first_uid='fixture-node-a-uid'
                     if [ "$node_reads" -ge 1 ]; then first_uid=$FIXTURE_SECOND_NODE_UID; fi
                     local node_extra_taint
                     node_extra_taint=""
@@ -1130,6 +1244,9 @@ PY
                 *'/repositories/1006277397'*) echo '{"id":1006277397,"name":"therapy-link","full_name":"redducklabs/therapy-link","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
                 *'/repositories/776507734'*) echo '{"id":776507734,"name":"zipbot-internal","full_name":"redducklabs/zipbot-internal","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
                 *'/repositories/1037651737'*) echo '{"id":1037651737,"name":"zipbot-v2","full_name":"redducklabs/zipbot-v2","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1425956382'*) echo '{"id":1425956382,"name":"keel","full_name":"redducklabs/keel","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/repositories/1418079240'*) echo '{"id":1418079240,"name":"superfood-shred","full_name":"redducklabs/superfood-shred","visibility":"private","private":true,"owner":{"login":"redducklabs"}}' ;;
+                *'/actions/permissions/fork-pr-workflows-private-repos'*) echo '{"run_workflows_from_fork_pull_requests":false,"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false,"require_approval_for_fork_pr_workflows":false}' ;;
                 *'/repositories/1359405097'*) echo '{"id":1359405097,"name":"agent-handoff-toolkit","full_name":"redducklabs/agent-handoff-toolkit","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}' ;;
                 *'/repositories/1271568186'*) echo '{"id":1271568186,"name":"fountainrank","full_name":"redducklabs/fountainrank","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}' ;;
                 *'/repositories/1208056940'*) echo '{"id":1208056940,"name":"claude-control","full_name":"redducklabs/claude-control","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}' ;;
@@ -1145,7 +1262,7 @@ PY
                     fi
                     ;;
                 *'--method POST'*'actions/runner-groups'*) echo '{"id":777,"name":"redducklabs-private-runners"}' ;;
-                *'runner-groups/777/repositories?per_page=100'*) echo '{"repositories":[{"id":776507734,"visibility":"private","private":true},{"id":1006277397,"visibility":"private","private":true},{"id":1018231298,"visibility":"private","private":true},{"id":1025075333,"visibility":"private","private":true},{"id":1033531555,"visibility":"private","private":true},{"id":1037651737,"visibility":"private","private":true},{"id":1154788719,"visibility":"private","private":true},{"id":1193238112,"visibility":"private","private":true},{"id":1351028230,"visibility":"private","private":true}]}' ;;
+                *'runner-groups/777/repositories?per_page=100'*) echo '{"repositories":[{"id":776507734,"visibility":"private","private":true},{"id":1006277397,"visibility":"private","private":true},{"id":1018231298,"visibility":"private","private":true},{"id":1025075333,"visibility":"private","private":true},{"id":1033531555,"visibility":"private","private":true},{"id":1037651737,"visibility":"private","private":true},{"id":1154788719,"visibility":"private","private":true},{"id":1193238112,"visibility":"private","private":true},{"id":1351028230,"visibility":"private","private":true},{"id":1418079240,"visibility":"private","private":true},{"id":1425956382,"visibility":"private","private":true}]}' ;;
                 *'runner-groups/777'*) echo '{"id":777,"name":"redducklabs-private-runners","visibility":"selected","allows_public_repositories":false}' ;;
                 *) echo '{"id":1,"runner_groups":[],"repositories":[]}' ;;
             esac
@@ -1157,145 +1274,54 @@ PY
     ) >"$output_log" 2>&1
 }
 
-run_named_step() {  # workflow, step name, expected SHA, max runners, min nodes, max nodes
-    local workflow=$1 step_name=$2 expected_sha=$3 max_runners=$4 min_nodes=$5 max_nodes=$6
-    local safe_step_name
-    safe_step_name=$(printf '%s' "$step_name" | tr -c '[:alnum:]' '_')
-    local script
-    script="$FIXTURE_DIR/$(basename "$workflow").${safe_step_name}.sh"
-    : > "$script"
-    materialize_workflow_step "$workflow" "$step_name" "$expected_sha" "$max_runners" "$min_nodes" "$max_nodes" "$script" || return 1
-    run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"
-}
 
-assert_rejects_oversized_max() {  # label, workflow, validation step
-    : > "$FIXTURE_DIR/mutations"
-    if run_named_step "$2" "$3" "$FIXTURE_ACTUAL_SHA" 5 2 2; then
-        fail "$1 accepts maxRunners=5; it must reject values above $MAX_RUNNERS"
-    elif [ -s "$FIXTURE_DIR/mutations" ]; then
-        fail "$1 reached a mutation while rejecting maxRunners=5"
-    else
-        pass "$1 rejects maxRunners=5 before mutation"
-    fi
-}
 
-assert_node_pool_bounds() {
-    local workflow=.github/workflows/node-pool-sizing.yml
-    local step='Validate inputs against deploy/dind-values.yaml'
-    : > "$FIXTURE_DIR/mutations"
-    if ! run_named_step "$workflow" "$step" "$FIXTURE_ACTUAL_SHA" 4 2 2; then
-        fail "Node Pool Sizing rejects the required 2/2 production bounds"
-    elif run_named_step "$workflow" "$step" "$FIXTURE_ACTUAL_SHA" 4 1 2 \
-      || run_named_step "$workflow" "$step" "$FIXTURE_ACTUAL_SHA" 4 2 3; then
-        fail "Node Pool Sizing accepts bounds other than 2/2"
-    else
-        pass "Node Pool Sizing accepts only production bounds 2/2"
-    fi
-}
-
-assert_live_capacity_drift_fails() {
-    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT
-    FIXTURE_POOL_MAX=1
-    FIXTURE_POOL_COUNT=1
-    : > "$FIXTURE_DIR/mutations"
-    if run_named_step .github/workflows/deploy-runners.yml 'Check node pool capacity' "$FIXTURE_ACTUAL_SHA" 4 2 2; then
-        fail "Deploy accepts live runner-pool drift (fixture reports min=2, max=1, count=1)"
-    elif [ -s "$FIXTURE_DIR/mutations" ]; then
-        fail "Deploy reached a mutation after live capacity drift"
-    else
-        pass "Deploy rejects live runner-pool capacity drift before mutation"
-    fi
-    FIXTURE_POOL_MAX=$original_max
-    FIXTURE_POOL_COUNT=$original_count
-}
-
-assert_scale_capacity_gate() {
-    local workflow=.github/workflows/scale-runners.yml
-    local validation_step='Validate and sanitize inputs'
-    local capacity_step='Check runner pool capacity'
-    local script="$FIXTURE_DIR/scale-capacity-gate.sh"
-    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT
-
-    : > "$script"
-    if ! materialize_workflow_step "$workflow" "$validation_step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
-       || ! materialize_workflow_step "$workflow" "$capacity_step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
-       || ! materialize_workflow_token "$workflow" '--timeout 180s' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
-        fail "Scale Runners has no executable capacity gate before Helm"
-        return
-    fi
-
-    FIXTURE_POOL_MAX=1
-    FIXTURE_POOL_COUNT=1
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Scale Runners accepts live runner-pool drift before Helm"
-    elif [ -s "$FIXTURE_DIR/mutations" ]; then
-        fail "Scale Runners reached Helm after live runner-pool drift"
-    else
-        pass "Scale Runners rejects live runner-pool drift before Helm"
-    fi
-
-    FIXTURE_POOL_MAX=$original_max
-    FIXTURE_POOL_COUNT=$original_count
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-       && grep -Eq '^helm upgrade .*gha-runner-scale-set' "$FIXTURE_DIR/mutations"; then
-        pass "Scale Runners reaches Helm only after a healthy fixed-capacity check"
-    else
-        fail "Scale Runners does not reach Helm after a healthy fixed-capacity check"
-    fi
-}
-
-assert_scale_workflow_static_contract() {
-    if python - <<'PY'
+assert_node_pool_operations_contract() {
+    # The 8->2 / 2/2-only Node Pool Sizing workflow was replaced by the burst
+    # operations (scripts/burst-pools.sh). Behavioral coverage (stateful
+    # provider, expected_sha mismatch, identity races) lives in
+    # test/verify-burst-autoscaling.sh; this checks the dispatch contract.
+    if python3 - <<'PY'
 import yaml
 
-with open('.github/workflows/scale-runners.yml', encoding='utf-8') as source:
-    workflow = yaml.safe_load(source)
-
-env = workflow.get('env') or {}
-if env.get('ARC_CHART_VERSION') != '0.14.2':
-    raise SystemExit('ARC_CHART_VERSION must be pinned to 0.14.2')
-
-capacity_steps = [
-    step for job in (workflow.get('jobs') or {}).values()
-    for step in (job.get('steps') or [])
-    if step.get('name') == 'Check runner pool capacity'
-]
-if len(capacity_steps) != 1 or capacity_steps[0].get('if') != "needs.validate-inputs.outputs.action != 'status'":
-    raise SystemExit('capacity gate must skip the status-only action')
-
-scale_steps = workflow['jobs']['scale']['steps']
-capacity_index = next(index for index, step in enumerate(scale_steps) if step.get('name') == 'Check runner pool capacity')
-helm_steps = [step for step in scale_steps if 'helm upgrade ' in step.get('run', '')]
-helm_indices = [index for index, step in enumerate(scale_steps) if 'helm upgrade ' in step.get('run', '')]
-if len(helm_steps) != 5 or any('--version "${ARC_CHART_VERSION}"' not in step['run'] for step in helm_steps):
-    raise SystemExit('every Scale Helm upgrade must use ARC_CHART_VERSION')
-if any('--set runnerGroup=redducklabs-private-runners' not in step['run'] for step in helm_steps):
-    raise SystemExit('every Scale Helm upgrade must preserve the private runner group')
-if any(capacity_index >= index for index in helm_indices):
-    raise SystemExit('capacity gate must run before every Scale Helm upgrade')
-
-with open('.github/workflows/scale-runners.yml', encoding='utf-8') as source:
-    if 'Max=8' in source.read():
-        raise SystemExit('Scale operator output still advertises Max=8')
+with open('.github/workflows/node-pool-sizing.yml', encoding='utf-8') as stream:
+    workflow = yaml.safe_load(stream)
+inputs = workflow.get('on', workflow.get(True))['workflow_dispatch']['inputs']
+if set(inputs) != {'operation', 'primary_max', 'fallback_max', 'apply', 'expected_sha'}:
+    raise SystemExit(f'unexpected Node Pool Sizing inputs: {sorted(inputs)}')
+if inputs['operation'].get('options') != ['create-burst', 'configure-expander', 'enable-burst',
+                                          'set-burst-maxima', 'remove-burst']:
+    raise SystemExit('Node Pool Sizing operation choices are not the burst operations')
+(job,) = workflow['jobs'].values()
+steps = job['steps']
+names = [step.get('name') for step in steps]
+guard = names.index('Validate inputs and expected SHA')
+if 'git rev-parse HEAD' not in steps[guard]['run'] or 'expected_sha' not in steps[guard]['run']:
+    raise SystemExit('Node Pool Sizing validation does not compare expected_sha with the checkout')
+gate = next(i for i, step in enumerate(steps) if 'verify-runner-pool-state.sh' in step.get('run', ''))
+script = next(i for i, step in enumerate(steps) if 'scripts/burst-pools.sh' in step.get('run', ''))
+if not guard < gate < script:
+    raise SystemExit('Node Pool Sizing must verify expected_sha, then admit, then run burst-pools.sh')
+for index, step in enumerate(steps[:guard]):
+    if any(token in step.get('run', '') for token in ('doctl', 'kubectl', 'helm')):
+        raise SystemExit(f'{step.get("name")} reaches the cluster before the expected_sha check')
+if '--emit-identities' not in steps[gate]['run'] or '--identities' not in steps[script]['run']:
+    raise SystemExit('Node Pool Sizing does not pass the admission identity snapshot to burst-pools.sh')
 PY
     then
-        pass "Scale workflow pins every Helm mutation and keeps status independent"
+        pass "Node Pool Sizing exposes only the burst operations, SHA-guarded before admission and mutation"
     else
-        fail "Scale workflow chart pin, capacity gate, or operator-output contract is incomplete"
+        fail "Node Pool Sizing burst-operation dispatch contract is incomplete"
     fi
 }
+
+
+
 
 assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation token, mutation command label, expected mutation pattern
     local label=$1 workflow=$2 validation_step=$3 mutation_token=$4 mutation_label=$5 expected_mutation_pattern=$6
     local mismatched=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     local script="$FIXTURE_DIR/${label// /_}.sh"
-
-    if [ "$label" = 'Node Pool Sizing' ]; then
-        FIXTURE_FORCE_LEGACY=true
-        export FIXTURE_FORCE_LEGACY
-    fi
 
     : > "$script"
     if ! materialize_workflow_step "$workflow" "$validation_step" "$mismatched" 4 2 2 "$script" \
@@ -1331,9 +1357,6 @@ assert_sha_guarded_boundary() {  # label, workflow, validation step, mutation to
         fail "$label matching expected_sha does not reach the expected $mutation_label boundary"
     fi
     fi
-    if [ "$label" = 'Node Pool Sizing' ]; then
-        unset FIXTURE_FORCE_LEGACY
-    fi
 }
 
 write_fake_gh() {
@@ -1356,7 +1379,7 @@ fi
 printf '%s\t%s\n' "$joined" "$body" >> "$GH_CALL_LOG"
 
 repo_json() {
-    local id=$1 name=$2 visibility=private identity_reads
+    local id=$1 name=$2 visibility=private identity_reads owner=redducklabs
     if [ "${GH_SCENARIO}" = public_allowlist ] && [ "$name" = manager ]; then
         visibility=public
     fi
@@ -1372,11 +1395,52 @@ repo_json() {
       && [ "$name" = manager ] && [ "$identity_reads" -ge 2 ]; then
         name=renamed-manager
     fi
-    printf '{"id":%s,"name":"%s","full_name":"redducklabs/%s","visibility":"%s","private":%s,"owner":{"login":"redducklabs"}}\n' \
-        "$id" "$name" "$name" "$visibility" "$([ "$visibility" = private ] && echo true || echo false)"
+    if [ "${GH_SCENARIO}" = transferred_member ] && [ "$name" = keel ]; then
+        owner=another-owner
+    fi
+    printf '{"id":%s,"name":"%s","full_name":"%s/%s","visibility":"%s","private":%s,"owner":{"login":"%s"}}\n' \
+        "$id" "$name" "$owner" "$name" "$visibility" "$([ "$visibility" = private ] && echo true || echo false)" "$owner"
+}
+
+fork_policy_json() {
+    local name=$1 target=${FORK_POLICY_TARGET:-keel}
+    case "$name" in
+        aurolegal.ai|autoduck|manager|platform-observability|redducklabs|redducklaw|therapy-link|zipbot-internal|zipbot-v2|keel|superfood-shred) ;;
+        *)
+            printf 'unexpected fork-PR policy read for %s\n' "$name" >&2
+            exit 64
+            ;;
+    esac
+    if [ "$name" != "$target" ]; then
+        printf '{"run_workflows_from_fork_pull_requests":false,"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false,"require_approval_for_fork_pr_workflows":false}\n'
+        return
+    fi
+    case "${GH_SCENARIO}" in
+        fork_policy_true) printf '{"run_workflows_from_fork_pull_requests":true,"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}\n' ;;
+        fork_policy_missing) printf '{"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false}\n' ;;
+        fork_policy_null) printf '{"run_workflows_from_fork_pull_requests":null}\n' ;;
+        fork_policy_string) printf '{"run_workflows_from_fork_pull_requests":"false"}\n' ;;
+        fork_policy_malformed) printf '{"run_workflows_from_fork_pull_requests":false\n' ;;
+        fork_policy_array) printf '[{"run_workflows_from_fork_pull_requests":false}]\n' ;;
+        fork_policy_multi) printf '{"run_workflows_from_fork_pull_requests":true}\n{"run_workflows_from_fork_pull_requests":false}\n' ;;
+        fork_policy_error)
+            printf '%s\n' 'HTTP 404: Not Found' >&2
+            exit 1
+            ;;
+        *) printf '{"run_workflows_from_fork_pull_requests":false,"send_write_tokens_to_workflows":false,"send_secrets_and_variables":false,"require_approval_for_fork_pr_workflows":false}\n' ;;
+    esac
 }
 
 case "$joined" in
+    *"repos/redducklabs/"*"/actions/permissions/fork-pr-workflows-private-repos"*)
+        if [[ " $joined " != *" --method GET "* ]]; then
+            printf 'fork-PR policy read is not an explicit GET: %s\n' "$joined" >&2
+            exit 64
+        fi
+        fork_repo=${joined#*repos/redducklabs/}
+        fork_repo=${fork_repo%%/actions/permissions/fork-pr-workflows-private-repos*}
+        fork_policy_json "$fork_repo"
+        ;;
     *"/repositories/1193238112"*) repo_json 1193238112 aurolegal.ai ;;
     *"/repositories/1025075333"*) repo_json 1025075333 autoduck ;;
     *"/repositories/1351028230"*) repo_json 1351028230 manager ;;
@@ -1386,6 +1450,8 @@ case "$joined" in
     *"/repositories/1006277397"*) repo_json 1006277397 therapy-link ;;
     *"/repositories/776507734"*) repo_json 776507734 zipbot-internal ;;
     *"/repositories/1037651737"*) repo_json 1037651737 zipbot-v2 ;;
+    *"/repositories/1425956382"*) repo_json 1425956382 keel ;;
+    *"/repositories/1418079240"*) repo_json 1418079240 superfood-shred ;;
     *"/repositories/1359405097"*)
         printf '{"id":1359405097,"name":"agent-handoff-toolkit","full_name":"redducklabs/agent-handoff-toolkit","visibility":"public","private":false,"default_branch":"main","owner":{"login":"redducklabs"}}\n'
         ;;
@@ -1524,7 +1590,7 @@ case "$joined" in
         if [ "${GH_SCENARIO}" = readback_drift ]; then
             printf '{"total_count":1,"repositories":[{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true}]}\n'
         elif [ "${GH_SCENARIO}" = reduced_membership ]; then
-            printf '{"total_count":9,"repositories":['
+            printf '{"total_count":11,"repositories":['
             printf '%s' \
               '{"id":776507734},' \
               '{"id":1006277397},' \
@@ -1534,10 +1600,30 @@ case "$joined" in
               '{"id":1037651737},' \
               '{"id":1154788719},' \
               '{"id":1193238112},' \
-              '{"id":1351028230}'
+              '{"id":1351028230},' \
+              '{"id":1418079240},' \
+              '{"id":1425956382}'
+            printf ']}\n'
+        elif [ "${GH_SCENARIO}" = substituted_membership ] || [ "${GH_SCENARIO}" = unauthorized_addition ]; then
+            printf '{"total_count":11,"repositories":['
+            printf '%s' \
+              '{"id":776507734},' \
+              '{"id":1006277397},' \
+              '{"id":1018231298},' \
+              '{"id":1025075333},' \
+              '{"id":1033531555},' \
+              '{"id":1037651737},' \
+              '{"id":1154788719},' \
+              '{"id":1193238112},' \
+              '{"id":1351028230},' \
+              '{"id":1418079240},'
+            if [ "${GH_SCENARIO}" = unauthorized_addition ]; then
+                printf '%s' '{"id":1425956382},'
+            fi
+            printf '%s' '{"id":1334789692}'
             printf ']}\n'
         else
-            printf '{"total_count":9,"repositories":['
+            printf '{"total_count":11,"repositories":['
             printf '%s' \
               '{"id":776507734,"name":"zipbot-internal","full_name":"redducklabs/zipbot-internal","visibility":"private","private":true},' \
               '{"id":1006277397,"name":"therapy-link","full_name":"redducklabs/therapy-link","visibility":"private","private":true},' \
@@ -1547,7 +1633,9 @@ case "$joined" in
               '{"id":1037651737,"name":"zipbot-v2","full_name":"redducklabs/zipbot-v2","visibility":"private","private":true},' \
               '{"id":1154788719,"name":"redducklaw","full_name":"redducklabs/redducklaw","visibility":"private","private":true},' \
               '{"id":1193238112,"name":"aurolegal.ai","full_name":"redducklabs/aurolegal.ai","visibility":"private","private":true},' \
-              '{"id":1351028230,"name":"manager","full_name":"redducklabs/manager","visibility":"private","private":true}'
+              '{"id":1351028230,"name":"manager","full_name":"redducklabs/manager","visibility":"private","private":true},' \
+              '{"id":1418079240,"name":"superfood-shred","full_name":"redducklabs/superfood-shred","visibility":"private","private":true},' \
+              '{"id":1425956382,"name":"keel","full_name":"redducklabs/keel","visibility":"private","private":true}'
             printf ']}\n'
         fi
         ;;
@@ -1615,13 +1703,26 @@ expected_reads = [
     "/repositories/1154788719",
     "/repositories/1193238112",
     "/repositories/1351028230",
+    "/repositories/1425956382",
+    "/repositories/1418079240",
+    "repos/redducklabs/zipbot-internal/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/therapy-link/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/redducklabs/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/autoduck/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/platform-observability/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/zipbot-v2/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/redducklaw/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/aurolegal.ai/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/manager/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/keel/actions/permissions/fork-pr-workflows-private-repos",
+    "repos/redducklabs/superfood-shred/actions/permissions/fork-pr-workflows-private-repos",
     "orgs/redducklabs/repos?type=public&per_page=100",
     "/repositories/1359405097",
     "/repositories/1271568186",
     "/repositories/1208056940",
     "orgs/redducklabs/actions/runner-groups?per_page=100",
 ]
-identity_reads = expected_reads[:9]
+identity_reads = expected_reads[:11]
 mutation_index = next(
     index for index, call in enumerate(calls)
     if "--method POST orgs/redducklabs/actions/runner-groups" in call
@@ -1660,7 +1761,7 @@ PY
         if [ "$patch_line" -lt "$put_line" ] \
           && grep -q '"visibility":"selected"' "$FIXTURE_DIR/gh-calls" \
           && grep -q '"allows_public_repositories":false' "$FIXTURE_DIR/gh-calls" \
-          && grep -q '"selected_repository_ids":\[776507734,1006277397,1018231298,1025075333,1033531555,1037651737,1154788719,1193238112,1351028230\]' "$FIXTURE_DIR/gh-calls"; then
+          && grep -q '"selected_repository_ids":\[776507734,1006277397,1018231298,1025075333,1033531555,1037651737,1154788719,1193238112,1351028230,1418079240,1425956382\]' "$FIXTURE_DIR/gh-calls"; then
             pass "Trust boundary narrows access before exact membership replacement"
         else
             fail "Trust boundary existing-group mutation order or payload is unsafe"
@@ -1849,6 +1950,180 @@ PY
     else
         pass "Trust boundary fails closed on unknown non-repository workflow paths"
     fi
+
+    assert_trust_boundary_admission_fixtures
+}
+
+run_trust_verify_only_fixture() {  # scenario, output, optional verifier script
+    local scenario=$1 output=$2 verifier=${3:-scripts/verify-runner-trust-boundary.sh}
+    : > "$FIXTURE_DIR/gh-calls"
+    (
+        export PATH="$FIXTURE_DIR/fake-bin:$PATH"
+        export GH_SCENARIO="$scenario"
+        export GH_CALL_LOG="$FIXTURE_DIR/gh-calls"
+        bash "$verifier" \
+          --expected-sha "$(git rev-parse HEAD)" --verify-only
+    ) >"$output" 2>&1
+}
+
+# Every private member's fork-PR policy is read with an explicit GET before the
+# first runner-group mutation (and in verify-only mode, before readback).
+assert_fork_policy_reads_precede_mutation() {  # gh call log
+    python3 - "$1" <<'PY'
+import sys
+
+members = [
+    "zipbot-internal", "therapy-link", "redducklabs", "autoduck",
+    "platform-observability", "zipbot-v2", "redducklaw", "aurolegal.ai",
+    "manager", "superfood-shred", "keel",
+]
+with open(sys.argv[1], encoding="utf-8") as source:
+    calls = [line.split("\t", 1)[0] for line in source]
+mutations = [
+    index for index, call in enumerate(calls)
+    if any(f"--method {verb}" in call for verb in ("POST", "PATCH", "PUT", "DELETE"))
+]
+boundary = min(mutations) if mutations else len(calls)
+readback = [index for index, call in enumerate(calls) if "runner-groups/777" in call]
+if readback:
+    boundary = min(boundary, min(readback))
+for member in members:
+    endpoint = f"repos/redducklabs/{member}/actions/permissions/fork-pr-workflows-private-repos"
+    matches = [index for index, call in enumerate(calls) if endpoint in call]
+    if len(matches) != 1:
+        raise SystemExit(f"fork-PR policy for {member} read {len(matches)} times")
+    if matches[0] >= boundary:
+        raise SystemExit(f"fork-PR policy for {member} read after runner-group mutation or readback")
+    if "--method GET" not in calls[matches[0]]:
+        raise SystemExit(f"fork-PR policy for {member} is not an explicit GET")
+PY
+}
+
+assert_trust_boundary_admission_fixtures() {
+    if run_trust_fixture existing "$FIXTURE_DIR/trust-output" \
+      && assert_fork_policy_reads_precede_mutation "$FIXTURE_DIR/gh-calls" \
+      && grep -q -- '--method PUT orgs/redducklabs/actions/runner-groups/777/repositories' "$FIXTURE_DIR/gh-calls" \
+      && grep -q '"selected_repository_ids":\[776507734,1006277397,1018231298,1025075333,1033531555,1037651737,1154788719,1193238112,1351028230,1418079240,1425956382\]' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq 'repositories=11' "$FIXTURE_DIR/trust-output"; then
+        pass "Trust boundary reconciles the eleven-member group only after every fork-PR policy read"
+    else
+        fail "Trust boundary eleven-member reconcile does not read every fork-PR policy before mutation"
+    fi
+
+    if run_trust_verify_only_fixture existing "$FIXTURE_DIR/trust-output" \
+      && assert_fork_policy_reads_precede_mutation "$FIXTURE_DIR/gh-calls" \
+      && ! grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls" \
+      && grep -Fq 'repositories=11' "$FIXTURE_DIR/trust-output"; then
+        pass "Trust boundary verify-only mode checks every fork-PR policy and the eleven-member readback"
+    else
+        fail "Trust boundary verify-only mode skips fork-PR policy checks or the eleven-member readback"
+    fi
+
+    local scenario target mode status
+    for scenario in fork_policy_true fork_policy_missing fork_policy_null fork_policy_string \
+      fork_policy_malformed fork_policy_array fork_policy_multi fork_policy_error; do
+        for target in keel superfood-shred manager; do
+            for mode in reconcile verify-only; do
+                export FORK_POLICY_TARGET="$target"
+                if [ "$mode" = reconcile ]; then
+                    run_trust_fixture "$scenario" "$FIXTURE_DIR/trust-output" && status=0 || status=$?
+                else
+                    run_trust_verify_only_fixture "$scenario" "$FIXTURE_DIR/trust-output" && status=0 || status=$?
+                fi
+                unset FORK_POLICY_TARGET
+                if [ "$status" -eq 0 ]; then
+                    fail "Trust boundary accepts ${scenario//_/ } for ${target} (${mode})"
+                elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+                    fail "Trust boundary mutates the runner group before rejecting ${scenario//_/ } for ${target} (${mode})"
+                elif grep -q 'runner-groups' "$FIXTURE_DIR/gh-calls"; then
+                    fail "Trust boundary reaches the runner group before rejecting ${scenario//_/ } for ${target} (${mode})"
+                elif grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+                    fail "Trust boundary reports success after ${scenario//_/ } for ${target} (${mode})"
+                elif ! grep -Fq "fork-PR" "$FIXTURE_DIR/trust-output" \
+                  || ! grep -Fq "$target" "$FIXTURE_DIR/trust-output"; then
+                    fail "Trust boundary ${scenario//_/ } rejection for ${target} (${mode}) is not diagnostic"
+                else
+                    pass "Trust boundary fails closed on ${scenario//_/ } for ${target} (${mode})"
+                fi
+            done
+        done
+    done
+
+    if run_trust_fixture transferred_member "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary accepts a transferred admitted repository"
+    elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+        fail "Trust boundary mutates before rejecting a transferred admitted repository"
+    elif ! grep -Fq '1425956382:keel' "$FIXTURE_DIR/trust-output"; then
+        fail "Trust boundary transferred-repository rejection is not diagnostic"
+    else
+        pass "Trust boundary fails closed on a transferred admitted repository"
+    fi
+
+    for scenario in substituted_membership unauthorized_addition; do
+        if run_trust_fixture "$scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary accepts ${scenario//_/ } in the runner-group readback"
+        elif grep -Fq 'Trust boundary verified' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary reports success after ${scenario//_/ } in the runner-group readback"
+        elif ! grep -Fq 'selected membership is not exact' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary ${scenario//_/ } readback rejection is not diagnostic"
+        else
+            pass "Trust boundary fails closed on ${scenario//_/ } in the runner-group readback"
+        fi
+        if run_trust_verify_only_fixture "$scenario" "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary verify-only mode accepts ${scenario//_/ }"
+        elif grep -Eq -- '--method (POST|PATCH|PUT|DELETE)' "$FIXTURE_DIR/gh-calls"; then
+            fail "Trust boundary verify-only mode mutates on ${scenario//_/ }"
+        elif ! grep -Fq 'selected membership is not exact' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary verify-only ${scenario//_/ } rejection is not diagnostic"
+        else
+            pass "Trust boundary verify-only mode fails closed on ${scenario//_/ }"
+        fi
+    done
+
+    # Manifest mutants: the verifier must reject a duplicated, omitted, or
+    # unauthorized added identity before any GitHub call.
+    local manifest_case manifest_file mutant
+    for manifest_case in duplicate omission addition; do
+        manifest_file="$FIXTURE_DIR/trusted-${manifest_case}.txt"
+        mutant="$FIXTURE_DIR/trust-manifest-${manifest_case}.sh"
+        case "$manifest_case" in
+            duplicate)
+                sed '$d' deploy/trusted-runner-repositories.txt > "$manifest_file"
+                tail -n 1 "$manifest_file" >> "$manifest_file"
+                ;;
+            omission)
+                grep -v ':keel$' deploy/trusted-runner-repositories.txt > "$manifest_file"
+                ;;
+            addition)
+                cp deploy/trusted-runner-repositories.txt "$manifest_file"
+                printf '%s\n' '1334789692:my-review-buddy' >> "$manifest_file"
+                ;;
+        esac
+        if ! python3 - scripts/verify-runner-trust-boundary.sh "$mutant" "$manifest_file" <<'PY'
+import sys
+
+source_path, mutant_path, manifest_path = sys.argv[1:]
+source = open(source_path, encoding="utf-8").read()
+needle = 'TRUSTED_REPOSITORIES_FILE="${REPO_ROOT}/deploy/trusted-runner-repositories.txt"\n'
+if source.count(needle) != 1:
+    raise SystemExit("manifest mutation fixture could not locate the manifest path")
+with open(mutant_path, "w", encoding="utf-8") as stream:
+    stream.write(source.replace(needle, f'TRUSTED_REPOSITORIES_FILE="{manifest_path}"\n'))
+PY
+        then
+            fail "Trust boundary manifest ${manifest_case} fixture could not be materialized"
+            continue
+        fi
+        if run_trust_fixture existing "$FIXTURE_DIR/trust-output" "$mutant"; then
+            fail "Trust boundary accepts a manifest with an ${manifest_case} identity"
+        elif [ -s "$FIXTURE_DIR/gh-calls" ]; then
+            fail "Trust boundary calls GitHub before rejecting a manifest ${manifest_case}"
+        elif ! grep -Eq 'duplicate identity|exactly eleven identities' "$FIXTURE_DIR/trust-output"; then
+            fail "Trust boundary manifest ${manifest_case} rejection is not diagnostic"
+        else
+            pass "Trust boundary rejects a manifest ${manifest_case} before any GitHub call"
+        fi
+    done
 }
 
 run_autoscaler_fixture() {  # fixture text or MISSING, output
@@ -1915,12 +2190,15 @@ with open('.github/workflows/deploy-runners.yml', encoding='utf-8') as source:
 
 inputs = workflow[True]['workflow_dispatch']['inputs']
 operations = inputs.get('operation', {}).get('options', [])
-if operations != ['deploy', 'prepare-trust-boundary', 'rollback']:
+if operations != ['deploy', 'prepare-trust-boundary', 'drain', 'rollback']:
     raise SystemExit('deploy operation choices are incomplete or unordered')
 if inputs.get('accept_privileged_runner_co_tenancy', {}).get('type') != 'boolean':
     raise SystemExit('explicit privileged co-tenancy acceptance input is missing')
-if 'rollback_revision' not in inputs:
-    raise SystemExit('rollback revision input is missing')
+if 'rollback_revision' in inputs:
+    raise SystemExit('rollback no longer takes a Helm revision (Ruling 34)')
+if inputs.get('acknowledge_emergency_stop', {}).get('type') != 'boolean' \
+        or inputs['acknowledge_emergency_stop'].get('default') is not False:
+    raise SystemExit('acknowledge_emergency_stop must be a boolean input defaulting to false (Ruling 33)')
 
 jobs = workflow.get('jobs') or {}
 trust = jobs.get('trust-boundary')
@@ -1934,6 +2212,8 @@ if any(token in trust_shell for token in ('kubectl ', 'helm ', 'doctl ')):
     raise SystemExit('prepare-trust-boundary job has a cluster/provider command')
 if 'trust-boundary' not in ([deploy.get('needs')] if isinstance(deploy.get('needs'), str) else deploy.get('needs', [])):
     raise SystemExit('deployment does not depend on trust reconciliation')
+if 'min_runners' in inputs or 'max_runners' in inputs:
+    raise SystemExit('Deploy must not take runner bounds as input')
 if "needs.validate-inputs.outputs.operation == 'deploy'" not in deploy.get('if', ''):
     raise SystemExit('prepare-trust-boundary does not stop before the deployment job')
 
@@ -1942,12 +2222,15 @@ for job in jobs.values():
     for step in job.get('steps', []):
         if '${{ github.event.inputs.' in step.get('run', ''):
             raise SystemExit(f'raw workflow_dispatch input interpolation in shell step: {step.get("name")}')
-preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and preflight candidate')
+render_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and validate candidate')
+preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Server-side preflight candidate')
 deploy_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Deploy runners')
-preflight = steps[preflight_index].get('run', '')
+preflight = steps[render_index].get('run', '') + steps[preflight_index].get('run', '')
+if '--dry-run=server' in steps[render_index].get('run', '') or not render_index < preflight_index:
+    raise SystemExit('the render step must be local and precede the server-side preflight')
 deploy_shell = steps[deploy_index].get('run', '')
 rollback_steps = jobs.get('rollback', {}).get('steps', [])
-rollback = next(step for step in rollback_steps if step.get('name') == 'Rollback runners').get('run', '')
+rollback = next(step for step in rollback_steps if step.get('name') == 'Roll back to committed density values').get('run', '')
 if preflight.count('helm template ') != 1:
     raise SystemExit('candidate must be rendered exactly once')
 if preflight.count('kubectl apply --server-side --force-conflicts --dry-run=server') != 2:
@@ -1956,15 +2239,17 @@ if '--post-renderer "${HASH_GATE}"' not in deploy_shell:
     raise SystemExit('Helm deployment is not guarded by the preflight manifest hash')
 if preflight_index >= deploy_index:
     raise SystemExit('preflight does not precede Helm deployment')
-if 'helm rollback ' not in rollback:
+if './scripts/rollback-density.sh --identities' not in rollback:
     raise SystemExit('CI rollback boundary is missing')
+if '--contract burst --kind manifest' not in preflight:
+    raise SystemExit('rendered candidate is not checked against the burst contract before Helm')
+if "safe-to-evict" not in preflight or '"annotations"' not in preflight:
+    raise SystemExit('preflight does not carry and verify the safe-to-evict annotation')
 
 overlay_patterns = [
     r'--values deploy/dind-values\.yaml',
     r'--set githubConfigSecret\.github_token=',
     r'--set runnerScaleSetName=',
-    r'--set minRunners=',
-    r'--set maxRunners=',
     r'--set-string "template\.spec\.containers\[0\]\.image=',
     r'--set-string "template\.spec\.initContainers\[0\]\.image=',
     r'--set runnerGroup=',
@@ -1980,8 +2265,6 @@ for index, step in enumerate(steps):
     if index >= preflight_index:
         break
     shell = step.get('run', '')
-    if step.get('name') == 'Bootstrap chart-owned ServiceAccount for first install':
-        continue
     if re.search(r'helm (upgrade|rollback|uninstall)|kubectl (apply|create|delete|patch)|node-pool update', shell):
         raise SystemExit(f'mutation step precedes compatibility preflight: {step.get("name")}')
 PY
@@ -2037,32 +2320,6 @@ assert_deploy_requires_cotenancy_acceptance() {
     fi
 }
 
-assert_rollback_revision_prevalidation() {
-    local script="$FIXTURE_DIR/deploy-rollback-prevalidation.sh"
-    : > "$script"
-    materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
-        fail "Rollback prevalidation fixture could not be materialized"
-        return
-      }
-
-    local invalid
-    for invalid in chart values manifest; do
-        : > "$FIXTURE_DIR/mutations"
-        FIXTURE_ROLLBACK_INVALID="$invalid"
-        export FIXTURE_ROLLBACK_INVALID
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Rollback accepts invalid revision ${invalid} metadata"
-        elif grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
-            fail "Rollback mutates before rejecting invalid revision ${invalid} metadata"
-        elif ! grep -q '^helm history ' "$FIXTURE_DIR/helm-reads"; then
-            fail "Rollback does not inspect revision history before ${invalid} rejection"
-        else
-            pass "Rollback rejects invalid revision ${invalid} metadata before mutation"
-        fi
-    done
-    unset FIXTURE_ROLLBACK_INVALID
-}
 
 run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mutation, request shape, server major/minor, deploy drift, output, field ownership
     local fail_dry_run=$1 system_memory_mi=$2 system_cpu_m=$3 admission_mutation=$4
@@ -2071,7 +2328,9 @@ run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mu
     local script="$FIXTURE_DIR/deploy-preflight.sh"
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Render and preflight candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+      'Render and validate candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Server-side preflight candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
     materialize_workflow_step .github/workflows/deploy-runners.yml \
       'Deploy runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
     : > "$FIXTURE_DIR/preflight-calls"
@@ -2214,6 +2473,19 @@ if mutation != 'none':
         next(item for item in containers if item.get('name') == 'runner')['volumeMounts'] = []
     elif mutation == 'restart':
         next(item for item in init_containers if item.get('name') == 'dind')['restartPolicy'] = 'Never'
+    elif mutation == 'annotation_removed':
+        if document.get('kind') == 'Pod':
+            document['metadata'].get('annotations', {}).pop('cluster-autoscaler.kubernetes.io/safe-to-evict', None)
+        else:
+            document['spec']['template']['metadata']['annotations'].pop('cluster-autoscaler.kubernetes.io/safe-to-evict', None)
+    elif mutation == 'annotation_true':
+        if document.get('kind') == 'Pod':
+            document['metadata'].setdefault('annotations', {})['cluster-autoscaler.kubernetes.io/safe-to-evict'] = 'true'
+        else:
+            document['spec']['template']['metadata']['annotations']['cluster-autoscaler.kubernetes.io/safe-to-evict'] = 'true'
+    elif mutation == 'pod_annotation_removed':
+        if document.get('kind') == 'Pod':
+            document['metadata'].get('annotations', {}).pop('cluster-autoscaler.kubernetes.io/safe-to-evict', None)
     elif mutation == 'host_network':
         spec['hostNetwork'] = True
     elif mutation == 'host_pid':
@@ -2288,7 +2560,17 @@ PY
             esac
         }
         sleep() { :; }
-        export -f helm kubectl sleep
+        # Deploy runners re-checks expected_sha in-job; the fixture checkout
+        # is at FIXTURE_ACTUAL_SHA.
+        git() {
+            if [ "$1" = rev-parse ] && [ "$2" = HEAD ]; then
+                printf '%s\n' "$FIXTURE_ACTUAL_SHA"
+                return 0
+            fi
+            command git "$@"
+        }
+        export FIXTURE_ACTUAL_SHA
+        export -f helm kubectl sleep git
         bash -euo pipefail -c 'source "$1"' -- "$script"
     ) >"$output" 2>&1
 }
@@ -2306,7 +2588,7 @@ assert_deploy_preflight_fixtures() {
 
     if run_deploy_preflight_fixture false 500 500 none container 1 36 false \
       "$FIXTURE_DIR/preflight-output" true \
-      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+      && grep -q '^helm upgrade redducklabs-runners ' "$FIXTURE_DIR/preflight-calls"; then
         pass "Existing Helm field ownership does not block a non-persisting server dry-run"
     else
         fail "Existing Helm field ownership blocks the deployment preflight"
@@ -2315,33 +2597,26 @@ assert_deploy_preflight_fixtures() {
     if run_deploy_preflight_fixture false 500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output" \
       && [ "$(grep -c '^helm template ' "$FIXTURE_DIR/preflight-calls")" -eq 1 ] \
       && [ "$(grep -c '^kubectl apply --server-side --force-conflicts --dry-run=server ' "$FIXTURE_DIR/preflight-calls")" -eq 2 ] \
-      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+      && grep -q '^helm upgrade redducklabs-runners ' "$FIXTURE_DIR/preflight-calls"; then
         pass "Compatible ASRS and Pod dry-runs reach the Helm boundary after one render"
     else
         sed -n '1,20p' "$FIXTURE_DIR/preflight-output" >&2
         fail "Healthy live compatibility preflight does not reach Helm"
     fi
 
-    if run_deploy_preflight_fixture false 1500 500 none container 1 36 false "$FIXTURE_DIR/preflight-output"; then
-        fail "Deploy accepts a node without two-pod memory headroom"
-    elif [ ! -e "$FIXTURE_DIR/preflight-calls" ]; then
-        fail "Deploy node-headroom fixture could not be materialized"
-    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
-        fail "Deploy reaches Helm after live node headroom drift"
+    # Node headroom moved to scripts/verify-runner-pool-state.sh, which
+    # evaluates every Ready eligible node (request-shape fixtures in
+    # test/verify-burst-autoscaling.sh, assert_gate_request_shapes). The
+    # preflight no longer reads nodes or pods.
+    if run_deploy_preflight_fixture false 1500 1000 none container 1 36 false "$FIXTURE_DIR/preflight-output" \
+      && ! grep -Eq '^kubectl get (nodes|pods)' "$FIXTURE_DIR/preflight-calls"; then
+        pass "Deploy preflight leaves node headroom to the pool-state gate"
     else
-        pass "Live per-node two-pod plus headroom drift prevents Helm"
-    fi
-
-    if run_deploy_preflight_fixture false 500 1000 none container 1 36 false "$FIXTURE_DIR/preflight-output"; then
-        fail "Deploy accepts a node without two-pod CPU headroom"
-    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
-        fail "Deploy reaches Helm after live node CPU headroom drift"
-    else
-        pass "Live per-node CPU headroom drift prevents Helm"
+        fail "Deploy preflight still reads nodes/pods for a fixed two-node headroom check"
     fi
 
     local mutation
-    for mutation in resources group placement image privileged unexpected_container wiring restart host_network host_pid host_ipc unknown_top_level service_account_token; do
+    for mutation in resources group placement image privileged unexpected_container wiring restart host_network host_pid host_ipc unknown_top_level service_account_token annotation_removed annotation_true pod_annotation_removed; do
         if run_deploy_preflight_fixture false 500 500 "$mutation" container 1 36 false "$FIXTURE_DIR/preflight-output"; then
             fail "Deploy accepts unsafe admission mutation: ${mutation}"
         elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
@@ -2352,32 +2627,14 @@ assert_deploy_preflight_fixtures() {
     done
 
     if run_deploy_preflight_fixture false 500 500 api_defaults container 1 36 false "$FIXTURE_DIR/preflight-output" \
-      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+      && grep -q '^helm upgrade redducklabs-runners ' "$FIXTURE_DIR/preflight-calls"; then
         pass "Canonical admission comparison permits only documented API defaults"
     else
         fail "Canonical admission comparison rejects documented API defaults"
     fi
 
-    local shape
-    for shape in pod_level restartable_sidecar regular_init_peak overhead malformed; do
-        if run_deploy_preflight_fixture false 500 500 none "$shape" 1 36 false "$FIXTURE_DIR/preflight-output"; then
-            fail "Deploy ignores non-runner request shape: ${shape}"
-        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/preflight-calls"; then
-            fail "Deploy reaches Helm after unsafe request shape: ${shape}"
-        else
-            pass "Capacity gate accounts for request shape: ${shape}"
-        fi
-    done
-
-    if run_deploy_preflight_fixture false 500 500 none alternate_valid 1 36 false "$FIXTURE_DIR/preflight-output" \
-      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
-        pass "Capacity gate accepts alternate valid Kubernetes quantities"
-    else
-        fail "Capacity gate rejects alternate valid Kubernetes quantities"
-    fi
-
     if run_deploy_preflight_fixture false 500 500 none container 2 0 false "$FIXTURE_DIR/preflight-output" \
-      && grep -q '^helm upgrade --install ' "$FIXTURE_DIR/preflight-calls"; then
+      && grep -q '^helm upgrade redducklabs-runners ' "$FIXTURE_DIR/preflight-calls"; then
         pass "API server version gate compares the full major/minor tuple"
     else
         fail "API server version gate compares only the minor version"
@@ -2417,325 +2674,11 @@ assert_hostile_dispatch_inputs_are_data() {
         fi
     done <<'CASES'
 .github/workflows/scale-runners.yml|Validate and sanitize inputs|Scale Runners
-.github/workflows/node-pool-sizing.yml|Validate inputs against deploy/dind-values.yaml|Node Pool Sizing
+.github/workflows/node-pool-sizing.yml|Validate inputs and expected SHA|Node Pool Sizing
 CASES
 }
 
-assert_scale_output_record_injection_is_blocked() {
-    local validation="$FIXTURE_DIR/scale-output-injection-validation.sh"
-    local exploit="$FIXTURE_DIR/scale-output-injection-exploit.sh"
-    local payload parsed_action parsed_min parsed_max
-    payload=$'4\r\naction=scale-custom\r\nmax_runners=99'
-    : > "$validation"
-    if ! materialize_workflow_step .github/workflows/scale-runners.yml \
-      'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" "$payload" 2 2 "$validation"; then
-        fail "Scale output-injection validation fixture could not be materialized"
-        return
-    fi
-    sed -i 's/export INPUT_ACTION=scale-custom/export INPUT_ACTION=scale-up/' "$validation"
-    : > "$FIXTURE_DIR/mutations"
-    if ! run_fixture "$validation" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        if [ -s "$FIXTURE_DIR/mutations" ]; then
-            fail "Scale rejects multiline input only after reaching a mutation"
-        else
-            pass "Scale rejects multiline output-record injection before mutation"
-        fi
-        return
-    fi
 
-    readarray -t parsed < <(python3 - "$FIXTURE_DIR/github-output" <<'PY'
-import sys
-
-values = {}
-with open(sys.argv[1], encoding='utf-8', newline=None) as stream:
-    for line in stream:
-        line = line.rstrip('\r\n')
-        if '=' in line:
-            key, value = line.split('=', 1)
-            values[key] = value
-print(values.get('action', ''))
-print(values.get('min_runners', ''))
-print(values.get('max_runners', ''))
-PY
-    )
-    parsed_action=${parsed[0]:-}
-    parsed_min=${parsed[1]:-}
-    parsed_max=${parsed[2]:-}
-    if [ "$parsed_action" = scale-up ] && [ "$parsed_min" = 2 ] && [ "$parsed_max" = 4 ]; then
-        pass "Scale emits canonical fixed outputs for non-custom actions"
-        return
-    fi
-
-    : > "$exploit"
-    if [ "$parsed_action" = scale-custom ] \
-      && [[ "$parsed_max" =~ ^[0-9]+$ ]] \
-      && [ "$parsed_max" -gt 4 ] \
-      && materialize_workflow_step .github/workflows/scale-runners.yml \
-        'Custom scaling' "$FIXTURE_ACTUAL_SHA" "$parsed_max" "$parsed_min" 2 "$exploit"; then
-        : > "$FIXTURE_DIR/mutations"
-        run_fixture "$exploit" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" || true
-        if grep -Eq '^helm upgrade .*--set maxRunners="?([5-9]|[1-9][0-9]+)"?' "$FIXTURE_DIR/mutations"; then
-            fail "Scale multiline output injection overwrites action/max_runners and reaches Helm above four"
-            return
-        fi
-    fi
-    fail "Scale non-custom outputs are not canonical and bounded"
-}
-
-assert_rollout_quiesce_contract() {
-    if python3 - <<'PY'
-import yaml
-
-with open('.github/workflows/scale-runners.yml', encoding='utf-8') as stream:
-    workflow = yaml.safe_load(stream)
-options = (workflow.get('on') or workflow[True])['workflow_dispatch']['inputs']['action']['options']
-if 'rollout-quiesce' not in options:
-    raise SystemExit('rollout-quiesce action is missing')
-steps = workflow['jobs']['scale']['steps']
-step = next(item for item in steps if item.get('name') == 'Quiesce rollout and record rollback revision')
-shell = step['run']
-required = [
-    '--version "${ARC_CHART_VERSION}"', '--set minRunners=2', '--set maxRunners=2',
-    '--set runnerGroup=redducklabs-private-runners', 'ephemeralrunnersets.actions.github.com',
-    'Pending', 'helm history', 'rollback_revision=',
-]
-missing = [item for item in required if item not in shell]
-if missing:
-    raise SystemExit(f'quiesce step missing: {missing}')
-capacity = next(item for item in steps if item.get('name') == 'Check runner pool capacity')['run']
-if 's-8vcpu-16gb' not in capacity or 'rollout-quiesce' not in capacity:
-    raise SystemExit('quiesce transition is not admitted by the exact-size capacity gate')
-PY
-    then
-        pass "Scale Runners exposes a pinned quiesce transition and rollback revision"
-    else
-        fail "Scale Runners lacks the executable rollout-quiesce transition"
-    fi
-
-    local script="$FIXTURE_DIR/rollout-quiesce.sh"
-    : > "$script"
-    if ! materialize_workflow_step .github/workflows/scale-runners.yml \
-      'Check runner pool capacity' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
-      || ! materialize_workflow_step .github/workflows/scale-runners.yml \
-      'Quiesce rollout and record rollback revision' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
-        fail "Rollout-quiesce functional fixture could not be materialized"
-        return
-    fi
-    sed -i 's/export ACTION=fixture/export ACTION=rollout-quiesce/' "$script"
-    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT original_ready=${FIXTURE_READY_NODES:-2}
-    local case_max case_group
-    FIXTURE_FORCE_LEGACY=true
-    export FIXTURE_FORCE_LEGACY
-    while IFS='|' read -r case_max case_group; do
-        FIXTURE_POOL_MAX=$case_max
-        FIXTURE_HELM_MAX=$case_max
-        FIXTURE_HELM_GROUP=$case_group
-        FIXTURE_HELM_POST_GROUP=redducklabs-private-runners
-        FIXTURE_REVISION_GROUP=redducklabs-private-runners
-        export FIXTURE_POOL_MAX FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
-        export FIXTURE_HELM_POST_GROUP FIXTURE_REVISION_GROUP
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-          && grep -Eq '^helm upgrade .*--set minRunners=2 .*--set maxRunners=2 .*--set runnerGroup=redducklabs-private-runners' "$FIXTURE_DIR/mutations" \
-          && grep -q '^rollback_revision=' "$FIXTURE_DIR/github-output"; then
-            pass "Rollout-quiesce accepts recognized ${case_group} 2/${case_max} prestate and emits a private rollback revision"
-        else
-            fail "Rollout-quiesce rejects recognized ${case_group} 2/${case_max} prestate"
-        fi
-    done <<'CASES'
-8|Default
-8|__missing__
-2|redducklabs-private-runners
-CASES
-
-    FIXTURE_POOL_MAX=8
-    FIXTURE_POOL_COUNT=4
-    FIXTURE_READY_NODES=4
-    FIXTURE_HELM_MAX=8
-    FIXTURE_HELM_GROUP=Default
-    export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-      && grep -Eq '^helm upgrade .*--set minRunners=2 .*--set maxRunners=2 .*--set runnerGroup=redducklabs-private-runners' "$FIXTURE_DIR/mutations"; then
-        pass "Rollout-quiesce accepts the live four-node prestate before node-pool reduction"
-    else
-        fail "Rollout-quiesce rejects the live four-node prestate before node-pool reduction"
-    fi
-
-    local scenario variable value
-    while IFS='|' read -r scenario variable value; do
-        FIXTURE_POOL_MAX=8
-        FIXTURE_POOL_COUNT=4
-        FIXTURE_READY_NODES=4
-        FIXTURE_HELM_MAX=8
-        FIXTURE_HELM_GROUP=Default
-        printf -v "$variable" '%s' "$value"
-        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Rollout-quiesce accepts unsafe ${scenario}"
-        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
-            fail "Rollout-quiesce reaches Helm despite unsafe ${scenario}"
-        else
-            pass "Rollout-quiesce rejects unsafe ${scenario} before Helm"
-        fi
-    done <<'CASES'
-nonnumeric provider count|FIXTURE_POOL_COUNT|four
-provider count below minimum|FIXTURE_POOL_COUNT|1
-provider count above maximum|FIXTURE_POOL_COUNT|9
-provider/Kubernetes count mismatch|FIXTURE_READY_NODES|2
-NotReady provider node|FIXTURE_READY_NODES|3
-CASES
-
-    local invalid_group
-    for invalid_group in arbitrary-runner-group; do
-        FIXTURE_POOL_MAX=8
-        FIXTURE_POOL_COUNT=2
-        FIXTURE_READY_NODES=2
-        FIXTURE_HELM_MAX=8
-        FIXTURE_HELM_GROUP=$invalid_group
-        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_READY_NODES FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Rollout-quiesce accepts ${invalid_group/__missing__/missing} prestate runner group"
-        elif ! grep -q '^helm get values ' "$FIXTURE_DIR/helm-reads"; then
-            fail "Rollout-quiesce invalid-group fixture did not reach prestate validation"
-        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
-            fail "Rollout-quiesce reaches Helm with ${invalid_group/__missing__/missing} prestate runner group"
-        else
-            pass "Rollout-quiesce rejects ${invalid_group/__missing__/missing} prestate runner group before Helm"
-        fi
-    done
-
-    FIXTURE_POOL_MAX=2
-    FIXTURE_POOL_COUNT=2
-    FIXTURE_READY_NODES=2
-    FIXTURE_HELM_MAX=2
-    FIXTURE_HELM_GROUP=redducklabs-private-runners
-    FIXTURE_HELM_POST_GROUP=redducklabs-private-runners
-    FIXTURE_REVISION_GROUP=foreign-runner-group
-    export FIXTURE_POOL_MAX FIXTURE_HELM_MAX FIXTURE_HELM_GROUP
-    export FIXTURE_HELM_POST_GROUP FIXTURE_REVISION_GROUP
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Rollout-quiesce emits a rollback revision whose exact private poststate was not validated"
-    elif ! grep -q '^helm history ' "$FIXTURE_DIR/helm-reads"; then
-        fail "Rollout-quiesce rollback-revision fixture did not reach revision validation"
-    elif grep -q '^rollback_revision=' "$FIXTURE_DIR/github-output"; then
-        fail "Rollout-quiesce writes an unvalidated rollback revision output"
-    else
-        pass "Rollout-quiesce rejects a rollback revision with non-private state"
-    fi
-
-    unset FIXTURE_FORCE_LEGACY
-    FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count FIXTURE_READY_NODES=$original_ready FIXTURE_HELM_MAX=2
-    unset FIXTURE_HELM_GROUP FIXTURE_HELM_POST_GROUP FIXTURE_REVISION_GROUP
-}
-
-assert_node_pool_no_removal_contract() {
-    local script="$FIXTURE_DIR/node-pool-no-removal.sh"
-    : > "$script"
-    if ! materialize_workflow_step .github/workflows/node-pool-sizing.yml \
-      'Reduce pool maximum without node removal' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
-        fail "Node-pool no-removal functional fixture could not be materialized"
-        return
-    fi
-
-    local original_max=$FIXTURE_POOL_MAX original_count=$FIXTURE_POOL_COUNT
-    FIXTURE_POOL_MAX=8 FIXTURE_POOL_COUNT=2 FIXTURE_POOL_SIZE=s-8vcpu-16gb
-    FIXTURE_READY_NODES=2 FIXTURE_SCALE_DEMAND=2 FIXTURE_POOL_RACE_COUNT=2
-    FIXTURE_SECOND_CLUSTER_ID=fixture-cluster FIXTURE_SECOND_POOL_ID=fixture-pool
-    FIXTURE_SECOND_NODE_UID=fixture-node-a-uid
-    FIXTURE_SECOND_HELM_GROUP=redducklabs-private-runners
-    FIXTURE_SECOND_ASRS_GROUP=redducklabs-private-runners
-    FIXTURE_PROVIDER_TAINT_STYLE=uppercase
-    FIXTURE_FORCE_LEGACY=true
-    export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
-    export FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
-    export FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
-    export FIXTURE_PROVIDER_TAINT_STYLE
-    export FIXTURE_FORCE_LEGACY
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-      && grep -Eq '^doctl .*node-pool update .*--max-nodes 2' "$FIXTURE_DIR/mutations"; then
-        pass "Node Pool Sizing changes only max_nodes for a safe 2/8 to 2/2 transition"
-    else
-        fail "Node Pool Sizing cannot perform the safe max8 transition"
-    fi
-
-    FIXTURE_FORCE_LEGACY=false
-    export FIXTURE_FORCE_LEGACY
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Node Pool Sizing permits density state to authorize the max8 to max2 reduction"
-    elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-        fail "Node Pool Sizing reaches mutation from density state during the max8 to max2 reduction"
-    else
-        pass "Node Pool Sizing requires quiesced legacy isolation before the max8 to max2 reduction"
-    fi
-    FIXTURE_FORCE_LEGACY=true
-    export FIXTURE_FORCE_LEGACY
-
-    local scenario variable value
-    while IFS='|' read -r scenario variable value; do
-        FIXTURE_POOL_MAX=8 FIXTURE_POOL_COUNT=2 FIXTURE_POOL_SIZE=s-8vcpu-16gb
-        FIXTURE_READY_NODES=2 FIXTURE_SCALE_DEMAND=2 FIXTURE_POOL_RACE_COUNT=2
-        FIXTURE_SECOND_CLUSTER_ID=fixture-cluster FIXTURE_SECOND_POOL_ID=fixture-pool
-        FIXTURE_SECOND_NODE_UID=fixture-node-a-uid
-        FIXTURE_SECOND_HELM_GROUP=redducklabs-private-runners
-        FIXTURE_SECOND_ASRS_GROUP=redducklabs-private-runners
-        printf -v "$variable" '%s' "$value"
-        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
-        export FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
-        export FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Node Pool Sizing accepts unsafe ${scenario}"
-        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-            fail "Node Pool Sizing mutates despite unsafe ${scenario}"
-        else
-            pass "Node Pool Sizing rejects unsafe ${scenario} before mutation"
-        fi
-    done <<'CASES'
-count drift|FIXTURE_POOL_COUNT|3
-NotReady node|FIXTURE_READY_NODES|1
-ARC demand|FIXTURE_SCALE_DEMAND|3
-pool size|FIXTURE_POOL_SIZE|s-16vcpu-32gb
-pre-mutation count race|FIXTURE_POOL_RACE_COUNT|3
-CASES
-
-    while IFS='|' read -r scenario variable value; do
-        FIXTURE_POOL_MAX=8 FIXTURE_POOL_COUNT=2 FIXTURE_POOL_SIZE=s-8vcpu-16gb
-        FIXTURE_READY_NODES=2 FIXTURE_SCALE_DEMAND=2 FIXTURE_POOL_RACE_COUNT=2
-        FIXTURE_SECOND_CLUSTER_ID=fixture-cluster FIXTURE_SECOND_POOL_ID=fixture-pool
-        FIXTURE_SECOND_NODE_UID=fixture-node-a-uid
-        FIXTURE_SECOND_HELM_GROUP=redducklabs-private-runners
-        FIXTURE_SECOND_ASRS_GROUP=redducklabs-private-runners
-        printf -v "$variable" '%s' "$value"
-        export FIXTURE_POOL_MAX FIXTURE_POOL_COUNT FIXTURE_POOL_SIZE FIXTURE_READY_NODES FIXTURE_SCALE_DEMAND FIXTURE_POOL_RACE_COUNT
-        export FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
-        export FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Node Pool Sizing accepts ${scenario} between safety observations"
-        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-            fail "Node Pool Sizing mutates despite ${scenario} between safety observations"
-        else
-            pass "Node Pool Sizing rejects ${scenario} between safety observations"
-        fi
-    done <<'CASES'
-cluster identity drift|FIXTURE_SECOND_CLUSTER_ID|replacement-cluster
-pool identity drift|FIXTURE_SECOND_POOL_ID|replacement-pool
-node identity drift|FIXTURE_SECOND_NODE_UID|replacement-node-uid
-Helm state drift|FIXTURE_SECOND_HELM_GROUP|foreign-runner-group
-live ASRS state drift|FIXTURE_SECOND_ASRS_GROUP|foreign-runner-group
-CASES
-    FIXTURE_POOL_MAX=$original_max FIXTURE_POOL_COUNT=$original_count
-    unset FIXTURE_FORCE_LEGACY
-    unset FIXTURE_PROVIDER_TAINT_STYLE
-    unset FIXTURE_SECOND_CLUSTER_ID FIXTURE_SECOND_POOL_ID FIXTURE_SECOND_NODE_UID
-    unset FIXTURE_SECOND_HELM_GROUP FIXTURE_SECOND_ASRS_GROUP
-}
 
 assert_prepared_platform_prerequisites() {
     local script="$FIXTURE_DIR/prepared-platform.sh"
@@ -2766,11 +2709,12 @@ assert_prepared_platform_prerequisites() {
     FIXTURE_PLATFORM_STATE=ready
     export FIXTURE_PLATFORM_STATE
     : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-      && [ ! -s "$FIXTURE_DIR/mutations" ]; then
-        pass "Deploy accepts a prepared and Ready platform when the chart-owned ServiceAccount is absent"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts a platform without the runner release and its chart-owned ServiceAccount"
+    elif [ -s "$FIXTURE_DIR/mutations" ]; then
+        fail "Deploy mutates while rejecting an absent runner release"
     else
-        fail "Deploy rejects healthy prepared-platform prerequisites"
+        pass "Deploy rejects an absent runner release/ServiceAccount (no first-install path in the burst design)"
     fi
 
     local collision
@@ -2798,6 +2742,19 @@ assert_prepared_platform_prerequisites() {
     else
         fail "Deploy rejects the correctly Helm-owned chart ServiceAccount"
     fi
+
+    FIXTURE_PLATFORM_STATE=stale
+    export FIXTURE_PLATFORM_STATE
+    : > "$FIXTURE_DIR/mutations"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts a stale ARC controller with a Helm-owned ServiceAccount"
+    elif ! grep -Fq 'ARC controller Deployment' "$FIXTURE_DIR/output"; then
+        fail "Deploy stale-controller rejection does not come from scripts/lib/arc-identity.sh"
+    else
+        pass "Deploy rejects a stale ARC controller through the shared identity library"
+    fi
+    FIXTURE_PLATFORM_STATE=ready
+    export FIXTURE_PLATFORM_STATE
 
     FIXTURE_SA_STATE=helm
     local registry_state
@@ -2830,25 +2787,47 @@ assert_prepared_platform_prerequisites() {
 
 assert_shared_fleet_concurrency() {
     if python3 - <<'PY'
+import glob
 import yaml
 
-paths = [
+shared = {'group': 'runner-fleet-mutation', 'cancel-in-progress': False}
+# Ruling 28 exceptions, each in its own non-cancelling group:
+#   Emergency Stop must run immediately, not wait behind a multi-hour drain
+#   or Phase C; in-flight mutations then fail closed at their next identity
+#   compare or admission.
+#   Rebalance must never queue behind (or displace a pending) fleet mutation;
+#   it skips while any fleet mutator is queued or running and still takes
+#   the gate otherwise.
+exceptions = {
+    '.github/workflows/emergency-stop.yml': {'group': 'runner-emergency-stop', 'cancel-in-progress': False},
+    '.github/workflows/rebalance-runners.yml': {'group': 'runner-rebalance', 'cancel-in-progress': False},
+}
+mutators = [
     '.github/workflows/deploy-runners.yml',
     '.github/workflows/scale-runners.yml',
     '.github/workflows/node-pool-sizing.yml',
-    '.github/workflows/emergency-stop.yml',
     '.github/workflows/prepare-runner-platform.yml',
     '.github/workflows/deploy-cluster-addons.yml',
 ]
-for path in paths:
+for path in mutators:
     with open(path, encoding='utf-8') as stream:
         workflow = yaml.safe_load(stream)
-    expected = {'group': 'runner-fleet-mutation', 'cancel-in-progress': False}
-    if workflow.get('concurrency') != expected:
+    if workflow.get('concurrency') != shared:
         raise SystemExit(f'{path} does not use the exact shared non-cancelling fleet concurrency group')
+for path, expected in exceptions.items():
+    with open(path, encoding='utf-8') as stream:
+        workflow = yaml.safe_load(stream)
+    if workflow.get('concurrency') != expected:
+        raise SystemExit(f'{path} does not use its documented exception group {expected}')
+# No other workflow may take the shared group without being listed above.
+for path in sorted(glob.glob('.github/workflows/*.yml')):
+    with open(path, encoding='utf-8') as stream:
+        workflow = yaml.safe_load(stream)
+    if workflow.get('concurrency') == shared and path not in mutators:
+        raise SystemExit(f'{path} joins the fleet group but is not a listed fleet mutator')
 PY
     then
-        pass "All runner-fleet mutation workflows share one non-cancelling concurrency group"
+        pass "Every runner-fleet mutator shares one non-cancelling group; Emergency Stop and Rebalance use their documented own groups"
     else
         fail "Runner-fleet mutation workflows do not share the exact concurrency contract"
     fi
@@ -2966,7 +2945,7 @@ PY
         rm -f "$sentinel" "$backtick_sentinel"
         if ! (
             export GITHUB_STEP_SUMMARY="$FIXTURE_DIR/github-summary"
-            export RELEASE_NAME=redducklabs-runners
+            export RELEASE_NAME=redducklabs-runners ARC_CHART_VERSION=0.14.2
             helm() { :; }
             sleep() { :; }
             export -f helm sleep
@@ -2984,12 +2963,15 @@ PY
 }
 
 assert_deploy_unused_revision_cannot_route() {
+    # Ruling 34 removed rollback_revision; the remaining routing-adjacent input
+    # is acknowledge_emergency_stop, which must be exactly true or false and can
+    # never inject another workflow output.
     local script="$FIXTURE_DIR/deploy-unused-revision.sh"
-    local payload=$'7\noperation=rollback\nrollback_revision=99'
+    local payload=$'false\noperation=rollback'
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
       'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
-        fail "Deploy unused-revision routing fixture could not be materialized"
+        fail "Deploy acknowledgement routing fixture could not be materialized"
         return
       }
     python3 - "$script" "$payload" <<'PY'
@@ -2999,184 +2981,27 @@ import sys
 path, payload = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     source = stream.read()
-source = source.replace("export INPUT_ROLLBACK_REVISION=7", f"export INPUT_ROLLBACK_REVISION={shlex.quote(payload)}", 1)
+if "export INPUT_ACKNOWLEDGE_STOP=false" not in source:
+    raise SystemExit("acknowledgement input export not found")
+source = source.replace("export INPUT_ACKNOWLEDGE_STOP=false", f"export INPUT_ACKNOWLEDGE_STOP={shlex.quote(payload)}", 1)
 with open(path, "w", encoding="utf-8") as stream:
     stream.write(source)
 PY
     : > "$FIXTURE_DIR/mutations"
-    if ! run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Deploy rejects an unused rollback input instead of ignoring it"
+    : > "$FIXTURE_DIR/github-output"
+    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+        fail "Deploy accepts a multi-line acknowledge_emergency_stop value"
         return
     fi
-    if python3 - "$FIXTURE_DIR/github-output" <<'PY'
-import sys
-
-values = {}
-with open(sys.argv[1], encoding="utf-8", newline=None) as stream:
-    for line in stream:
-        line = line.rstrip("\r\n")
-        if "=" in line:
-            key, value = line.split("=", 1)
-            values[key] = value
-if values.get("operation") != "deploy" or "rollback_revision" in values:
-    raise SystemExit(1)
-PY
-    then
-        pass "Deploy ignores and does not emit rollback-only input for deploy routing"
+    if ! grep -q '^operation=rollback' "$FIXTURE_DIR/github-output" \
+        && grep -Fq 'acknowledge_emergency_stop must be true or false' "$FIXTURE_DIR/output"; then
+        pass "Deploy rejects a malformed acknowledge_emergency_stop before emitting any routing output"
     else
-        fail "Deploy unused rollback input can overwrite operation/revision routing outputs"
+        fail "Deploy acknowledgement input can inject routing outputs"
     fi
 }
 
-assert_absent_sa_bootstrap_contract() {
-    if python3 - <<'PY'
-import yaml
 
-with open('.github/workflows/deploy-runners.yml', encoding='utf-8') as stream:
-    workflow = yaml.safe_load(stream)
-steps = workflow['jobs']['deploy']['steps']
-names = [item.get('name') for item in steps]
-required = 'Bootstrap chart-owned ServiceAccount for first install'
-if required not in names:
-    raise SystemExit('first-install bootstrap step is missing')
-bootstrap = next(item for item in steps if item.get('name') == required)
-shell = bootstrap.get('run', '')
-if '--set minRunners=0' not in shell or '--set maxRunners=0' not in shell:
-    raise SystemExit('first-install bootstrap can enable runners')
-if 'helm upgrade --install' not in shell or '--version "${ARC_CHART_VERSION}"' not in shell:
-    raise SystemExit('first-install bootstrap is not chart-owned and pinned')
-if names.index(required) >= names.index('Render and preflight candidate'):
-    raise SystemExit('first-install bootstrap does not precede target Pod dry-run')
-if 'serviceaccount' not in shell or 'redducklabs-runners-gha-rs-no-permission' not in shell:
-    raise SystemExit('first-install bootstrap does not verify chart ownership')
-PY
-    then
-        pass "First install bootstraps the chart-owned ServiceAccount at zero runners before Pod preflight"
-    else
-        fail "Absent chart-owned ServiceAccount has no safe zero-runner first-install preflight route"
-    fi
-
-    local script="$FIXTURE_DIR/absent-sa-bootstrap.sh"
-    : > "$script"
-    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Bootstrap chart-owned ServiceAccount for first install' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
-        fail "Absent-ServiceAccount bootstrap fixture could not be materialized"
-        return
-    fi
-    sed -i 's/export STEPS_PREREQUISITES_OUTPUTS_FIRST_INSTALL=fixture/export STEPS_PREREQUISITES_OUTPUTS_FIRST_INSTALL=true/' "$script"
-    FIXTURE_SA_STATE=absent FIXTURE_SCALE_RELEASE_STATE=absent
-    export FIXTURE_SA_STATE FIXTURE_SCALE_RELEASE_STATE
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-      && grep -Eq '^helm upgrade --install .*minRunners=0 .*maxRunners=0' "$FIXTURE_DIR/mutations"; then
-        pass "Absent ServiceAccount executes a chart-owned zero-runner bootstrap"
-    else
-        fail "Absent ServiceAccount cannot execute the zero-runner bootstrap"
-    fi
-    unset FIXTURE_SA_STATE FIXTURE_SCALE_RELEASE_STATE
-}
-
-assert_complete_isolation_and_pool_contracts() {
-    local node_script="$FIXTURE_DIR/node-incomplete-contract.sh"
-    : > "$node_script"
-    materialize_workflow_step .github/workflows/node-pool-sizing.yml \
-      'Reduce pool maximum without node removal' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$node_script" || {
-        fail "Complete isolation fixture could not materialize Node Pool Sizing"
-        return
-      }
-    FIXTURE_POOL_MAX=8 FIXTURE_FORCE_LEGACY=true
-    export FIXTURE_FORCE_LEGACY
-    local label_value taint_value taint_effect
-    while IFS='|' read -r label_value taint_value taint_effect; do
-        FIXTURE_POOL_WORKLOAD_LABEL=$label_value
-        FIXTURE_POOL_TAINT_VALUE=$taint_value
-        FIXTURE_POOL_TAINT_EFFECT=$taint_effect
-        export FIXTURE_POOL_WORKLOAD_LABEL FIXTURE_POOL_TAINT_VALUE FIXTURE_POOL_TAINT_EFFECT
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$node_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Node Pool Sizing accepts dedicated-pool label/taint drift (${label_value},${taint_value},${taint_effect})"
-        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-            fail "Node Pool Sizing mutates after dedicated-pool label/taint drift"
-        else
-            pass "Node Pool Sizing rejects dedicated-pool label/taint drift (${label_value},${taint_value},${taint_effect})"
-        fi
-    done <<'CASES'
-missing|true|NoSchedule
-ci-cd|false|NoSchedule
-ci-cd|true|PreferNoSchedule
-CASES
-    unset FIXTURE_POOL_WORKLOAD_LABEL FIXTURE_POOL_TAINT_VALUE FIXTURE_POOL_TAINT_EFFECT
-
-    FIXTURE_POOL_MAX=8
-    FIXTURE_TEMPLATE_DRIFT=token
-    export FIXTURE_TEMPLATE_DRIFT
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$node_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Node Pool Sizing accepts injected token material in the ARC contract"
-    elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-        fail "Node Pool Sizing mutates before rejecting token material"
-    else
-        pass "Node Pool Sizing rejects injected token material before mutation"
-    fi
-    unset FIXTURE_TEMPLATE_DRIFT
-
-    FIXTURE_SCALE_CHART_VERSION=0.13.0
-    export FIXTURE_SCALE_CHART_VERSION
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$node_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Node Pool Sizing accepts an unpinned deployed runner chart"
-    elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-        fail "Node Pool Sizing mutates before rejecting an unpinned chart"
-    else
-        pass "Node Pool Sizing requires the pinned deployed runner chart"
-    fi
-    unset FIXTURE_SCALE_CHART_VERSION
-    unset FIXTURE_FORCE_LEGACY
-
-    local scale_script="$FIXTURE_DIR/scale-incomplete-contract.sh"
-    : > "$scale_script"
-    materialize_workflow_step .github/workflows/scale-runners.yml \
-      'Quiesce rollout and record rollback revision' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$scale_script" || {
-        fail "Complete isolation fixture could not materialize Scale Runners"
-        return
-      }
-    FIXTURE_HELM_MAX=8 FIXTURE_HELM_GROUP=Default FIXTURE_TEMPLATE_DRIFT=placement
-    export FIXTURE_HELM_MAX FIXTURE_HELM_GROUP FIXTURE_TEMPLATE_DRIFT
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$scale_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Scale Runners accepts placement drift in the recognized legacy prestate"
-    elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
-        fail "Scale Runners mutates before rejecting placement drift"
-    else
-        pass "Scale Runners rejects placement drift before mutation"
-    fi
-    unset FIXTURE_TEMPLATE_DRIFT
-    FIXTURE_HELM_MAX=2 FIXTURE_HELM_GROUP=redducklabs-private-runners
-
-    FIXTURE_POOL_MAX=2
-
-    local rollback_script="$FIXTURE_DIR/rollback-incomplete-contract.sh"
-    : > "$rollback_script"
-    materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$rollback_script" || {
-        fail "Complete rollback fixture could not be materialized"
-        return
-      }
-    local drift
-    for drift in automount placement token extra; do
-        FIXTURE_TEMPLATE_DRIFT=$drift
-        export FIXTURE_TEMPLATE_DRIFT
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$rollback_script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Rollback accepts ${drift} drift in the exact template"
-        elif grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
-            fail "Rollback mutates before rejecting ${drift} drift"
-        else
-            pass "Rollback rejects ${drift} drift before mutation"
-        fi
-    done
-    unset FIXTURE_TEMPLATE_DRIFT
-}
 
 assert_registry_temp_and_oidc_hardening() {
     local script="$FIXTURE_DIR/registry-temp-symlink.sh"
@@ -3279,118 +3104,6 @@ PY
     fi
 }
 
-assert_ordinary_scale_contract_guards() {
-    local step action drift script
-    while IFS='|' read -r step action drift; do
-        script="$FIXTURE_DIR/ordinary-${action}.sh"
-        : > "$script"
-        materialize_workflow_step .github/workflows/scale-runners.yml \
-          'Check current status' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
-            fail "${action} prestate fixture could not be materialized"
-            continue
-          }
-        materialize_workflow_step .github/workflows/scale-runners.yml \
-          "$step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
-            fail "${action} mutation fixture could not be materialized"
-            continue
-          }
-        sed -i "s/export ACTION=fixture/export ACTION=${action}/" "$script"
-        FIXTURE_TEMPLATE_DRIFT=$drift
-        export FIXTURE_TEMPLATE_DRIFT
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "${action} accepts unsafe ${drift} prestate"
-        elif grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
-            fail "${action} reaches Helm with unsafe ${drift} prestate"
-        else
-            pass "${action} rejects unsafe ${drift} prestate before Helm"
-        fi
-    done <<'CASES'
-Scale up (default)|scale-up|token
-Scale down (minimal)|scale-down|host_namespace
-Scale to maximum|scale-max|placement
-Custom scaling|scale-custom|security
-CASES
-    unset FIXTURE_TEMPLATE_DRIFT
-
-    while IFS='|' read -r step action; do
-        script="$FIXTURE_DIR/ordinary-${action}-safe.sh"
-        : > "$script"
-        materialize_workflow_step .github/workflows/scale-runners.yml \
-          'Check current status' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
-        materialize_workflow_step .github/workflows/scale-runners.yml \
-          "$step" "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
-        materialize_workflow_step .github/workflows/scale-runners.yml \
-          'Verify scaling' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
-        sed -i "s/export ACTION=fixture/export ACTION=${action}/g" "$script"
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output" \
-          && grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
-            pass "${action} validates exact density prestate and result"
-        else
-            fail "${action} cannot complete exact density prestate/result validation"
-        fi
-    done <<'CASES'
-Scale up (default)|scale-up
-Scale down (minimal)|scale-down
-Scale to maximum|scale-max
-Custom scaling|scale-custom
-CASES
-
-    script="$FIXTURE_DIR/ordinary-result-drift.sh"
-    : > "$script"
-    materialize_workflow_step .github/workflows/scale-runners.yml \
-      'Scale up (default)' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
-    materialize_workflow_step .github/workflows/scale-runners.yml \
-      'Verify scaling' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"
-    sed -i 's/export ACTION=fixture/export ACTION=scale-up/g' "$script"
-    FIXTURE_TEMPLATE_DRIFT=extra
-    export FIXTURE_TEMPLATE_DRIFT
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Ordinary scale result validation accepts unsafe extra template state"
-    elif ! grep -q '^helm upgrade ' "$FIXTURE_DIR/mutations"; then
-        fail "Ordinary scale result fixture did not reach its controlled Helm boundary"
-    else
-        pass "Ordinary scaling rejects unsafe result state after Helm readback"
-    fi
-    unset FIXTURE_TEMPLATE_DRIFT
-}
-
-assert_exact_provider_and_live_node_isolation() {
-    local script="$FIXTURE_DIR/exact-provider-node-isolation.sh"
-    : > "$script"
-    materialize_workflow_step .github/workflows/node-pool-sizing.yml \
-      'Reduce pool maximum without node removal' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || {
-        fail "Exact provider/node isolation fixture could not be materialized"
-        return
-      }
-    local label variable value
-    FIXTURE_FORCE_LEGACY=true
-    export FIXTURE_FORCE_LEGACY
-    while IFS='|' read -r label variable value; do
-        printf -v "$variable" '%s' "$value"
-        export "$variable"
-        FIXTURE_POOL_MAX=8
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Node Pool Sizing accepts ${label}"
-        elif grep -q '^doctl .*node-pool update ' "$FIXTURE_DIR/mutations"; then
-            fail "Node Pool Sizing mutates after ${label}"
-        else
-            pass "Node Pool Sizing rejects ${label} before mutation"
-        fi
-        unset "$variable"
-    done <<'CASES'
-an extra provider label|FIXTURE_POOL_EXTRA_LABEL|true
-an extra provider taint|FIXTURE_POOL_EXTRA_TAINT|true
-a live node missing workload isolation|FIXTURE_NODE_WORKLOAD_LABEL|missing
-a live node with the wrong runner taint|FIXTURE_NODE_TAINT_VALUE|false
-a live node with an additional blocking taint|FIXTURE_NODE_EXTRA_BLOCKING_TAINT|true
-CASES
-    unset FIXTURE_FORCE_LEGACY
-    FIXTURE_POOL_MAX=2
-}
 
 assert_exact_deploy_namespace() {
     local script="$FIXTURE_DIR/deploy-noncanonical-namespace.sh"
@@ -3411,55 +3124,7 @@ assert_exact_deploy_namespace() {
     fi
 }
 
-assert_rollback_recovery_route() {
-    local script="$FIXTURE_DIR/rollback-recovery-route.sh"
-    : > "$script"
-    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" \
-      || ! materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Verify trust and pool after rollback' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
-        fail "Rollback recovery-route fixture could not be materialized"
-        return
-    fi
 
-    FIXTURE_TRUST_FAILURE=true FIXTURE_READY_NODES=1
-    export FIXTURE_TRUST_FAILURE FIXTURE_READY_NODES
-    : > "$FIXTURE_DIR/mutations"
-    if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-        fail "Rollback post-verification fixture unexpectedly succeeds"
-    elif grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
-        pass "Trust API and node-health failures occur only after Helm rollback"
-    else
-        fail "Trust API or node-health failure prevents Helm rollback"
-    fi
-    FIXTURE_TRUST_FAILURE=false FIXTURE_READY_NODES=2
-    export FIXTURE_TRUST_FAILURE FIXTURE_READY_NODES
-}
-
-assert_rollback_live_asrs_contract() {
-    local script="$FIXTURE_DIR/rollback-live-asrs-contract.sh"
-    : > "$script"
-    if ! materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Rollback runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
-        fail "Rollback live-ASRS fixture could not be materialized"
-        return
-    fi
-
-    local drift
-    for drift in default token placement extra; do
-        FIXTURE_POST_ROLLBACK_ASRS_DRIFT=$drift
-        export FIXTURE_POST_ROLLBACK_ASRS_DRIFT
-        : > "$FIXTURE_DIR/mutations"
-        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
-            fail "Rollback accepts ${drift} drift in the restored live AutoscalingRunnerSet"
-        elif ! grep -q '^helm rollback ' "$FIXTURE_DIR/mutations"; then
-            fail "Rollback rejects ${drift} live AutoscalingRunnerSet drift before Helm rollback"
-        else
-            pass "Rollback rejects ${drift} drift in the restored live AutoscalingRunnerSet after Helm rollback"
-        fi
-    done
-    unset FIXTURE_POST_ROLLBACK_ASRS_DRIFT
-}
 
 assert_rollback_ignores_deploy_only_inputs() {
     local script="$FIXTURE_DIR/rollback-input-isolation.sh"
@@ -3497,15 +3162,35 @@ expected = [
     "1154788719:redducklaw",
     "1193238112:aurolegal.ai",
     "1351028230:manager",
+    "1418079240:superfood-shred",
+    "1425956382:keel",
 ]
 manifest = Path("deploy/trusted-runner-repositories.txt").read_text(encoding="utf-8").splitlines()
 if manifest != expected:
-    raise SystemExit("trusted repository manifest is not the exact nine identity-bearing entries")
+    raise SystemExit("trusted repository manifest is not the exact eleven identity-bearing entries")
+if "1334789692:my-review-buddy" in manifest or any(entry.endswith(":my-review-buddy") for entry in manifest):
+    raise SystemExit("my-review-buddy is not admitted to the private runner group")
+for repo in ("keel", "superfood-shred"):
+    evidence = Path(f"docs/security/runner-admission/{repo}.md")
+    if not evidence.is_file():
+        raise SystemExit(f"admitted repository {repo} has no committed admission evidence")
+    text = evidence.read_text(encoding="utf-8")
+    for token in (
+        "fork-pr-workflows-private-repos",
+        "run_workflows_from_fork_pull_requests",
+        "pull_request_target",
+        "workflow_run",
+        "Collaborators",
+        "redducklabs-runners",
+    ):
+        if token not in text:
+            raise SystemExit(f"admission evidence for {repo} omits {token}")
 script = Path("scripts/verify-runner-trust-boundary.sh").read_text(encoding="utf-8")
 for token in (
     "TRUSTED_REPOSITORIES_FILE=",
     "deploy/trusted-runner-repositories.txt",
     "read_trusted_repositories",
+    "fork-pr-workflows-private-repos",
 ):
     if token not in script:
         raise SystemExit(f"trust verifier does not consume the committed manifest ({token})")
@@ -3541,14 +3226,17 @@ PY
 from pathlib import Path
 
 runbook = " ".join(Path("docs/runbooks/node-pool-sizing.md").read_text(encoding="utf-8").split())
+# Burst rollout order (spec "Rollout"): verify the committed density rollback
+# target, trust boundary, pools, deploy, then acceptance; rollback restores the
+# committed density values (Ruling 34).
 required = [
-    "Run Deploy GitHub Runners with `operation=prepare-trust-boundary`",
-    "Run Scale Runners with `action=rollout-quiesce`",
-    "Record the emitted post-quiesce Helm revision",
-    "Run Node Pool Sizing",
-    "Run Deploy GitHub Runners with `operation=deploy`",
-    "consumes the recorded rollback revision",
-    "operation=rollback`, that saved revision",
+    "**Verify the rollback target.** Scale Runners `action=record-density`",
+    "`deploy/density-values.yaml`, the target Deploy `rollback` restores",
+    "**Trust boundary.** Deploy GitHub Runners `operation=prepare-trust-boundary`",
+    "**Pools.** Node Pool Sizing `create-burst`",
+    "**Deploy.** Deploy GitHub Runners `operation=deploy`",
+    "**Acceptance** phases A–E",
+    "Deploy GitHub Runners `operation=rollback`. It validates the committed `deploy/density-values.yaml`",
 ]
 positions = []
 for text in required:
@@ -3557,9 +3245,27 @@ for text in required:
         raise SystemExit(f"runbook is missing required rollout instruction: {text}")
     positions.append(position)
 if positions != sorted(positions):
-    raise SystemExit("runbook rollout instructions are not ordered trust -> quiesce/capture -> pool -> deploy -> rollback")
+    raise SystemExit("runbook rollout instructions are not ordered record -> trust -> pools -> deploy -> acceptance -> rollback")
+for retired in ("rollout-quiesce", "legacy-isolated 2/2", "Node Pool Sizing accepts only 2/2"):
+    if retired in runbook:
+        raise SystemExit(f"runbook retains the retired step: {retired}")
 if "Deploy GitHub Runners from the same SHA. It runs server-side dry-runs of the rendered scale set and representative Pod before Helm mutation, and records" in runbook:
     raise SystemExit("runbook incorrectly assigns rollback-revision capture to Deploy")
+# Rulings 26-28 and 33-34: drain takes no revision; Emergency Stop has its own
+# section covering the stopped states, the stop marker, its own lock and recovery.
+for text in (
+    "-f operation=drain -f expected_sha=\"$SHA\"",
+    "1. Deploy GitHub Runners `operation=drain`. It moves ARC to `drain`",
+    "runner-fleet-emergency-stop", "acknowledge_emergency_stop=true",
+    "## Emergency Stop",
+    "does not wait for a running Deploy `drain` or Scale Runners Phase C",
+    "`burst-stopped`", "`drain-stopped`", "`density-stopped`",
+    "`runner-emergency-stop`", "`runner-rebalance`", "--history-max 100",
+):
+    if text not in runbook:
+        raise SystemExit(f"runbook is missing: {text}")
+if "Emergency Stop is unchanged" in runbook:
+    raise SystemExit("runbook still says Emergency Stop is unchanged")
 
 values = Path("deploy/dind-values.yaml").read_text(encoding="utf-8")
 if "the cluster is 1.33" in values:
@@ -3572,6 +3278,143 @@ PY
     else
         fail "Runbook sequencing or Kubernetes-version documentation is stale"
     fi
+}
+
+assert_scale_workflow_static_contract() {
+    # Ordinary min/max scaling and rollout-quiesce are retired (burst spec,
+    # "No ordinary runtime scaling"). Behavioral coverage for record-density
+    # and acceptance-phase-c lives in test/verify-burst-autoscaling.sh.
+    if python3 - <<'PY'
+import yaml
+
+with open('.github/workflows/scale-runners.yml', encoding='utf-8') as source:
+    workflow = yaml.safe_load(source)
+env = workflow.get('env') or {}
+if env.get('ARC_CHART_VERSION') != '0.14.2':
+    raise SystemExit('ARC_CHART_VERSION must be pinned to 0.14.2')
+inputs = (workflow.get('on') or workflow[True])['workflow_dispatch']['inputs']
+if set(inputs) != {'action', 'expected_sha'}:
+    raise SystemExit(f'Scale Runners inputs must be action and expected_sha only: {sorted(inputs)}')
+if inputs['action'].get('options') != ['record-density', 'acceptance-phase-c']:
+    raise SystemExit('Scale Runners actions must be exactly record-density and acceptance-phase-c')
+(job,) = workflow['jobs'].values()
+steps = job['steps']
+names = [step.get('name') for step in steps]
+guard = names.index('Validate and sanitize inputs')
+for step in steps[:guard]:
+    if any(token in step.get('run', '') for token in ('doctl', 'kubectl', 'helm')):
+        raise SystemExit(f'{step.get("name")} reaches the cluster before the expected_sha check')
+for step in steps:
+    run = step.get('run', '')
+    if 'helm upgrade' in run or 'helm rollback' in run:
+        raise SystemExit(f'{step.get("name")} writes to Helm directly; Phase C writes only through scripts/acceptance-phase-c.sh')
+PY
+    then
+        pass "Scale Runners exposes only record-density and acceptance-phase-c, SHA-guarded, with no direct Helm writes"
+    else
+        fail "Scale Runners still exposes ordinary scaling or an unguarded Helm write"
+    fi
+}
+
+assert_ordinary_scaling_retired() {
+    # Replaces the ordinary scale-up/down/max/custom density prestate/result
+    # fixtures and the rollout-quiesce / legacy-isolated rollback fixtures:
+    # those paths no longer exist. Each fleet operation is admitted by the
+    # pool-state gate under its own name.
+    if python3 - <<'PY'
+import re
+from pathlib import Path
+
+import yaml
+
+
+def load(path):
+    with open(path, encoding='utf-8') as stream:
+        return yaml.safe_load(stream)
+
+
+scale_text = Path('.github/workflows/scale-runners.yml').read_text(encoding='utf-8')
+deploy_text = Path('.github/workflows/deploy-runners.yml').read_text(encoding='utf-8')
+for token in ('scale-up', 'scale-down', 'scale-max', 'scale-custom', 'rollout-quiesce',
+              '--set maxRunners', 'min_runners', 'max_runners'):
+    if token in scale_text:
+        raise SystemExit(f'Scale Runners still contains retired ordinary scaling ({token})')
+for token in ('min_runners', 'max_runners', '--set minRunners', '--set maxRunners', 'legacy-isolated'):
+    if token in deploy_text:
+        raise SystemExit(f'Deploy still contains a runner-bound input or legacy-isolated path ({token})')
+
+deploy = load('.github/workflows/deploy-runners.yml')
+scale = load('.github/workflows/scale-runners.yml')
+expected = {'deploy': 'deploy', 'drain': 'drain', 'rollback': 'rollback'}
+for job_name, operation in expected.items():
+    runs = '\n'.join(step.get('run', '') for step in deploy['jobs'][job_name]['steps'])
+    operations = set(re.findall(r'--operation ([a-z-]+)', runs))
+    if operations != {operation}:
+        raise SystemExit(f'Deploy {job_name} calls the gate with {operations or "no operation"}, expected {operation}')
+(job,) = scale['jobs'].values()
+admit = next(step for step in job['steps'] if step.get('id') == 'admit')['run']
+for action in ('record-density', 'acceptance-phase-c'):
+    if f'{action}) OPERATION={action} ;;' not in admit:
+        raise SystemExit(f'Scale Runners {action} is not admitted under its own gate operation')
+if '--operation "${OPERATION}"' not in admit:
+    raise SystemExit('Scale Runners admission does not pass the mapped operation to the gate')
+
+steps = deploy['jobs']['deploy']['steps']
+names = [step['name'] for step in steps]
+if not (names.index('Admit pool state and record identities')
+        < names.index('Validate committed burst values')
+        < names.index('Render and validate candidate')
+        < names.index('Server-side preflight candidate')
+        < names.index('Deploy runners')):
+    raise SystemExit('Deploy does not admit and validate the committed burst values before Helm')
+values_step = steps[names.index('Validate committed burst values')]['run']
+if '--contract burst --kind values' not in values_step or '--min-runners 2 --max-runners 20' not in values_step:
+    raise SystemExit('Deploy does not validate deploy/dind-values.yaml as exactly burst 2/20')
+PY
+    then
+        pass "Ordinary scaling, rollout-quiesce and legacy-isolated rollback are retired; each operation uses its own gate name"
+    else
+        fail "Retired ordinary scaling/quiesce/legacy rollback paths or per-operation gate names are not enforced"
+    fi
+}
+
+assert_scale_input_injection_is_blocked() {
+    local script="$FIXTURE_DIR/scale-input-injection.sh" payload action
+    local shown
+    for payload in 'scale-custom' $'record-density\naction=acceptance-phase-c' 'acceptance-phase-c'; do
+        shown=${payload//$'\n'/ NL }
+        : > "$script"
+        if ! materialize_workflow_step .github/workflows/scale-runners.yml \
+          'Validate and sanitize inputs' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script"; then
+            fail "Scale input-injection fixture could not be materialized"
+            return
+        fi
+        python3 - "$script" "$payload" <<'PY'
+import shlex
+import sys
+
+path, payload = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    source = stream.read()
+source = source.replace("export INPUT_ACTION=scale-custom", f"export INPUT_ACTION={shlex.quote(payload)}", 1)
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write(source)
+PY
+        : > "$FIXTURE_DIR/mutations"
+        if run_fixture "$script" "$FIXTURE_DIR/mutations" "$FIXTURE_DIR/output"; then
+            action=$(grep -c '^action=' "$FIXTURE_DIR/github-output")
+            if [ "$payload" = acceptance-phase-c ] && [ "$action" = 1 ] \
+              && grep -qx 'action=acceptance-phase-c' "$FIXTURE_DIR/github-output"; then
+                pass "Scale accepts acceptance-phase-c and emits exactly one action record"
+            else
+                fail "Scale accepts action input '${shown}'"
+            fi
+        elif [ -s "$FIXTURE_DIR/mutations" ] || [ -s "$FIXTURE_DIR/github-output" ]; then
+            fail "Scale rejects action '${shown}' only after writing outputs or mutating"
+        else
+            pass "Scale rejects action input '${shown}' before any output or mutation"
+        fi
+    done
 }
 
 assert_final_workflow_graph_and_prerequisites() {
@@ -3596,28 +3439,35 @@ for path, workflow in (
                 raise SystemExit(f'{path} contains raw dispatch input interpolation in {step.get("name")}')
 
 trust = deploy['jobs']['trust-boundary']
-if "operation == 'rollback'" in str(trust.get('if', '')) or "operation != 'rollback'" not in str(trust.get('if', '')):
-    raise SystemExit('trust reconciliation is not limited away from rollback')
+trust_if = str(trust.get('if', ''))
+if "operation == 'deploy'" not in trust_if or "operation == 'prepare-trust-boundary'" not in trust_if \
+        or 'rollback' in trust_if or 'drain' in trust_if:
+    raise SystemExit('trust reconciliation must run only for deploy and prepare-trust-boundary')
 rollback = deploy['jobs'].get('rollback')
 if not rollback or rollback.get('needs') != 'validate-inputs':
     raise SystemExit('rollback must be a separate job needing only validated inputs')
 if 'trust-boundary' in str(rollback.get('needs')):
     raise SystemExit('rollback depends on trust mutation')
 rollback_steps = rollback.get('steps', [])
-rollback_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Rollback runners')
-post_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Verify trust and pool after rollback')
+rollback_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Roll back to committed density values')
+post_index = next(i for i, item in enumerate(rollback_steps) if item.get('name') == 'Verify trust boundary after rollback')
 if rollback_index >= post_index:
     raise SystemExit('post-recovery checks precede Helm rollback')
 before_rollback = '\n'.join(item.get('run', '') for item in rollback_steps[:rollback_index])
-if any(token in before_rollback for token in
-       ('verify-runner-trust-boundary.sh', 'get nodes', 'node-pool list')):
-    raise SystemExit('trust or capacity health can block rollback')
+if 'verify-runner-trust-boundary.sh' in before_rollback:
+    raise SystemExit('trust health can block rollback')
+if '--operation rollback' not in before_rollback:
+    raise SystemExit('rollback is not admitted by the pool-state gate')
+with open('scripts/rollback-density.sh', encoding='utf-8') as stream:
+    rollback_script = stream.read()
+if 'fleet_helm_bracket "$IDENTITIES" rollback none arc:density:2/4' not in rollback_script:
+    raise SystemExit('rollback is not identity-bracketed by the pool-state gate')
 deploy_job = deploy['jobs']['deploy']
 if "operation == 'deploy'" not in str(deploy_job.get('if', '')):
     raise SystemExit('deployment job is not deploy-only')
 steps = deploy_job['steps']
 pre = next(i for i, item in enumerate(steps) if item.get('name') == 'Verify prepared platform prerequisites')
-render = next(i for i, item in enumerate(steps) if item.get('name') == 'Render and preflight candidate')
+render = next(i for i, item in enumerate(steps) if item.get('name') == 'Server-side preflight candidate')
 if pre >= render:
     raise SystemExit('prepared-platform checks do not precede ASRS dry-run')
 pre_shell = steps[pre]['run']
@@ -3627,11 +3477,16 @@ for token in ('get namespace', 'CRDS=(',
               'ephemeralrunners.actions.github.com',
               'ephemeralrunnersets.actions.github.com',
               'meta.helm.sh/release-name', 'meta.helm.sh/release-namespace',
-              'helm list -n arc-systems', 'gha-runner-scale-set-controller-',
-              'readyReplicas', 'kubernetes.io/dockerconfigjson',
-              'registry.digitalocean.com'):
+              'scripts/lib/arc-identity.sh', 'verify_arc_identity',
+              'kubernetes.io/dockerconfigjson', 'registry.digitalocean.com'):
     if token not in pre_shell:
         raise SystemExit(f'platform prerequisite missing: {token}')
+if 'gha-rs-controller' in pre_shell or 'helm list' in pre_shell:
+    raise SystemExit('prepared-platform step duplicates the ARC identity library inline')
+library = pathlib.Path('scripts/lib/arc-identity.sh').read_text(encoding='utf-8')
+for token in ('gha-runner-scale-set-controller-', 'readyReplicas', 'availableReplicas', 'observedGeneration'):
+    if token not in library:
+        raise SystemExit(f'ARC identity library lacks {token}')
 for step in steps:
     if step.get('name') in {'Create namespace if not exists', 'Sync ARC CRDs',
                             'Install or upgrade ARC controller', 'Configure registry access'}:
@@ -3671,48 +3526,36 @@ PY
     fi
 }
 
-assert_rejects_oversized_max 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs'
-assert_rejects_oversized_max 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs'
-assert_node_pool_bounds
-assert_live_capacity_drift_fails
-assert_scale_capacity_gate
+assert_node_pool_operations_contract
 assert_scale_workflow_static_contract
 
-assert_sha_guarded_boundary 'Scale Runners' .github/workflows/scale-runners.yml 'Validate and sanitize inputs' '--timeout 180s' Helm '^helm upgrade .*gha-runner-scale-set'
-FIXTURE_POOL_MAX=8
-assert_sha_guarded_boundary 'Node Pool Sizing' .github/workflows/node-pool-sizing.yml 'Validate inputs against deploy/dind-values.yaml' 'node-pool update' doctl '^doctl kubernetes cluster node-pool update '
-FIXTURE_POOL_MAX=2
 printf '#!/usr/bin/env bash\ncat\n' > "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
 chmod 0700 "$FIXTURE_DIR/runner-candidate-hash-gate.sh"
-assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' '--post-renderer "${HASH_GATE}"' Helm '^helm upgrade --install redducklabs-runners '
+assert_sha_guarded_boundary 'Deploy' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' '--post-renderer "${HASH_GATE}"' Helm '^helm upgrade redducklabs-runners '
 assert_sha_guarded_boundary 'Deploy runner-group REST' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'actions/runner-groups' 'GitHub runner-group REST mutation' '^(curl|gh) .*actions/runner-groups'
-assert_sha_guarded_boundary 'Deploy rollback' .github/workflows/deploy-runners.yml 'Validate and sanitize inputs' 'helm rollback' 'Helm rollback' '^helm rollback '
+# Deploy rollback no longer runs an inline Helm command (Ruling 34): its write is
+# scripts/rollback-density.sh inside the identity bracket. Its expected_sha
+# guards are exercised end to end by test/verify-burst-autoscaling.sh
+# ("deploy rollback: mismatched expected_sha stops before any doctl, kubectl or
+# helm call" and "rollback with the checkout moved after validation").
 assert_trust_boundary_fixtures
 assert_autoscaler_diagnostic_fixtures
 assert_deploy_operation_and_preflight_contract
 assert_hostile_inputs_are_data
 assert_deploy_requires_cotenancy_acceptance
-assert_rollback_revision_prevalidation
 assert_deploy_preflight_fixtures
 assert_hostile_dispatch_inputs_are_data
-assert_scale_output_record_injection_is_blocked
-assert_rollout_quiesce_contract
-assert_node_pool_no_removal_contract
+assert_scale_input_injection_is_blocked
 assert_prepared_platform_prerequisites
 assert_shared_fleet_concurrency
 assert_platform_ownership_and_registry_generation
 assert_review_fix_trust_snapshots
 assert_emergency_reason_is_inert
 assert_deploy_unused_revision_cannot_route
-assert_absent_sa_bootstrap_contract
-assert_complete_isolation_and_pool_contracts
 assert_registry_temp_and_oidc_hardening
 assert_distinct_legacy_and_density_contracts
-assert_ordinary_scale_contract_guards
-assert_exact_provider_and_live_node_isolation
+assert_ordinary_scaling_retired
 assert_exact_deploy_namespace
-assert_rollback_recovery_route
-assert_rollback_live_asrs_contract
 assert_rollback_ignores_deploy_only_inputs
 assert_final_review_regressions
 assert_final_workflow_graph_and_prerequisites

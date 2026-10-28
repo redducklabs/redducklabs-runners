@@ -1,0 +1,48 @@
+{
+  "invoice_items": [
+    {
+      "amount": "48.00",
+      "category": "paas",
+      "description": "2 nodes - 8 GB / 4 vCPU / 160 GB SSD",
+      "duration": "1440",
+      "duration_unit": "Hours",
+      "end_time": "2026-09-30T23:59:59Z",
+      "group_description": "redducklabs-cluster",
+      "product": "Kubernetes Clusters",
+      "project_name": "synthetic-project",
+      "resource_id": "",
+      "resource_uuid": "00000000-0000-0000-0000-000000000000",
+      "start_time": "2026-09-01T00:00:00Z"
+    },
+    {
+      "amount": "1.00",
+      "category": "paas",
+      "description": "pvc-00000000-0000-0000-0000-000000000001 - 10.00GB Volume",
+      "duration": "720",
+      "duration_unit": "Hours",
+      "end_time": "2026-09-30T23:59:59Z",
+      "group_description": "redducklabs-cluster",
+      "product": "Kubernetes Clusters",
+      "project_name": "synthetic-project",
+      "resource_id": "",
+      "resource_uuid": "00000000-0000-0000-0000-000000000000",
+      "start_time": "2026-09-01T00:00:00Z"
+    },
+    {
+      "amount": "12.00",
+      "category": "paas",
+      "description": "synthetic-load-balancer",
+      "duration": "720",
+      "duration_unit": "Hours",
+      "end_time": "2026-09-30T23:59:59Z",
+      "group_description": "redducklabs-cluster",
+      "product": "Kubernetes Clusters",
+      "project_name": "synthetic-project",
+      "resource_id": "",
+      "resource_uuid": "00000000-0000-0000-0000-000000000000",
+      "start_time": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "links": null,
+  "meta": null
+}

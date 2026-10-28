@@ -1,0 +1,1 @@
+kubectl|get nodes -o json|2|nodes.json|uid.jqpatch

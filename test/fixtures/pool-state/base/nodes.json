@@ -1,0 +1,240 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "github-runners-pool-16g-a1b2c",
+        "uid": "a0b1c2d3-1111-4aaa-8bbb-000000000001",
+        "creationTimestamp": "2026-09-15T08:00:00Z",
+        "labels": {
+          "beta.kubernetes.io/arch": "amd64",
+          "beta.kubernetes.io/os": "linux",
+          "doks.digitalocean.com/managed": "true",
+          "doks.digitalocean.com/node-id": "github-runners-pool-16g-a1b2c-id",
+          "doks.digitalocean.com/node-pool": "github-runners-pool-16g",
+          "doks.digitalocean.com/node-pool-id": "6c1f5a7e-2b0d-4a3e-9f61-0b5d8e2c4a01",
+          "doks.digitalocean.com/version": "1.36.3-do.0",
+          "kubernetes.io/hostname": "github-runners-pool-16g-a1b2c",
+          "kubernetes.io/os": "linux",
+          "node.kubernetes.io/instance-type": "s-8vcpu-16gb",
+          "region": "sfo3",
+          "topology.kubernetes.io/region": "sfo3",
+          "node-type": "github-runner",
+          "workload-type": "ci-cd"
+        },
+        "resourceVersion": "4242"
+      },
+      "spec": {
+        "providerID": "digitalocean://500000001",
+        "podCIDR": "10.244.0.0/25",
+        "taints": [
+          {
+            "key": "github-runner",
+            "value": "true",
+            "effect": "NoSchedule"
+          }
+        ]
+      },
+      "status": {
+        "allocatable": {
+          "cpu": "7880m",
+          "memory": "13966336Ki",
+          "pods": "110",
+          "ephemeral-storage": "152161143761"
+        },
+        "capacity": {
+          "cpu": "8",
+          "memory": "16393236Ki",
+          "pods": "110"
+        },
+        "conditions": [
+          {
+            "type": "MemoryPressure",
+            "status": "False",
+            "reason": "KubeletHasSufficientMemory"
+          },
+          {
+            "type": "DiskPressure",
+            "status": "False",
+            "reason": "KubeletHasNoDiskPressure"
+          },
+          {
+            "type": "PIDPressure",
+            "status": "False",
+            "reason": "KubeletHasSufficientPID"
+          },
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "nodeInfo": {
+          "kubeletVersion": "v1.36.3",
+          "containerRuntimeVersion": "containerd://2.1.4",
+          "kernelVersion": "6.12.0-do",
+          "osImage": "Debian GNU/Linux 12 (bookworm)",
+          "architecture": "amd64",
+          "operatingSystem": "linux"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "github-runners-pool-16g-d3e4f",
+        "uid": "a0b1c2d3-2222-4aaa-8bbb-000000000002",
+        "creationTimestamp": "2026-09-15T08:00:00Z",
+        "labels": {
+          "beta.kubernetes.io/arch": "amd64",
+          "beta.kubernetes.io/os": "linux",
+          "doks.digitalocean.com/managed": "true",
+          "doks.digitalocean.com/node-id": "github-runners-pool-16g-d3e4f-id",
+          "doks.digitalocean.com/node-pool": "github-runners-pool-16g",
+          "doks.digitalocean.com/node-pool-id": "6c1f5a7e-2b0d-4a3e-9f61-0b5d8e2c4a01",
+          "doks.digitalocean.com/version": "1.36.3-do.0",
+          "kubernetes.io/hostname": "github-runners-pool-16g-d3e4f",
+          "kubernetes.io/os": "linux",
+          "node.kubernetes.io/instance-type": "s-8vcpu-16gb",
+          "region": "sfo3",
+          "topology.kubernetes.io/region": "sfo3",
+          "node-type": "github-runner",
+          "workload-type": "ci-cd"
+        },
+        "resourceVersion": "4242"
+      },
+      "spec": {
+        "providerID": "digitalocean://500000002",
+        "podCIDR": "10.244.0.0/25",
+        "taints": [
+          {
+            "key": "github-runner",
+            "value": "true",
+            "effect": "NoSchedule"
+          }
+        ]
+      },
+      "status": {
+        "allocatable": {
+          "cpu": "7880m",
+          "memory": "13966336Ki",
+          "pods": "110",
+          "ephemeral-storage": "152161143761"
+        },
+        "capacity": {
+          "cpu": "8",
+          "memory": "16393236Ki",
+          "pods": "110"
+        },
+        "conditions": [
+          {
+            "type": "MemoryPressure",
+            "status": "False",
+            "reason": "KubeletHasSufficientMemory"
+          },
+          {
+            "type": "DiskPressure",
+            "status": "False",
+            "reason": "KubeletHasNoDiskPressure"
+          },
+          {
+            "type": "PIDPressure",
+            "status": "False",
+            "reason": "KubeletHasSufficientPID"
+          },
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "nodeInfo": {
+          "kubeletVersion": "v1.36.3",
+          "containerRuntimeVersion": "containerd://2.1.4",
+          "kernelVersion": "6.12.0-do",
+          "osImage": "Debian GNU/Linux 12 (bookworm)",
+          "architecture": "amd64",
+          "operatingSystem": "linux"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "worker-pool-x1y2z",
+        "uid": "a0b1c2d3-3333-4aaa-8bbb-000000000003",
+        "creationTimestamp": "2025-05-01T10:05:00Z",
+        "labels": {
+          "beta.kubernetes.io/arch": "amd64",
+          "beta.kubernetes.io/os": "linux",
+          "doks.digitalocean.com/managed": "true",
+          "doks.digitalocean.com/node-id": "worker-pool-x1y2z-id",
+          "doks.digitalocean.com/node-pool": "worker-pool",
+          "doks.digitalocean.com/node-pool-id": "2d8e4f60-7a1b-4c9d-b3e5-f6a7b8c9d004",
+          "doks.digitalocean.com/version": "1.36.3-do.0",
+          "kubernetes.io/hostname": "worker-pool-x1y2z",
+          "kubernetes.io/os": "linux",
+          "node.kubernetes.io/instance-type": "s-2vcpu-4gb",
+          "region": "sfo3",
+          "topology.kubernetes.io/region": "sfo3"
+        },
+        "resourceVersion": "4242"
+      },
+      "spec": {
+        "providerID": "digitalocean://500000010",
+        "podCIDR": "10.244.0.0/25"
+      },
+      "status": {
+        "allocatable": {
+          "cpu": "1900m",
+          "memory": "3112136Ki",
+          "pods": "110",
+          "ephemeral-storage": "152161143761"
+        },
+        "capacity": {
+          "cpu": "8",
+          "memory": "16393236Ki",
+          "pods": "110"
+        },
+        "conditions": [
+          {
+            "type": "MemoryPressure",
+            "status": "False",
+            "reason": "KubeletHasSufficientMemory"
+          },
+          {
+            "type": "DiskPressure",
+            "status": "False",
+            "reason": "KubeletHasNoDiskPressure"
+          },
+          {
+            "type": "PIDPressure",
+            "status": "False",
+            "reason": "KubeletHasSufficientPID"
+          },
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "nodeInfo": {
+          "kubeletVersion": "v1.36.3",
+          "containerRuntimeVersion": "containerd://2.1.4",
+          "kernelVersion": "6.12.0-do",
+          "osImage": "Debian GNU/Linux 12 (bookworm)",
+          "architecture": "amd64",
+          "operatingSystem": "linux"
+        }
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

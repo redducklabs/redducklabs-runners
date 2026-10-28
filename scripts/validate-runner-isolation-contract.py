@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate explicit legacy-isolated and density ARC runner contracts."""
+"""Validate explicit legacy-isolated, density, burst, drain and stopped ARC runner contracts."""
 
 import argparse
 import json
@@ -98,6 +98,78 @@ def density_template(rendered: bool) -> dict:
     return template
 
 
+BASELINE_POOL_EXPRESSION = {
+    "key": "doks.digitalocean.com/node-pool",
+    "operator": "In",
+    "values": ["github-runners-pool-16g"],
+}
+
+
+# Burst, burst-acceptance and drain pull Docker Hub images through Google's
+# public pull-through cache. Density and legacy-isolated do not carry it, so
+# recorded revisions of earlier releases still validate as rollback targets.
+DOCKER_HUB_MIRROR_FLAG = "--registry-mirror=https://mirror.gcr.io"
+
+
+def burst_metadata() -> dict:
+    return {
+        "annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}
+    }
+
+
+def burst_template(rendered: bool) -> dict:
+    """Density template plus a preferred (weight 100) baseline-pool affinity."""
+    template = density_template(rendered)
+    for container in template["initContainers"]:
+        if container["name"] == "dind":
+            container["args"] = container["args"] + [DOCKER_HUB_MIRROR_FLAG]
+    template["affinity"] = {
+        "nodeAffinity": {
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "weight": 100,
+                    "preference": {"matchExpressions": [dict(BASELINE_POOL_EXPRESSION)]},
+                }
+            ]
+        }
+    }
+    return template
+
+
+def drain_template(rendered: bool) -> dict:
+    """Burst template with the baseline affinity made required."""
+    template = burst_template(rendered)
+    template["affinity"] = {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [
+                    {"matchExpressions": [dict(BASELINE_POOL_EXPRESSION)]}
+                ]
+            }
+        }
+    }
+    return template
+
+
+# contract -> permitted (min, max) runner bounds; all require the private group.
+BURST_BOUNDS = {
+    "burst": {(2, 20)},
+    "burst-acceptance": {(8, 20), (4, 20)},
+    "drain": {(2, 4)},
+}
+
+
+# Ruling 26: the stopped state family. Emergency Stop runs
+# "helm upgrade --reuse-values --set minRunners=0 --set maxRunners=0", which
+# keeps whichever base template the release had. Each stopped contract is that
+# base template, exactly, with minRunners=maxRunners=0 and the private group.
+STOPPED_BASE = {
+    "burst-stopped": "burst",
+    "density-stopped": "density",
+    "drain-stopped": "drain",
+}
+
+
 def legacy_isolated_template(rendered: bool, private: bool) -> dict:
     template = common_template(rendered)
     by_name = {
@@ -142,7 +214,9 @@ def parse_input(kind: str) -> tuple[dict, bool]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--contract", choices=("legacy-isolated", "density"), required=True
+        "--contract",
+        choices=("legacy-isolated", "density", "burst", "burst-acceptance", "drain") + tuple(STOPPED_BASE),
+        required=True,
     )
     parser.add_argument(
         "--kind", choices=("values", "manifest", "asrs-list"), required=True
@@ -169,7 +243,16 @@ def main() -> int:
         elif state.get("runnerGroup") != "redducklabs-private-runners":
             raise ValueError("runner group does not match")
         private = args.runner_group == "private"
-        if args.contract == "density":
+        base = STOPPED_BASE.get(args.contract, args.contract)
+        if args.contract in STOPPED_BASE:
+            if not private or (args.min_runners, args.max_runners) != (0, 0):
+                raise ValueError(f"{args.contract} bounds/group are not permitted")
+        elif args.contract in BURST_BOUNDS:
+            if not private or (args.min_runners, args.max_runners) not in BURST_BOUNDS[
+                args.contract
+            ]:
+                raise ValueError(f"{args.contract} bounds/group are not permitted")
+        elif args.contract == "density":
             if not private or not (
                 0 <= args.min_runners <= args.max_runners <= 4 and args.max_runners >= 1
             ):
@@ -189,12 +272,19 @@ def main() -> int:
                 != "redducklabs-runners-gha-rs-github-secret"
             ):
                 raise ValueError("GitHub configuration secret does not match")
+        template_metadata = state.get("template", {}).get("metadata")
+        expected_metadata = burst_metadata() if base in BURST_BOUNDS else None
+        if template_metadata != expected_metadata:
+            raise ValueError("template metadata does not match the contract")
         template = state.get("template", {}).get("spec")
-        expected = (
-            density_template(rendered)
-            if args.contract == "density"
-            else legacy_isolated_template(rendered, private)
-        )
+        if base in ("burst", "burst-acceptance"):
+            expected = burst_template(rendered)
+        elif base == "drain":
+            expected = drain_template(rendered)
+        elif base == "density":
+            expected = density_template(rendered)
+        else:
+            expected = legacy_isolated_template(rendered, private)
         if template != expected:
             raise ValueError("security/resource/placement template is not exact")
     except (

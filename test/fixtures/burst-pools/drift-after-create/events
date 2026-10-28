@@ -1,0 +1,1 @@
+doctl|kubernetes cluster node-pool create *|1|nodes.json|uid.jqpatch

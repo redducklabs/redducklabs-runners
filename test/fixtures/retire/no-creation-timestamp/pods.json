@@ -1,0 +1,90 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "redducklabs-runners-7xk2p-runner-base0",
+        "namespace": "arc-runners",
+        "labels": {
+          "actions.github.com/scale-set-name": "redducklabs-runners"
+        }
+      },
+      "spec": {
+        "nodeName": "github-runners-pool-16g-a1b2c"
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "redducklabs-runners-7xk2p-runner-base1",
+        "namespace": "arc-runners",
+        "labels": {
+          "actions.github.com/scale-set-name": "redducklabs-runners"
+        }
+      },
+      "spec": {
+        "nodeName": "github-runners-pool-16g-d3e4f"
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "redducklabs-runners-7xk2p-runner-base2",
+        "namespace": "arc-runners",
+        "labels": {
+          "actions.github.com/scale-set-name": "redducklabs-runners"
+        }
+      },
+      "spec": {
+        "nodeName": "github-runners-pool-16g-a1b2c"
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "redducklabs-runners-7xk2p-runner-burstaa",
+        "namespace": "arc-runners",
+        "labels": {
+          "actions.github.com/scale-set-name": "redducklabs-runners"
+        }
+      },
+      "spec": {
+        "nodeName": "github-runners-burst-16g-p1q2r"
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "redducklabs-runners-7xk2p-runner-burstbb",
+        "namespace": "arc-runners",
+        "labels": {
+          "actions.github.com/scale-set-name": "redducklabs-runners"
+        }
+      },
+      "spec": {
+        "nodeName": "github-runners-burst-16g-p1q2r"
+      },
+      "status": {
+        "phase": "Running"
+      }
+    }
+  ]
+}

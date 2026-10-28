@@ -1,5 +1,46 @@
 name: Deploy GitHub Runners
 
+# Operations (docs/specs/2026-10-26-runner-burst-autoscaling-design.md,
+# "State contract for fleet workflows" and "Rollback"):
+#   deploy                  Helm upgrade to the `burst` contract committed in
+#                           deploy/dind-values.yaml (admits ARC density or burst)
+#   prepare-trust-boundary  runner group reconciliation only
+#   drain                   Helm upgrade to the `drain` contract, then retire idle
+#                           burst runners until both burst pools reach zero nodes
+#   rollback                Helm upgrade to the committed density values
+#                           deploy/density-values.yaml (rendered and validated as
+#                           density 2/4; independent of Helm history, Ruling 34)
+#                           once the burst pools are gone (a no-op on `density`)
+#
+# Emergency Stop leaves a `stopped` state (a base template at 0/0, Ruling 26)
+# and the marker ConfigMap arc-runners/runner-fleet-emergency-stop (Ruling 33).
+# While the marker exists the gate refuses every operation here except
+# `deploy` and `rollback` dispatched with acknowledge_emergency_stop=true:
+# they delete the marker, inside the identity bracket, before their first
+# write. `deploy` restores burst from burst-stopped and `rollback` restores
+# density from drain-stopped or density-stopped once the burst pools are gone.
+# After every Helm write the run re-reads the marker; if a stop is in effect
+# it immediately re-applies 0/0 with --reuse-values and fails. Every Helm write
+# keeps 100 revisions (--history-max 100).
+#
+# Server-side fence (Ruling 36): `deploy` and `rollback` install
+# deploy/runner-emergency-stop-fence.yaml (server-side dry run compared with the
+# file, then a bracketed server-side apply) before their Helm write. While the
+# marker exists the API server then denies every AutoscalingRunnerSet write
+# that is not 0/0, so a run cancelled after a stale Helm write cannot leave the
+# fleet reopened. An acknowledging run waits (dry runs only, up to 30 s) until
+# the fence allows a non-zero write after deleting the marker; if it still
+# denies, the run fails before writing and is re-dispatched. Every other fleet
+# mutator's admission requires the fence to equal the file.
+#
+# Every run verifies expected_sha first, admits the live state with
+# scripts/verify-runner-pool-state.sh --operation <op>, and brackets each Helm
+# write with the identity contract: an exact comparison and a fresh admission
+# immediately before it, and a comparison that allows only the declared ARC
+# transition after it. `deploy` first applies deploy/runner-network-policy.yaml
+# (server-side dry run, then a bracketed server-side apply) and requires
+# scripts/verify-runner-network-policy.sh to pass before the Helm upgrade.
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,37 +52,18 @@ on:
         options:
           - deploy
           - prepare-trust-boundary
+          - drain
           - rollback
       accept_privileged_runner_co_tenancy:
         description: 'Accept two privileged DinD jobs sharing each runner node'
         required: true
         default: false
         type: boolean
-      rollback_revision:
-        description: 'Recorded post-quiesce Helm revision (rollback only)'
+      acknowledge_emergency_stop:
+        description: 'deploy/rollback only: recover from an Emergency Stop (deletes its marker before the Helm write)'
         required: false
-        default: ''
-        type: string
-      min_runners:
-        description: 'Minimum number of runners'
-        required: false
-        default: '2'
-        type: choice
-        options:
-          - '0'
-          - '1'
-          - '2'
-          - '3'
-          - '4'
-      max_runners:
-        description: 'Maximum number of runners'
-        required: false
-        default: '4'
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '4'
+        default: false
+        type: boolean
       expected_sha:
         description: 'Exact commit SHA to deploy'
         required: true
@@ -90,15 +112,18 @@ jobs:
   validate-inputs:
     name: Validate Deployment Inputs
     runs-on: ubuntu-latest
+    # Explicit bash runs every step as "bash --noprofile --norc -eo pipefail",
+    # so a failing command inside a pipeline fails the step.
+    defaults:
+      run:
+        shell: bash
     outputs:
       operation: ${{ steps.validate.outputs.operation }}
       expected_sha: ${{ steps.validate.outputs.expected_sha }}
-      rollback_revision: ${{ steps.validate.outputs.rollback_revision }}
-      min_runners: ${{ steps.validate.outputs.min_runners }}
-      max_runners: ${{ steps.validate.outputs.max_runners }}
+      acknowledge_emergency_stop: ${{ steps.validate.outputs.acknowledge_emergency_stop }}
       runner_image: ${{ steps.validate.outputs.runner_image }}
       namespace: ${{ steps.validate.outputs.namespace }}
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -106,26 +131,21 @@ jobs:
       - name: Validate and sanitize inputs
         id: validate
         env:
-          INPUT_MIN_RUNNERS: ${{ inputs.min_runners }}
-          INPUT_MAX_RUNNERS: ${{ inputs.max_runners }}
           INPUT_NAMESPACE: ${{ inputs.namespace }}
           INPUT_RUNNER_IMAGE: ${{ inputs.runner_image }}
           INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
           INPUT_OPERATION: ${{ inputs.operation }}
           INPUT_ACCEPT_CO_TENANCY: ${{ inputs.accept_privileged_runner_co_tenancy }}
-          INPUT_ROLLBACK_REVISION: ${{ inputs.rollback_revision }}
+          INPUT_ACKNOWLEDGE_STOP: ${{ inputs.acknowledge_emergency_stop }}
         run: |
           echo "🔍 Validating deployment inputs..."
-          
-          # Validate numeric inputs
-          MIN_RUNNERS="${INPUT_MIN_RUNNERS}"
-          MAX_RUNNERS="${INPUT_MAX_RUNNERS}"
+
           NAMESPACE="${INPUT_NAMESPACE}"
           RUNNER_IMAGE="${INPUT_RUNNER_IMAGE}"
           EXPECTED_SHA="${INPUT_EXPECTED_SHA}"
           OPERATION="${INPUT_OPERATION}"
           ACCEPT_CO_TENANCY="${INPUT_ACCEPT_CO_TENANCY}"
-          ROLLBACK_REVISION="${INPUT_ROLLBACK_REVISION}"
+          ACKNOWLEDGE_STOP="${INPUT_ACKNOWLEDGE_STOP:-false}"
 
           ACTUAL_SHA=$(git rev-parse HEAD)
           if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -154,20 +174,31 @@ jobs:
                 exit 1
               fi
               ;;
-            rollback)
-              if ! [[ "${ROLLBACK_REVISION}" =~ ^[1-9][0-9]*$ ]]; then
-                echo "❌ Error: rollback_revision must be a positive Helm revision"
+            drain|rollback) ;;
+            *)
+              echo "❌ Error: operation must be deploy, prepare-trust-boundary, drain, or rollback"
+              exit 1
+              ;;
+          esac
+
+          # Ruling 33: only deploy and rollback may acknowledge an Emergency Stop.
+          case "${ACKNOWLEDGE_STOP}" in
+            false) ;;
+            true)
+              if [ "${OPERATION}" != deploy ] && [ "${OPERATION}" != rollback ]; then
+                echo "❌ Error: acknowledge_emergency_stop is valid only for deploy and rollback"
                 exit 1
               fi
               ;;
             *)
-              echo "❌ Error: operation must be deploy, prepare-trust-boundary, or rollback"
+              echo "❌ Error: acknowledge_emergency_stop must be true or false"
               exit 1
               ;;
           esac
 
           write_output operation "${OPERATION}"
           write_output expected_sha "${EXPECTED_SHA}"
+          write_output acknowledge_emergency_stop "${ACKNOWLEDGE_STOP}"
 
           if [ "${OPERATION}" = "prepare-trust-boundary" ]; then
             echo "✅ Trust-boundary operation and SHA validated"
@@ -180,52 +211,21 @@ jobs:
             echo "❌ Error: namespace must be exactly arc-runners"
             exit 1
           fi
-          if [ "${OPERATION}" = "rollback" ]; then
-            write_output rollback_revision "${ROLLBACK_REVISION}"
-            write_output namespace "${NAMESPACE}"
-            echo "✅ Rollback SHA, revision, and namespace validated"
+          write_output namespace "${NAMESPACE}"
+          if [ "${OPERATION}" = "rollback" ] || [ "${OPERATION}" = "drain" ]; then
+            echo "✅ ${OPERATION} SHA and namespace validated"
             exit 0
           fi
-          
-          # Validate min_runners is numeric
-          if ! [[ "${MIN_RUNNERS}" =~ ^[0-9]+$ ]]; then
-            echo "❌ Error: min_runners must be a number"
-            exit 1
-          fi
-          
-          # Validate max_runners is numeric
-          if ! [[ "${MAX_RUNNERS}" =~ ^[0-9]+$ ]]; then
-            echo "❌ Error: max_runners must be a number"
-            exit 1
-          fi
-          
-          # Validate min <= max
-          if [ "${MIN_RUNNERS}" -gt "${MAX_RUNNERS}" ]; then
-            echo "❌ Error: min_runners (${MIN_RUNNERS}) cannot be greater than max_runners (${MAX_RUNNERS})"
-            exit 1
-          fi
 
-          if [ "${MAX_RUNNERS}" -gt 4 ]; then
-            echo "❌ Error: max_runners must not exceed the fixed capacity ceiling of 4"
-            exit 1
-          fi
-          
-          # Scale Runners validates the fixed density contract against this
-          # exact image, so deployment must reject alternatives before mutation.
+          # Runner bounds are not an input: Deploy renders exactly the burst
+          # contract committed in deploy/dind-values.yaml.
           if [ "${RUNNER_IMAGE}" != "${CANONICAL_RUNNER_IMAGE}" ]; then
             echo "❌ Error: runner_image must be the fixed canonical image ${CANONICAL_RUNNER_IMAGE}"
             exit 1
           fi
-          
-          # Set validated outputs
-          write_output min_runners "${MIN_RUNNERS}"
-          write_output max_runners "${MAX_RUNNERS}"
           write_output runner_image "${RUNNER_IMAGE}"
-          write_output namespace "${NAMESPACE}"
-          
+
           echo "✅ All inputs validated successfully"
-          echo "  Min runners: ${MIN_RUNNERS}"
-          echo "  Max runners: ${MAX_RUNNERS}"
           echo "  Namespace: ${NAMESPACE}"
           echo "  Runner image: ${RUNNER_IMAGE}"
 
@@ -233,8 +233,13 @@ jobs:
     name: Prepare Private Runner Trust Boundary
     runs-on: ubuntu-latest
     needs: validate-inputs
-    if: needs.validate-inputs.outputs.operation != 'rollback'
+    if: >-
+      needs.validate-inputs.outputs.operation == 'deploy'
+      || needs.validate-inputs.outputs.operation == 'prepare-trust-boundary'
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repository
@@ -262,29 +267,32 @@ jobs:
       always() && needs.validate-inputs.outputs.operation == 'deploy'
       && needs.trust-boundary.result == 'success'
     timeout-minutes: 15
-    
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-      
+
       - name: Setup infrastructure tools
         uses: ./.github/actions/setup-tools
         with:
           install-jq: 'true'
-      
+
       - name: Validate GitHub Token
         env:
           GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
           echo "🔐 Validating GitHub token permissions..."
-          
+
           # Check if RUNNER_TOKEN secret is set
           if [ -z "${GH_TOKEN}" ]; then
             echo "❌ Error: RUNNER_TOKEN secret is not set!"
             echo "Please add RUNNER_TOKEN secret with 'admin:org' and 'repo' scopes"
             exit 1
           fi
-          
+
           # Validate token permissions with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Validating token..."
@@ -299,23 +307,19 @@ jobs:
               sleep 5
             fi
           done
-      
+
       - name: Configure DigitalOcean access
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
           echo "🔧 Configuring DigitalOcean access..."
-          
-          # Validate DO_TOKEN
           if [ -z "${DO_TOKEN}" ]; then
             echo "❌ Error: DO_TOKEN secret is not set!"
             exit 1
           fi
-          
-          # Initialize doctl with retry logic
           for attempt in 1 2 3; do
             echo "Attempt ${attempt}/3: Configuring doctl..."
-            if doctl auth init --access-token "${DO_TOKEN}"; then
+            if doctl auth init --access-token "${DO_TOKEN}" > /dev/null; then
               echo "✅ DigitalOcean authentication configured"
               break
             elif [ "${attempt}" = "3" ]; then
@@ -326,29 +330,33 @@ jobs:
               sleep 5
             fi
           done
-          
-          # Configure kubectl with retry logic.
           # `kubeconfig save` takes the cluster NAME; `use-context` takes the
-          # generated CONTEXT name (do-<region>-<cluster-name>) — these differ.
-          echo "Configuring kubectl for cluster ${CLUSTER_NAME} (context ${CLUSTER_CONTEXT})..."
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Configuring kubectl..."
-            if doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"; then
-              kubectl config use-context "${CLUSTER_CONTEXT}"
-              echo "✅ Kubernetes access configured"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to configure kubectl"
-              exit 1
-            else
-              echo "⚠️ kubectl configuration failed, retrying in 5s..."
-              sleep 5
-            fi
-          done
+          # generated CONTEXT name (do-<region>-<cluster-name>) - these differ.
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
+
+      - name: Admit pool state and record identities
+        env:
+          ACKNOWLEDGE_STOP: ${{ needs.validate-inputs.outputs.acknowledge_emergency_stop }}
+        run: |
+          # Deploy admits ARC density, burst or burst-stopped with both burst
+          # pools present and the priority expander configured; node headroom
+          # is evaluated over every Ready eligible node. While the Emergency
+          # Stop marker exists it is admitted only with the acknowledgement.
+          ACK=()
+          [ "${ACKNOWLEDGE_STOP}" != true ] || ACK=(--acknowledge-emergency-stop)
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation deploy "${ACK[@]}" \
+            --emit-identities "${RUNNER_TEMP}/pool-identities.json"
 
       - name: Verify prepared platform prerequisites
-        id: prerequisites
-        if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
@@ -378,39 +386,25 @@ jobs:
           rm -f "${REGISTRY_CONFIG}"
           trap - EXIT
 
+          # The runner release must already exist (the pool-state gate admitted
+          # it) and own its no-permission ServiceAccount.
           if ! SERVICE_ACCOUNT=$(kubectl get serviceaccount \
             redducklabs-runners-gha-rs-no-permission -n "${NAMESPACE}" \
             --ignore-not-found -o json); then
             echo "❌ Error: could not validate runner ServiceAccount ownership"
             exit 1
           fi
-          SCALE_RELEASES=$(helm list -n "${NAMESPACE}" -o json)
-          RELEASE_MATCHES=$(jq -c --arg name "${RELEASE_NAME}" \
-            '[.[] | select(.name == $name)]' <<<"${SCALE_RELEASES}")
-          if [ -n "${SERVICE_ACCOUNT}" ]; then
-            if ! jq -e '
-              .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
-              and .metadata.annotations["meta.helm.sh/release-name"] == "redducklabs-runners"
-              and .metadata.annotations["meta.helm.sh/release-namespace"] == "arc-runners"
-            ' <<<"${SERVICE_ACCOUNT}" >/dev/null; then
-              echo "❌ Error: existing runner ServiceAccount is not owned by the redducklabs-runners Helm release"
-              exit 1
-            fi
-            if ! jq -e --arg version "${ARC_CHART_VERSION}" '
-              length == 1
-              and .[0].chart == ("gha-runner-scale-set-" + $version)
-              and .[0].status == "deployed"
-            ' <<<"${RELEASE_MATCHES}" >/dev/null; then
-              echo "❌ Error: existing runner ServiceAccount has no matching deployed pinned Helm release"
-              exit 1
-            fi
-            printf 'first_install=false\n' >> "${GITHUB_OUTPUT}"
-          else
-            if [ "$(jq 'length' <<<"${RELEASE_MATCHES}")" != "0" ]; then
-              echo "❌ Error: runner Helm release exists without its chart-owned ServiceAccount"
-              exit 1
-            fi
-            printf 'first_install=true\n' >> "${GITHUB_OUTPUT}"
+          if [ -z "${SERVICE_ACCOUNT}" ]; then
+            echo "❌ Error: the chart-owned runner ServiceAccount is missing"
+            exit 1
+          fi
+          if ! jq -e '
+            .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
+            and .metadata.annotations["meta.helm.sh/release-name"] == "redducklabs-runners"
+            and .metadata.annotations["meta.helm.sh/release-namespace"] == "arc-runners"
+          ' <<<"${SERVICE_ACCOUNT}" >/dev/null; then
+            echo "❌ Error: existing runner ServiceAccount is not owned by the redducklabs-runners Helm release"
+            exit 1
           fi
 
           CRDS=(
@@ -429,134 +423,42 @@ jobs:
             fi
           done
 
-          CONTROLLER_RELEASES=$(helm list -n arc-systems -o json)
-          if ! jq -e --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(.name == "arc"
-              and .chart == ("gha-runner-scale-set-controller-" + $version)
-              and .status == "deployed")] | length == 1
-          ' <<<"${CONTROLLER_RELEASES}" >/dev/null; then
-            echo "❌ Error: prepared ARC controller chart ${ARC_CHART_VERSION} is not deployed"
-            exit 1
-          fi
-
-          CONTROLLER=$(kubectl get deployment -n arc-systems \
-            -l app.kubernetes.io/name=gha-rs-controller -o json)
-          if ! jq -e '
-            .items | length == 1
-            and .[0].status.observedGeneration == .[0].metadata.generation
-            and (.[0].spec.replicas // 1) > 0
-            and (.[0].status.readyReplicas // 0) == (.[0].spec.replicas // 1)
-            and (.[0].status.availableReplicas // 0) == (.[0].spec.replicas // 1)
-          ' <<<"${CONTROLLER}" >/dev/null; then
-            echo "❌ Error: prepared ARC controller is stale or not fully Ready"
+          # Scale-set release, controller release and controller readiness:
+          # one shared implementation for every fleet workflow.
+          # shellcheck source=/dev/null
+          source scripts/lib/arc-identity.sh
+          if ! verify_arc_identity; then
+            echo "❌ Error: ARC release or controller ${ARC_CHART_VERSION} identity check failed"
             exit 1
           fi
           echo "✅ Prepared platform prerequisites are present and Ready"
 
-      - name: Bootstrap chart-owned ServiceAccount for first install
-        if: steps.prerequisites.outputs.first_install == 'true'
-        env:
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
-          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+      - name: Validate committed burst values
         run: |
-          echo "🔐 Bootstrapping the chart-owned ServiceAccount with runners disabled..."
-          helm upgrade --install "${RELEASE_NAME}" \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-            --namespace "${NAMESPACE}" \
-            --values deploy/dind-values.yaml \
-            --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
-            --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
-            --set minRunners=0 \
-            --set maxRunners=0 \
-            --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
-            --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
-            --set runnerGroup=redducklabs-private-runners \
-            --set controllerServiceAccount.name=arc-gha-rs-controller \
-            --set controllerServiceAccount.namespace=arc-systems \
-            --version "${ARC_CHART_VERSION}" \
-            --wait --timeout 300s
-
-          SERVICE_ACCOUNT=$(kubectl get serviceaccount \
-            redducklabs-runners-gha-rs-no-permission -n "${NAMESPACE}" -o json)
-          if ! jq -e '
-            .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
-            and .metadata.annotations["meta.helm.sh/release-name"] == "redducklabs-runners"
-            and .metadata.annotations["meta.helm.sh/release-namespace"] == "arc-runners"
-          ' <<<"${SERVICE_ACCOUNT}" >/dev/null; then
-            echo "❌ Error: zero-runner bootstrap did not create the expected Helm-owned ServiceAccount"
+          # Deploy has no runner-bound inputs: it renders exactly what
+          # deploy/dind-values.yaml commits, which must be the burst contract.
+          if ! python3 scripts/validate-runner-isolation-contract.py \
+            --contract burst --kind values \
+            --min-runners 2 --max-runners 20 --runner-group private \
+            < deploy/dind-values.yaml; then
+            echo "❌ Error: deploy/dind-values.yaml is not the burst contract (2/20); only canonical states can be deployed"
             exit 1
           fi
-          echo "✅ Chart-owned ServiceAccount bootstrapped with minRunners=0 maxRunners=0"
-      
-      - name: Check node pool capacity
-        env:
-          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
-          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
-        run: |
-          echo "📐 Checking node pool capacity against requested runner count..."
-          POOL_NAME="github-runners-pool-16g"
+          echo "✅ deploy/dind-values.yaml is the burst contract (2/20)"
 
-          PODS_PER_NODE=2
-          REQUIRED_POOL_MIN=2
-          REQUIRED_POOL_MAX=2
-          CLUSTER_ID=$(doctl kubernetes cluster list -o json 2>/dev/null \
-            | jq -r --arg n "${CLUSTER_NAME}" '.[] | select(.name==$n) | .id')
-
-          if [ -z "${CLUSTER_ID}" ] || [ "${CLUSTER_ID}" = "null" ]; then
-            echo "❌ Error: could not resolve cluster '${CLUSTER_NAME}' for capacity validation"
-            exit 1
-          fi
-
-          POOL_JSON=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json 2>/dev/null \
-            | jq -r --arg p "${POOL_NAME}" '.[] | select(.name==$p)')
-
-          if [ -z "${POOL_JSON}" ]; then
-            echo "❌ Error: node pool '${POOL_NAME}' not found"
-            exit 1
-          fi
-
-          POOL_MIN=$(echo "${POOL_JSON}" | jq -r '.min_nodes')
-          POOL_MAX=$(echo "${POOL_JSON}" | jq -r '.max_nodes')
-          POOL_COUNT=$(echo "${POOL_JSON}" | jq -r '.count')
-          POOL_AUTOSCALE=$(echo "${POOL_JSON}" | jq -r '.auto_scale')
-          POOL_SIZE=$(echo "${POOL_JSON}" | jq -r '.size')
-
-          REQUIRED_NODES=$(( (MAX_RUNNERS + PODS_PER_NODE - 1) / PODS_PER_NODE ))
-          echo "  Node pool: min_nodes=${POOL_MIN} max_nodes=${POOL_MAX} count=${POOL_COUNT} size=${POOL_SIZE} auto_scale=${POOL_AUTOSCALE}"
-          echo "  Requested: minRunners=${MIN_RUNNERS} maxRunners=${MAX_RUNNERS}"
-          echo "  Capacity: ${PODS_PER_NODE} pods/node; maxRunners requires ${REQUIRED_NODES} nodes"
-
-          if [ "${POOL_MIN}" != "${REQUIRED_POOL_MIN}" ] \
-             || [ "${POOL_MAX}" != "${REQUIRED_POOL_MAX}" ] \
-             || [ "${POOL_COUNT}" != "2" ] \
-             || [ "${POOL_SIZE}" != "s-8vcpu-16gb" ] \
-             || [ "${POOL_AUTOSCALE}" != "true" ]; then
-            echo "❌ Error: runner pool must be s-8vcpu-16gb and auto-scaling at min/max/count 2/2/2; found ${POOL_SIZE} ${POOL_MIN}/${POOL_MAX}/${POOL_COUNT} auto_scale=${POOL_AUTOSCALE}"
-            exit 1
-          fi
-          if [ "${REQUIRED_NODES}" -gt "${POOL_MAX}" ]; then
-            echo "❌ Error: maxRunners (${MAX_RUNNERS}) exceeds ${POOL_MAX} nodes at ${PODS_PER_NODE} pods per node"
-            exit 1
-          fi
-          RUNNER_NODES=$(kubectl get nodes -l node-type=github-runner -o json)
-          READY_NODES=$(jq '[.items[] | select(any(.status.conditions[]?; .type=="Ready" and .status=="True"))] | length' <<<"${RUNNER_NODES}")
-          TOTAL_NODES=$(jq '.items | length' <<<"${RUNNER_NODES}")
-          if [ "${TOTAL_NODES}" != "2" ] || [ "${READY_NODES}" != "2" ]; then
-            echo "❌ Error: expected exactly two Ready runner nodes; found ${READY_NODES}/${TOTAL_NODES} Ready"
-            exit 1
-          fi
-          echo "✅ Node pool capacity matches the fixed two-node ceiling"
-
-      - name: Render and preflight candidate
+      - name: Render and validate candidate
         if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
-          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
           RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
           RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
+          # Local only (Codex PR #35 review 3 finding 1): render, burst-contract
+          # validation, the manifest hash gate and the preflight objects. Nothing
+          # here reaches the API server, so on an acknowledged recovery it runs
+          # before the Emergency Stop marker is deleted; the nonzero ASRS server
+          # dry run, which the fence would deny while the marker exists, runs in
+          # "Server-side preflight candidate" after the acknowledgement.
           echo "🔬 Rendering and validating the exact deployment candidate..."
           CANDIDATE="${RUNNER_TEMP}/runner-candidate.yaml"
           ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
@@ -564,8 +466,6 @@ jobs:
           ADMITTED_ASRS="${RUNNER_TEMP}/runner-admitted-asrs.json"
           REPRESENTATIVE_POD="${RUNNER_TEMP}/runner-representative-pod.json"
           ADMITTED_POD="${RUNNER_TEMP}/runner-admitted-pod.json"
-          NODES_JSON="${RUNNER_TEMP}/runner-nodes.json"
-          PODS_JSON="${RUNNER_TEMP}/all-pods.json"
           CANDIDATE_HASH="${RUNNER_TEMP}/runner-candidate.sha256"
           HASH_GATE="${RUNNER_TEMP}/runner-candidate-hash-gate.sh"
           umask 077
@@ -576,14 +476,22 @@ jobs:
             --values deploy/dind-values.yaml \
             --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
             --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
-            --set minRunners="${MIN_RUNNERS}" \
-            --set maxRunners="${MAX_RUNNERS}" \
             --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
             --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
             --set runnerGroup=redducklabs-private-runners \
             --set controllerServiceAccount.name=arc-gha-rs-controller \
             --set controllerServiceAccount.namespace=arc-systems \
             --version "${ARC_CHART_VERSION}" > "${CANDIDATE}"
+
+          # The candidate must be exactly the burst contract (2/20) before any
+          # admission dry-run or Helm write; non-canonical bounds stop here.
+          if ! python3 scripts/validate-runner-isolation-contract.py \
+            --contract burst --kind manifest \
+            --min-runners 2 --max-runners 20 --runner-group private \
+            < "${CANDIDATE}"; then
+            echo "❌ Error: rendered candidate does not satisfy the burst contract (2/20)"
+            exit 1
+          fi
 
           sha256sum "${CANDIDATE}" | awk '{print $1}' > "${CANDIDATE_HASH}"
           cat > "${HASH_GATE}" <<'SH'
@@ -620,17 +528,67 @@ jobs:
           with open(preflight_target, "w", encoding="utf-8") as stream:
               yaml.safe_dump(preflight, stream, sort_keys=False)
           PY
+          echo "✅ Candidate rendered and validated as burst 2/20"
+
+      - name: Acknowledge Emergency Stop
+        if: needs.validate-inputs.outputs.acknowledge_emergency_stop == 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          # Runs after the local render and validation and before any nonzero
+          # ASRS server dry run (Codex PR #35 review 3 finding 1).
+          # Ruling 33: delete the Emergency Stop marker, bracketed (compare,
+          # acknowledged admission, delete with the read uid/resourceVersion as
+          # preconditions, compare), before the first write. Later admissions
+          # run without the acknowledgement, so a newer stop refuses them.
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA"
+            exit 1
+          fi
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_acknowledge_stop "${RUNNER_TEMP}/pool-identities.json" deploy
+
+      - name: Server-side preflight candidate
+        if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
+        run: |
+          # Server dry runs of the rendered ASRS (as a differently named
+          # object) and a representative Pod. The Emergency Stop fence (Ruling
+          # 36) judges dry runs like real writes, so on an acknowledged
+          # recovery this runs only after "Acknowledge Emergency Stop" deleted
+          # the marker and waited until the fence allows nonzero writes. If it
+          # fails there, nothing was written to the release: the fleet stays
+          # 0/0 without a marker (runbook, "Emergency Stop").
+          ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
+          PREFLIGHT_ASRS="${RUNNER_TEMP}/runner-preflight-asrs.yaml"
+          ADMITTED_ASRS="${RUNNER_TEMP}/runner-admitted-asrs.json"
+          REPRESENTATIVE_POD="${RUNNER_TEMP}/runner-representative-pod.json"
+          ADMITTED_POD="${RUNNER_TEMP}/runner-admitted-pod.json"
+          umask 077
+          for FILE in "${ASRS}" "${PREFLIGHT_ASRS}" "${RUNNER_TEMP}/runner-candidate.sha256"; do
+            if [ ! -s "${FILE}" ]; then
+              echo "❌ Error: ${FILE} from 'Render and validate candidate' is missing"
+              exit 1
+            fi
+          done
 
           kubectl apply --server-side --force-conflicts --dry-run=server \
             -f "${PREFLIGHT_ASRS}" -o json > "${ADMITTED_ASRS}"
 
-          python3 - "${ADMITTED_ASRS}" "${REPRESENTATIVE_POD}" "${NAMESPACE}" <<'PY'
+          python3 - "${ADMITTED_ASRS}" "${ASRS}" "${REPRESENTATIVE_POD}" "${NAMESPACE}" <<'PY'
           import json
           import sys
 
-          source, target, namespace = sys.argv[1:]
+          import yaml
+
+          source, rendered_path, target, namespace = sys.argv[1:]
           with open(source, encoding="utf-8") as stream:
               asrs = json.load(stream)
+          with open(rendered_path, encoding="utf-8") as stream:
+              rendered = yaml.safe_load(stream)
           pod = {
               "apiVersion": "v1",
               "kind": "Pod",
@@ -641,6 +599,11 @@ jobs:
               },
               "spec": asrs["spec"]["template"]["spec"],
           }
+          # ARC copies the template metadata onto every runner Pod, so the
+          # representative Pod carries the rendered annotations too.
+          annotations = (rendered["spec"]["template"].get("metadata") or {}).get("annotations")
+          if annotations is not None:
+              pod["metadata"]["annotations"] = dict(annotations)
           with open(target, "w", encoding="utf-8") as stream:
               json.dump(pod, stream)
           PY
@@ -883,6 +846,7 @@ jobs:
                   raise SystemExit("admission changed runner/DinD coordination")
               if dind.get("args") != [
                   "dockerd", "--host=unix:///var/run/docker.sock", "--group=$(DOCKER_GROUP_GID)",
+                  "--registry-mirror=https://mirror.gcr.io",
               ]:
                   raise SystemExit("admission changed the DinD socket/group arguments")
               if dind.get("env") != [{"name": "DOCKER_GROUP_GID", "value": "123"}]:
@@ -921,6 +885,21 @@ jobs:
               "actions.github.com/scale-set-name"
           ) != "redducklabs-runners":
               raise SystemExit("admission changed the representative Pod scale-set label")
+
+          safe_to_evict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+          expected_annotations = (
+              expected_asrs.get("spec", {}).get("template", {}).get("metadata") or {}
+          ).get("annotations") or {}
+          if expected_annotations.get(safe_to_evict) != "false":
+              raise SystemExit("rendered candidate lacks the safe-to-evict annotation")
+          for label, annotations in (
+              ("ASRS template", (asrs["spec"]["template"].get("metadata") or {}).get("annotations") or {}),
+              ("representative Pod", (pod.get("metadata") or {}).get("annotations") or {}),
+          ):
+              if annotations.get(safe_to_evict) != "false":
+                  raise SystemExit(f"admission removed or changed the safe-to-evict annotation on the {label}")
+              if annotations != expected_annotations:
+                  raise SystemExit(f"admission changed the {label} annotations")
           PY
 
           SERVER_VERSION=$(kubectl version -o json)
@@ -934,22 +913,19 @@ jobs:
             exit 1
           fi
 
-          kubectl get nodes -l node-type=github-runner -o json > "${NODES_JSON}"
-          kubectl get pods -A -o json > "${PODS_JSON}"
-          python3 - "${ADMITTED_POD}" "${NODES_JSON}" "${PODS_JSON}" "${RELEASE_NAME}" <<'PY'
+          # Node headroom is checked by scripts/verify-runner-pool-state.sh over
+          # every Ready eligible node for a 3 CPU / 5Gi runner Pod, so the
+          # admitted representative Pod must request exactly that.
+          python3 - "${ADMITTED_POD}" <<'PY'
           import json
           import math
           import re
           import sys
           from decimal import Decimal
 
-          admitted_path, nodes_path, pods_path, release = sys.argv[1:]
+          (admitted_path,) = sys.argv[1:]
           with open(admitted_path, encoding="utf-8") as stream:
               proposed = json.load(stream)
-          with open(nodes_path, encoding="utf-8") as stream:
-              nodes = json.load(stream).get("items", [])
-          with open(pods_path, encoding="utf-8") as stream:
-              pods = json.load(stream).get("items", [])
 
           def cpu_m(value):
               value = str(value or "0")
@@ -1003,49 +979,141 @@ jobs:
               overhead = spec.get("overhead", {})
               return cpu + cpu_m(overhead.get("cpu")), memory + memory_mi(overhead.get("memory"))
 
-          if len(nodes) != 2:
-              raise SystemExit(f"expected exactly two eligible runner nodes, found {len(nodes)}")
           proposed_cpu, proposed_memory = requests(proposed)
           if (proposed_cpu, proposed_memory) != (3000, 5120):
               raise SystemExit("admitted representative Pod request changed")
-
-          for node in nodes:
-              version = node.get("status", {}).get("nodeInfo", {}).get("kubeletVersion", "")
-              match = re.match(r"v?(\d+)\.(\d+)", version)
-              if not match or (int(match.group(1)), int(match.group(2))) < (1, 36):
-                  raise SystemExit(f"runner node {node.get('metadata', {}).get('name')} is older than Kubernetes 1.36")
-              name = node.get("metadata", {}).get("name")
-              allocatable = node.get("status", {}).get("allocatable", {})
-              alloc_cpu = cpu_m(allocatable.get("cpu"))
-              alloc_memory = memory_mi(allocatable.get("memory"))
-              system_cpu = 0
-              system_memory = 0
-              for pod in pods:
-                  labels = pod.get("metadata", {}).get("labels", {})
-                  if pod.get("spec", {}).get("nodeName") != name:
-                      continue
-                  if labels.get("actions.github.com/scale-set-name") == release:
-                      continue
-                  cpu, memory = requests(pod)
-                  system_cpu += cpu
-                  system_memory += memory
-              remaining_cpu = alloc_cpu - system_cpu - (2 * proposed_cpu)
-              remaining_memory = alloc_memory - system_memory - (2 * proposed_memory)
-              print(f"{name}: non-runner={system_memory}Mi/{system_cpu}m remaining={remaining_memory}Mi/{remaining_cpu}m")
-              if remaining_memory < 2048 or remaining_cpu < 1000:
-                  raise SystemExit(f"runner node {name} lacks two-pod scheduling headroom")
           PY
-          echo "✅ Live API compatibility and per-node headroom preflight passed"
+          echo "✅ Live API compatibility and admitted-request preflight passed"
+
+      - name: Dry-run Emergency Stop fence
+        run: |
+          # Ruling 36 (spec "Emergency Stop fence"): the server-side fence
+          # deploy/runner-emergency-stop-fence.yaml (a ValidatingAdmissionPolicy
+          # and its binding) is installed before the Helm upgrade. The API
+          # server validates both objects first, and the objects it would store
+          # must keep the file's specs exactly, so a spec the server would
+          # default or rewrite fails here, before anything is applied.
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_fence_dry_run
+
+      - name: Apply Emergency Stop fence
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          # Re-check the SHA in this job, immediately before the step that mutates.
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
+          # Identity bracket (compare none, re-admit deploy, server-side apply,
+          # compare none), then the live specs must equal the file and the
+          # policy must be type checked without expression warnings. No retry:
+          # a second apply would run outside the identity bracket.
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_install_fence "${RUNNER_TEMP}/pool-identities.json" deploy
+          echo "✅ Emergency Stop fence applied"
+
+      - name: Dry-run runner network policy
+        run: |
+          # Runner network isolation (spec "Runner network isolation"): the
+          # API server validates the exact object before anything is written,
+          # and the object it would store must keep the file's spec exactly.
+          # The post-apply policy-set validation requires that equality, so a
+          # spec the server would default or rewrite fails here, before the
+          # policy lands, instead of after it.
+          DRY_RUN="${RUNNER_TEMP}/runner-network-policy-dry-run.json"
+          kubectl apply --server-side --dry-run=server -f deploy/runner-network-policy.yaml \
+            --field-manager=redducklabs-runner-deploy -o json > "${DRY_RUN}"
+          python3 - "${DRY_RUN}" deploy/runner-network-policy.yaml <<'PY'
+          import difflib
+          import json
+          import sys
+
+          import yaml
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              returned = json.load(stream)
+          with open(sys.argv[2], encoding="utf-8") as stream:
+              committed = yaml.safe_load(stream)
+          if not isinstance(returned, dict) or returned.get("kind") != "NetworkPolicy":
+              raise SystemExit("❌ Error: the server dry run did not return one NetworkPolicy")
+          if returned.get("spec") != committed["spec"]:
+              diff = difflib.unified_diff(
+                  json.dumps(committed["spec"], indent=2, sort_keys=True).splitlines(),
+                  json.dumps(returned.get("spec"), indent=2, sort_keys=True).splitlines(),
+                  "deploy/runner-network-policy.yaml spec", "server dry-run spec", lineterm="")
+              print("\n".join(diff))
+              raise SystemExit("❌ Error: the server would store a different runner NetworkPolicy spec; nothing was applied")
+          PY
+          echo "✅ Runner network policy passed the server-side dry run with its spec unchanged"
+
+      - name: Apply runner network policy
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          # Re-check the SHA in this job, immediately before the step that mutates.
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
+          # Identity bracket, part 1: live identities must still equal the
+          # admission snapshot, and deploy must still be admitted.
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
+            --transition none
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation deploy
+          # No retry: a second attempt would run outside the identity bracket.
+          kubectl apply --server-side -f deploy/runner-network-policy.yaml \
+            --field-manager=redducklabs-runner-deploy
+          # Identity bracket, part 2: the policy is not part of the identity
+          # snapshot, so the apply declares no transition and every identity
+          # must still equal the snapshot.
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
+            --transition none
+          echo "✅ Runner network policy applied"
+
+      - name: Verify runner network policy set
+        run: |
+          # Policies are additive for allows: validate every policy that can
+          # apply to runner pods, not only the object just applied. A failure
+          # stops the run before the Helm upgrade.
+          ./scripts/verify-runner-network-policy.sh
+
+      - name: Re-admit immediately before Helm
+        run: |
+          # Identity bracket, part 1: live identities must still equal the
+          # admission snapshot, and deploy must still be admitted.
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
+            --transition none
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation deploy
 
       - name: Deploy runners
         if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
-          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
           RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
           RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
+          # Re-check the SHA in this job, immediately before the step that mutates.
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+            exit 1
+          fi
           echo "🚀 Deploying GitHub runners..."
           HASH_GATE="${RUNNER_TEMP}/runner-candidate-hash-gate.sh"
           if [ ! -x "${HASH_GATE}" ]; then
@@ -1053,89 +1121,95 @@ jobs:
             exit 1
           fi
 
-          # Source of truth is the committed deploy/dind-values.yaml (node pool
-          # pinning, tolerations, resources, securityContext). Only secrets and
-          # the workflow_dispatch inputs are overlaid via --set so the file stays
-          # the single place those values are defined.
+          # Source of truth is the committed deploy/dind-values.yaml (bounds,
+          # affinity, annotation, tolerations, resources, securityContext). Only
+          # secrets and the fixed image/group/controller identities are overlaid
+          # via --set. The post-renderer refuses any manifest other than the
+          # preflighted candidate. There is no retry: a second attempt would run
+          # outside the identity bracket, so a failure stops here for review.
+          # The Emergency Stop fence (Ruling 33) runs after the write whether
+          # or not Helm reported success.
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          HELM_RC=0
+          helm upgrade "${RELEASE_NAME}" \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace "${NAMESPACE}" \
+            --values deploy/dind-values.yaml \
+            --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
+            --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
+            --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
+            --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
+            --set runnerGroup=redducklabs-private-runners \
+            --set controllerServiceAccount.name=arc-gha-rs-controller \
+            --set controllerServiceAccount.namespace=arc-systems \
+            --version "${ARC_CHART_VERSION}" \
+            --post-renderer "${HASH_GATE}" \
+            --history-max 100 \
+            --wait \
+            --timeout 300s || HELM_RC=$?
+          if ! fleet_stop_fence; then
+            echo "❌ Error: an Emergency Stop is in effect; the stop was re-applied (0/0) and this deploy failed"
+            exit 1
+          fi
+          if [ "${HELM_RC}" -ne 0 ]; then
+            echo "❌ Error: Failed to deploy runners"
+            helm status "${RELEASE_NAME}" -n "${NAMESPACE}" || true
+            exit 1
+          fi
+          echo "✅ Runners deployed successfully"
 
-          # Deploy with retry logic
-          for attempt in 1 2 3; do
-            echo "Attempt ${attempt}/3: Deploying runners..."
-            if helm upgrade --install "${RELEASE_NAME}" \
-              oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-              --namespace "${NAMESPACE}" \
-              --values deploy/dind-values.yaml \
-              --set githubConfigSecret.github_token="${RUNNER_TOKEN}" \
-              --set runnerScaleSetName="${RUNNER_SCALE_SET_NAME}" \
-              --set minRunners="${MIN_RUNNERS}" \
-              --set maxRunners="${MAX_RUNNERS}" \
-              --set-string "template.spec.containers[0].image=${RUNNER_IMAGE}" \
-              --set-string "template.spec.initContainers[0].image=${RUNNER_IMAGE}" \
-              --set runnerGroup=redducklabs-private-runners \
-              --set controllerServiceAccount.name=arc-gha-rs-controller \
-              --set controllerServiceAccount.namespace=arc-systems \
-              --version "${ARC_CHART_VERSION}" \
-              --post-renderer "${HASH_GATE}" \
-              --wait \
-              --timeout 300s; then
+      - name: Verify Helm transition and burst readback
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+        run: |
+          # Identity bracket, part 2: only the ARC state may have changed, and
+          # only to burst 2/20.
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
+            --transition arc:burst:2/20
+          validate_burst() {
+            python3 scripts/validate-runner-isolation-contract.py \
+              --contract burst --kind "$1" \
+              --min-runners 2 --max-runners 20 --runner-group private
+          }
+          helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json | validate_burst values
+          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" | validate_burst manifest
+          kubectl get autoscalingrunnersets.actions.github.com -n "${NAMESPACE}" -o json \
+            | validate_burst asrs-list
+          echo "✅ Helm values, manifest and live AutoscalingRunnerSet read back as burst 2/20"
 
-              echo "✅ Runners deployed successfully"
-              break
-            elif [ "${attempt}" = "3" ]; then
-              echo "❌ Error: Failed to deploy runners"
-              echo "Checking deployment status..."
-              helm status "${RELEASE_NAME}" -n "${NAMESPACE}" || true
-              kubectl get pods -n "${NAMESPACE}" || true
-              exit 1
-            else
-              echo "⚠️ Deployment failed, retrying in 10s..."
-              sleep 10
-            fi
-          done
-      
       - name: Verify deployment
         if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
         run: |
           echo "✅ Deployment complete! Checking runner status..."
-          
           echo ""
           echo "📊 Runner pods:"
           kubectl get pods -n "${NAMESPACE}" -l actions.github.com/scale-set-name="${RELEASE_NAME}"
-          
-          echo ""
-          echo "📈 Runner scale set:"
-          kubectl get runners.actions.github.com -n "${NAMESPACE}" 2>/dev/null || echo "Runner CRDs not yet available"
-          
           echo ""
           echo "🎯 To use these runners in your workflows, add:"
           echo "  runs-on: ${RUNNER_SCALE_SET_NAME}"
-      
+
       - name: Check GitHub registration
         if: needs.validate-inputs.outputs.operation == 'deploy'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          ORG: ${{ github.repository_owner }}
         run: |
           echo ""
           echo "🔍 Checking GitHub registration..."
-          
-          # Extract org from repository owner
-          ORG="${{ github.repository_owner }}"
-          
-          # Check with retry logic
           for attempt in 1 2 3; do
-            RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null)
-            
-            if [ $? -eq 0 ]; then
-              RUNNERS=$(echo "${RESPONSE}" | jq '[.[]?.runners[]?] | length' 2>/dev/null)
+            if RESPONSE=$(gh api --paginate --slurp "orgs/${ORG}/actions/runners?per_page=100" 2>/dev/null); then
+              RUNNERS=$(jq '[.[]?.runners[]?] | length' <<<"${RESPONSE}" 2>/dev/null || echo 0)
               if [ "${RUNNERS}" != "null" ] && [ "${RUNNERS}" != "0" ]; then
                 echo "✅ Found ${RUNNERS} runner(s) registered with GitHub"
                 break
               fi
             fi
-            
             if [ "${attempt}" = "3" ]; then
               echo "⚠️ Could not verify GitHub registration (may take a few minutes to appear)"
             else
@@ -1154,61 +1228,130 @@ jobs:
             "${RUNNER_TEMP}/runner-admitted-asrs.json" \
             "${RUNNER_TEMP}/runner-representative-pod.json" \
             "${RUNNER_TEMP}/runner-admitted-pod.json" \
-            "${RUNNER_TEMP}/runner-nodes.json" \
-            "${RUNNER_TEMP}/all-pods.json" \
             "${RUNNER_TEMP}/runner-candidate.sha256" \
             "${RUNNER_TEMP}/runner-candidate-hash-gate.sh" \
-            "${RUNNER_TEMP}/rollback-revision-manifest.yaml" \
-            "${RUNNER_TEMP}/rollback-restored-manifest.yaml" \
             "${RUNNER_TEMP}"/helm-postrender.*
-      
+
       - name: Summary
         if: always()
         env:
-          OPERATION: ${{ needs.validate-inputs.outputs.operation }}
-          ROLLBACK_REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          MIN_RUNNERS: ${{ needs.validate-inputs.outputs.min_runners }}
-          MAX_RUNNERS: ${{ needs.validate-inputs.outputs.max_runners }}
           RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          JOB_STATUS="${{ job.status }}"
           if [ "${JOB_STATUS}" != "success" ]; then
-            echo "## ❌ Runner ${OPERATION} failed" >> $GITHUB_STEP_SUMMARY
-            echo "Review the logs: a prior mutation in this job may already have completed." >> $GITHUB_STEP_SUMMARY
+            {
+              echo "## ❌ Runner deploy failed"
+              echo "Review the logs: a prior mutation in this job may already have completed."
+            } >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
-          echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Successfully deployed GitHub runners!**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Runner Label**: \`${RUNNER_SCALE_SET_NAME}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Namespace**: \`${NAMESPACE}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Min Runners**: ${MIN_RUNNERS}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Max Runners**: ${MAX_RUNNERS}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: \`${RUNNER_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Usage" >> $GITHUB_STEP_SUMMARY
-          echo "Add this to your workflow:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`yaml" >> $GITHUB_STEP_SUMMARY
-          echo "jobs:" >> $GITHUB_STEP_SUMMARY
-          echo "  build:" >> $GITHUB_STEP_SUMMARY
-          echo "    runs-on: ${RUNNER_SCALE_SET_NAME}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Security Features" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Input validation and sanitization" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Checksum verified tool downloads" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Minimal container security context" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Retry logic for network operations" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🎉 Deployment Summary"
+            echo ""
+            echo "✅ **Deployed the burst contract (minRunners 2, maxRunners 20)**"
+            echo ""
+            echo "- **Runner Label**: \`${RUNNER_SCALE_SET_NAME}\`"
+            echo "- **Namespace**: \`${NAMESPACE}\`"
+            echo "- **Image**: \`${RUNNER_IMAGE}\`"
+            echo ""
+            echo "Next: Node Pool Sizing \`enable-burst\` opens the burst pools."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  drain:
+    name: Drain Burst Runners
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.operation == 'drain'
+    # The drain wait stops at 300 minutes; this leaves time for setup and
+    # summary inside GitHub-hosted runners' six-hour job limit.
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
+
+      - name: Configure DigitalOcean access
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+        run: |
+          if [ -z "${DO_TOKEN}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+          doctl auth init --access-token "${DO_TOKEN}" > /dev/null
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
+
+      - name: Admit pool state and record identities
+        run: |
+          # Drain admits ARC burst, an interrupted Phase C (burst-acceptance
+          # 8/20 or 4/20), drain itself (a retry), or burst-stopped (Emergency
+          # Stop from burst), with both burst pools.
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation drain \
+            --emit-identities "${RUNNER_TEMP}/pool-identities.json"
+
+      - name: Drain runners
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          # Re-check the SHA immediately before the step that mutates.
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Error: checked-out SHA changed after validation"
+            exit 1
+          fi
+          ./scripts/drain-runners.sh --identities "${RUNNER_TEMP}/pool-identities.json" \
+            2>&1 | tee "${RUNNER_TEMP}/drain.log"
+
+      - name: Drain summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          LOG="${RUNNER_TEMP}/drain.log"
+          {
+            if [ "${JOB_STATUS}" = "success" ]; then
+              echo "## ✅ Runner drain complete"
+              echo "ARC is \`drain\` (maxRunners 4, required baseline affinity); no runner pod is on a burst node and both burst pools are at zero nodes."
+              echo "Next: Node Pool Sizing \`remove-burst\`, then Deploy \`rollback\` (upgrades to the committed \`deploy/density-values.yaml\`)."
+            else
+              echo "## ❌ Runner drain did not finish"
+              echo "The fleet is left in its current state (\`drain\` once the Helm upgrade succeeded); re-run \`drain\` to resume the wait."
+            fi
+            if [ -f "${LOG}" ]; then
+              echo ""
+              echo '```'
+              grep -E '^(PLAN|NOOP|HELM|READBACK|WAIT|DRAIN_COMPLETE|ERROR|STOP_MARKER):' "${LOG}" | tail -n 20 || true
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   rollback:
     name: Roll Back Self-Hosted Runners
     runs-on: ubuntu-latest
     needs: validate-inputs
     if: needs.validate-inputs.outputs.operation == 'rollback'
-    timeout-minutes: 10
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repository
@@ -1227,138 +1370,148 @@ jobs:
             echo "❌ Error: DO_TOKEN secret is not set"
             exit 1
           fi
-          doctl auth init --access-token "${DO_TOKEN}"
+          doctl auth init --access-token "${DO_TOKEN}" > /dev/null
           doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
           kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
 
-      - name: Rollback runners
+      - name: Validate GitHub Token
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+        run: |
+          # The density release is rendered with RUNNER_TOKEN exactly as Deploy
+          # renders burst (githubConfigSecret.github_token).
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "❌ Error: RUNNER_TOKEN secret is not set!"
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if gh api user >/dev/null 2>&1; then
+              echo "✅ GitHub token validated successfully"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: RUNNER_TOKEN is invalid, expired, or lacks API access"
+              exit 1
+            else
+              sleep 5
+            fi
+          done
+
+      - name: Admit rollback state and record identities
+        id: admit
+        env:
+          ACKNOWLEDGE_STOP: ${{ needs.validate-inputs.outputs.acknowledge_emergency_stop }}
+        run: |
+          # Rollback admits ARC drain or density, or the stopped states
+          # drain-stopped and density-stopped that Emergency Stop leaves, and
+          # only with every burst pool already removed. While the Emergency
+          # Stop marker exists it is admitted only with the acknowledgement.
+          ACK=()
+          [ "${ACKNOWLEDGE_STOP}" != true ] || ACK=(--acknowledge-emergency-stop)
+          STATE=$(./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation rollback "${ACK[@]}" \
+            --emit-identities "${RUNNER_TEMP}/pool-identities.json")
+          echo "${STATE}"
+          STATE=$(grep -E '^STATE: ' <<<"${STATE}")
+          case "${STATE}" in
+            "STATE: arc=density "*) printf 'arc_state=density\n' >> "${GITHUB_OUTPUT}" ;;
+            "STATE: arc=drain "*) printf 'arc_state=drain\n' >> "${GITHUB_OUTPUT}" ;;
+            "STATE: arc=drain-stopped "*) printf 'arc_state=drain-stopped\n' >> "${GITHUB_OUTPUT}" ;;
+            "STATE: arc=density-stopped "*) printf 'arc_state=density-stopped\n' >> "${GITHUB_OUTPUT}" ;;
+            *)
+              echo "❌ Error: unexpected admitted state '${STATE}'"
+              exit 1
+              ;;
+          esac
+
+      - name: Roll back to committed density values
         env:
           EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
-          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          ACKNOWLEDGE_STOP: ${{ needs.validate-inputs.outputs.acknowledge_emergency_stop }}
         run: |
           ACTUAL_SHA=$(git rev-parse HEAD)
           if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
             echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
             exit 1
           fi
-          kubectl get namespace "${NAMESPACE}" >/dev/null
+          # Ruling 34: the target is deploy/density-values.yaml, validated as
+          # density 2/4 (values and rendered manifest) before the bracketed
+          # Helm upgrade; the Emergency Stop fence runs after the write.
+          ACK=()
+          [ "${ACKNOWLEDGE_STOP}" != true ] || ACK=(--acknowledge-emergency-stop)
+          ./scripts/rollback-density.sh --identities "${RUNNER_TEMP}/pool-identities.json" "${ACK[@]}" \
+            2>&1 | tee "${RUNNER_TEMP}/rollback.log"
 
-          validate_rollback_values() {
+      - name: Verify rollback transition and density readback
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          ARC_STATE: ${{ steps.admit.outputs.arc_state }}
+        run: |
+          TRANSITION=none
+          if [ "${ARC_STATE}" != "density" ]; then
+            TRANSITION=arc:density:2/4
+          fi
+          ./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --compare-identities "${RUNNER_TEMP}/pool-identities.json" \
+            --transition "${TRANSITION}"
+          validate_density() {
             python3 scripts/validate-runner-isolation-contract.py \
-              --contract legacy-isolated --kind values \
-              --min-runners 2 --max-runners 2 --runner-group private
+              --contract density --kind "$1" \
+              --min-runners 2 --max-runners 4 --runner-group private
           }
+          helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json | validate_density values
+          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" | validate_density manifest
+          kubectl get autoscalingrunnersets.actions.github.com -n "${NAMESPACE}" -o json \
+            | validate_density asrs-list
+          echo "✅ Helm values, manifest and live AutoscalingRunnerSet read back as density 2/4"
 
-          validate_rollback_manifest() {
-            python3 scripts/validate-runner-isolation-contract.py \
-              --contract legacy-isolated --kind manifest \
-              --min-runners 2 --max-runners 2 --runner-group private \
-              < "$1"
-          }
-
-          HISTORY=$(helm history "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! jq -e --arg revision "${REVISION}" --arg version "${ARC_CHART_VERSION}" '
-            [.[] | select(
-              (.revision | tostring) == $revision
-              and .chart == ("gha-runner-scale-set-" + $version)
-              and (.status == "deployed" or .status == "superseded"))] | length == 1
-          ' <<<"${HISTORY}" >/dev/null; then
-            echo "❌ Error: rollback revision is missing, not chart ${ARC_CHART_VERSION}, or not deployable"
+      - name: Verify pool state after rollback
+        run: |
+          STATE=$(./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation rollback)
+          echo "${STATE}"
+          # The postcondition is the density readback (previous step) and no
+          # burst pools. A runner pod that is momentarily Pending while ARC
+          # replaces a runner is not a failure: with no burst pools it can only
+          # schedule on baseline.
+          if [ "${STATE}" != "STATE: arc=density pools=none burst=closed" ]; then
+            echo "❌ Error: post-rollback pool state is not density with no burst pools"
             exit 1
           fi
+          echo "✅ Post-rollback pool state is density with no burst pools"
 
-          REVISION_VALUES=$(helm get values "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" -o json)
-          if ! validate_rollback_values <<<"${REVISION_VALUES}"; then
-            echo "❌ Error: rollback revision values do not preserve 2/2 bounds, private group, and 5Gi+5Gi requests"
-            exit 1
-          fi
-          REVISION_MANIFEST="${RUNNER_TEMP}/rollback-revision-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" --revision "${REVISION}" \
-            -n "${NAMESPACE}" > "${REVISION_MANIFEST}"
-          if ! validate_rollback_manifest "${REVISION_MANIFEST}"; then
-            echo "❌ Error: rollback revision manifest does not preserve the isolated runner template"
-            exit 1
-          fi
-
-          helm rollback "${RELEASE_NAME}" "${REVISION}" \
-            --namespace "${NAMESPACE}" --wait --timeout 300s
-
-          RESTORED=$(helm get values "${RELEASE_NAME}" -n "${NAMESPACE}" -o json)
-          if ! validate_rollback_values <<<"${RESTORED}"; then
-            echo "❌ Error: rollback did not restore the isolated 5Gi+5Gi, 2/2 private-group configuration"
-            exit 1
-          fi
-          RESTORED_MANIFEST="${RUNNER_TEMP}/rollback-restored-manifest.yaml"
-          helm get manifest "${RELEASE_NAME}" -n "${NAMESPACE}" > "${RESTORED_MANIFEST}"
-          if ! validate_rollback_manifest "${RESTORED_MANIFEST}"; then
-            echo "❌ Error: rollback live manifest readback does not restore the isolated runner template"
-            exit 1
-          fi
-          RESTORED_ASRS=$(kubectl get autoscalingrunnersets.actions.github.com \
-            -n "${NAMESPACE}" -o json)
-          if ! python3 scripts/validate-runner-isolation-contract.py \
-            --contract legacy-isolated --kind asrs-list \
-            --min-runners 2 --max-runners 2 --runner-group private \
-            <<<"${RESTORED_ASRS}"; then
-            echo "❌ Error: rollback live AutoscalingRunnerSet readback does not restore the exact private 2/2 isolated state"
-            exit 1
-          fi
-          echo "✅ Rollback restored validated revision ${REVISION}"
-
-      - name: Verify trust and pool after rollback
+      - name: Verify trust boundary after rollback
         env:
           GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
           EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
         run: |
-          STATUS=0
           bash scripts/verify-runner-trust-boundary.sh \
-            --expected-sha "${EXPECTED_SHA}" --verify-only || STATUS=1
-
-          CLUSTER_ID=$(doctl kubernetes cluster list -o json \
-            | jq -r --arg name "${CLUSTER_NAME}" '.[] | select(.name==$name) | .id')
-          POOL=$(doctl kubernetes cluster node-pool list "${CLUSTER_ID}" -o json \
-            | jq -c '.[] | select(.name=="github-runners-pool-16g")')
-          if ! jq -e '
-            .size == "s-8vcpu-16gb"
-            and .auto_scale == true
-            and .min_nodes == 2 and .max_nodes == 2 and .count == 2
-          ' <<<"${POOL}" >/dev/null; then
-            echo "❌ Error: post-rollback pool readback is not the fixed two-node pool"
-            STATUS=1
-          fi
-          NODES=$(kubectl get nodes -l node-type=github-runner -o json)
-          if ! jq -e '
-            .items | length == 2
-            and all(.[]; any(.status.conditions[]?;
-              .type == "Ready" and .status == "True"))
-          ' <<<"${NODES}" >/dev/null; then
-            echo "❌ Error: post-rollback runner nodes are not exactly two Ready nodes"
-            STATUS=1
-          fi
-          PODS=$(kubectl get pods -n arc-runners \
-            -l actions.github.com/scale-set-name=redducklabs-runners -o json)
-          SETS=$(kubectl get ephemeralrunnersets.actions.github.com -n arc-runners \
-            -l actions.github.com/scale-set-name=redducklabs-runners -o json)
-          PENDING=$(jq '[.items[] | select(.status.phase == "Pending")] | length' <<<"${PODS}")
-          DESIRED=$(jq '[.items[] | (.spec.replicas // 0)] | add // 0' <<<"${SETS}")
-          if [ "${PENDING}" != 0 ] || [ "${DESIRED}" -gt 2 ]; then
-            echo "❌ Error: post-rollback ARC still has Pending runners or scale-up demand"
-            STATUS=1
-          fi
-          exit "${STATUS}"
+            --expected-sha "${EXPECTED_SHA}" --verify-only
 
       - name: Rollback summary
         if: always()
         env:
-          REVISION: ${{ needs.validate-inputs.outputs.rollback_revision }}
+          ARC_STATE: ${{ steps.admit.outputs.arc_state }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            echo "## ✅ Runner rollback complete" >> "${GITHUB_STEP_SUMMARY}"
-            echo "- **Revision**: ${REVISION}" >> "${GITHUB_STEP_SUMMARY}"
-            echo "- **Runner Group**: `redducklabs-private-runners`" >> "${GITHUB_STEP_SUMMARY}"
-          else
-            echo "## ❌ Runner rollback or post-rollback verification failed" >> "${GITHUB_STEP_SUMMARY}"
-            echo "Review the logs: Helm rollback may have completed before a verification failure." >> "${GITHUB_STEP_SUMMARY}"
-          fi
+          {
+            if [ "${JOB_STATUS}" = "success" ] && [ "${ARC_STATE}" = "density" ]; then
+              echo "## ✅ Runner rollback: already density (no-op)"
+            elif [ "${JOB_STATUS}" = "success" ]; then
+              echo "## ✅ Runner rollback complete"
+              echo "- **Values**: \`deploy/density-values.yaml\` (density 2/4)"
+              echo "- **Runner Group**: \`redducklabs-private-runners\`"
+            else
+              echo "## ❌ Runner rollback or post-rollback verification failed"
+              echo "Review the logs: the Helm upgrade may have completed before a verification failure. A \`STOP_FENCE\` error means an Emergency Stop is in effect and 0/0 was re-applied."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

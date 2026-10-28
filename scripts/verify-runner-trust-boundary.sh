@@ -79,8 +79,8 @@ read_trusted_repositories() {
         TRUSTED_REPOSITORIES+=("${entry}")
     done < "${TRUSTED_REPOSITORIES_FILE}"
 
-    if [ "${#TRUSTED_REPOSITORIES[@]}" -ne 9 ]; then
-        echo "ERROR: trusted repository manifest must contain exactly nine identities" >&2
+    if [ "${#TRUSTED_REPOSITORIES[@]}" -ne 11 ]; then
+        echo "ERROR: trusted repository manifest must contain exactly eleven identities" >&2
         return 1
     fi
 }
@@ -181,6 +181,36 @@ for entry in "${TRUSTED_REPOSITORIES[@]}"; do
     repo_json=$(github_read "repository ${repo_name}" "/repositories/${repo_id}") || exit 1
     if ! validate_private_identity "$repo_json" "$repo_id" "$repo_name"; then
         echo "ERROR: committed repository identity ${repo_id}:${repo_name} is unknown, transferred, renamed, or not private" >&2
+        exit 1
+    fi
+done
+
+# A private member that runs workflows from fork pull requests would let code
+# from outside the repository reach the privileged fleet. The policy must be a
+# single JSON object whose run_workflows_from_fork_pull_requests is the literal
+# boolean false; a missing, null, string, malformed, or unreadable policy fails
+# closed here, before any runner-group read or mutation, in both modes.
+validate_fork_pr_policy() {
+    local policy=$1
+    jq -se '
+        length == 1
+        and (.[0] | type == "object")
+        and (.[0].run_workflows_from_fork_pull_requests | type == "boolean")
+        and .[0].run_workflows_from_fork_pull_requests == false
+    ' <<<"$policy" >/dev/null 2>&1
+}
+
+echo "Validating fork-PR workflow policy for every private repository..."
+for entry in "${TRUSTED_REPOSITORIES[@]}"; do
+    repo_id=${entry%%:*}
+    repo_name=${entry#*:}
+    if ! fork_policy=$(github_read "fork-PR workflow policy for ${repo_name}" --method GET \
+        "repos/$(encode_url_component "$ORG")/$(encode_url_component "$repo_name")/actions/permissions/fork-pr-workflows-private-repos"); then
+        echo "ERROR: fork-PR workflow policy for ${repo_id}:${repo_name} is unreadable; failing closed before runner-group mutation" >&2
+        exit 1
+    fi
+    if ! validate_fork_pr_policy "$fork_policy"; then
+        echo "ERROR: fork-PR workflow policy for ${repo_id}:${repo_name} does not set run_workflows_from_fork_pull_requests to boolean false; failing closed before runner-group mutation" >&2
         exit 1
     fi
 done
@@ -452,4 +482,4 @@ for entry in "${TRUSTED_REPOSITORIES[@]}"; do
     fi
 done
 
-echo "Trust boundary verified: group=${GROUP_NAME}, visibility=selected, public=false, repositories=9, public workflows audited"
+echo "Trust boundary verified: group=${GROUP_NAME}, visibility=selected, public=false, repositories=${#TRUSTED_REPOSITORIES[@]}, fork-PR workflows disabled, public workflows audited"

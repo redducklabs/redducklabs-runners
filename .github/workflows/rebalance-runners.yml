@@ -1,0 +1,267 @@
+name: Rebalance Runners
+
+# Hourly retirement of idle EphemeralRunners that landed on burst-pool nodes, so
+# the cluster autoscaler can scale the burst nodes down
+# (docs/specs/2026-10-26-runner-burst-autoscaling-design.md, "Job protection and
+# idle-runner retirement"). The only change this workflow makes is deleting
+# EphemeralRunners, one at a time, through scripts/retire-idle-burst-runners.sh.
+#
+# Secrets (existing; no new secret):
+#   DO_TOKEN      doctl authentication, to save the cluster kubeconfig
+#   RUNNER_TOKEN  organization self-hosted runner read, the same secret
+#                 Deploy's trust-boundary verification uses for runner and
+#                 runner-group API reads (read as GH_TOKEN by the script)
+#   GITHUB_TOKEN  actions: read on this repository, for the in-flight check
+#
+# Reviewed-code rule:
+#   schedule           runs only reviewed main code: HEAD must equal github.sha
+#                      and github.ref must be refs/heads/main
+#   workflow_dispatch  requires expected_sha, which must equal the checked-out HEAD
+# The SHA and ref checks complete before the first doctl, kubectl or gh call, and HEAD is
+# checked again immediately before the deletion step.
+#
+# Concurrency (Ruling 28): Rebalance has its own non-cancelling group,
+# runner-rebalance, so it never queues behind a multi-hour fleet mutation or
+# displaces a pending run of one. Instead, every run (scheduled or dispatched)
+# first lists the runs of the fleet mutators (Deploy, Scale Runners, Node Pool
+# Sizing, Emergency Stop) and ends with a "nothing to rebalance" notice when
+# any of them is queued or running. Otherwise it still takes the gate, and the
+# retirement script compares identities before every deletion, so a mutation
+# that starts during a Rebalance run stops it fail-closed.
+#
+# Skips (Ruling 29): scheduled runs end successfully with a "nothing to
+# rebalance" notice only when the read-only status shows ARC density (any
+# burst pools) or drain with no burst pools. Every other state goes to the
+# rebalance gate, and a rejection fails the run. Dispatch runs always take the
+# gate. When the gate admits a stopped state (Emergency Stop, Ruling 26) or
+# reports the Emergency Stop marker (Ruling 33), the
+# run ends with a notice and retires nothing.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Exact commit SHA to run'
+        required: true
+        type: string
+
+concurrency:
+  group: runner-rebalance
+  cancel-in-progress: false
+
+env:
+  # CLUSTER_NAME = DO cluster NAME for `doctl ... kubeconfig save`; CLUSTER_CONTEXT
+  # = the generated kubeconfig context (do-<region>-<name>) for `use-context`.
+  # They are different strings; see deploy-runners.yml for the full note.
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
+  CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+
+# Use minimal permissions: actions: read lists this repository's workflow runs.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rebalance:
+    name: Rebalance Runners
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Explicit bash runs every step as "bash --noprofile --norc -eo pipefail",
+    # so a failing command inside a pipeline fails the step.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+        with:
+          install-jq: 'true'
+
+      - name: Validate run source and SHA
+        id: validate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_REF: ${{ github.ref }}
+          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          # Runs before any step that reads or changes the cluster.
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          case "${EVENT_NAME}" in
+            schedule)
+              if [ "${EVENT_REF}" != "refs/heads/main" ]; then
+                echo "❌ Error: scheduled runs execute only refs/heads/main, got '${EVENT_REF}'"
+                exit 1
+              fi
+              if [ "${ACTUAL_SHA}" != "${EVENT_SHA}" ]; then
+                echo "❌ Error: checked-out SHA ${ACTUAL_SHA} does not match github.sha ${EVENT_SHA}"
+                exit 1
+              fi
+              EXPECTED_SHA="${EVENT_SHA}"
+              ;;
+            workflow_dispatch)
+              if ! [[ "${INPUT_EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "❌ Error: expected_sha must be a 40-character commit SHA"
+                exit 1
+              fi
+              if [ "${INPUT_EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+                echo "❌ Error: expected_sha ${INPUT_EXPECTED_SHA} does not match checked-out SHA ${ACTUAL_SHA}"
+                exit 1
+              fi
+              EXPECTED_SHA="${INPUT_EXPECTED_SHA}"
+              ;;
+            *)
+              echo "❌ Error: unsupported event '${EVENT_NAME}'"
+              exit 1
+              ;;
+          esac
+          echo "expected_sha=${EXPECTED_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "✅ ${EVENT_NAME} at ${ACTUAL_SHA}"
+
+      - name: Check for in-flight fleet mutations
+        id: inflight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read-only. A failed read fails the run (pipefail) before any
+          # cluster access. GITHUB_REPOSITORY is set by the runner.
+          ACTIVE=""
+          for WORKFLOW in deploy-runners.yml scale-runners.yml node-pool-sizing.yml emergency-stop.yml; do
+            for STATUS in queued in_progress waiting pending requested; do
+              COUNT=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs?status=${STATUS}&per_page=1" \
+                | jq -er '.total_count | numbers')
+              if [ "${COUNT}" -gt 0 ]; then
+                ACTIVE="${ACTIVE:+${ACTIVE}, }${WORKFLOW} ${STATUS}"
+              fi
+            done
+          done
+          if [ -n "${ACTIVE}" ]; then
+            echo "busy=true" >> "${GITHUB_OUTPUT}"
+            NOTICE="nothing to rebalance: a fleet mutation is queued or running (${ACTIVE})"
+            {
+              echo "## Rebalance Runners"
+              echo ""
+              echo "${NOTICE}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "${NOTICE}"
+          else
+            echo "✅ No fleet mutation is queued or running"
+          fi
+
+      - name: Configure Kubernetes access
+        if: steps.inflight.outputs.busy != 'true'
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+        run: |
+          if [ -z "${DO_TOKEN}" ]; then
+            echo "❌ Error: DO_TOKEN secret is not set!"
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3: Configuring doctl..."
+            if doctl auth init --access-token "${DO_TOKEN}" > /dev/null; then
+              echo "✅ DigitalOcean authentication configured"
+              break
+            elif [ "${attempt}" = "3" ]; then
+              echo "❌ Error: Failed to authenticate with DigitalOcean"
+              exit 1
+            else
+              echo "⚠️ Authentication failed, retrying in 5s..."
+              sleep 5
+            fi
+          done
+          # kubeconfig save takes the cluster NAME; use-context takes the context.
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
+          kubectl config use-context "${CLUSTER_CONTEXT}"
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          if [ "${CURRENT_CONTEXT}" != "${CLUSTER_CONTEXT}" ]; then
+            echo "❌ Error: kubectl context is '${CURRENT_CONTEXT}', expected '${CLUSTER_CONTEXT}'"
+            exit 1
+          fi
+          echo "✅ kubectl context is ${CURRENT_CONTEXT}"
+
+      - name: Check whether there is anything to rebalance
+        id: probe
+        if: github.event_name == 'schedule' && steps.inflight.outputs.busy != 'true'
+        run: |
+          # Scheduled runs only (Ruling 29): ARC density (whatever the burst
+          # pools) or drain with no burst pools has no burst capacity to
+          # rebalance, which is not a failure. A failed read fails the step.
+          # Every other state continues to the rebalance admission gate,
+          # which rejects everything it does not admit.
+          STATE_LINE=$(./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" --operation status | grep -E '^STATE: ')
+          echo "${STATE_LINE}"
+          if [[ "${STATE_LINE}" == "STATE: arc=density "* ]] \
+            || [[ "${STATE_LINE}" == "STATE: arc=drain pools=none "* ]]; then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## Rebalance Runners"
+              echo ""
+              echo "nothing to rebalance: ${STATE_LINE#STATE: }"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "nothing to rebalance: ${STATE_LINE#STATE: }"
+          fi
+
+      - name: Admit pool state and record identities
+        id: admit
+        if: steps.inflight.outputs.busy != 'true' && steps.probe.outputs.skip != 'true'
+        run: |
+          GATE_OUT=$(./scripts/verify-runner-pool-state.sh \
+            --cluster-name "${CLUSTER_NAME}" \
+            --operation rebalance \
+            --emit-identities "${RUNNER_TEMP}/pool-identities.json")
+          echo "${GATE_OUT}"
+          STATE_LINE=$(grep -E '^STATE: ' <<<"${GATE_OUT}")
+          # Emergency Stop's stopped states are admitted (Ruling 26), and the
+          # stop marker counts as stopped whatever the release reads (Ruling
+          # 33): there is nothing to retire, so the run ends with a notice.
+          NOTICE=""
+          if [[ "${STATE_LINE}" =~ ^STATE:\ arc=(burst|density|drain)-stopped\  ]]; then
+            NOTICE="nothing to rebalance: ARC is stopped (${STATE_LINE#STATE: }); Emergency Stop is in effect"
+          elif grep -qE '^STOP: ' <<<"${GATE_OUT}"; then
+            NOTICE="nothing to rebalance: the Emergency Stop marker is present (${STATE_LINE#STATE: }); Emergency Stop is in effect"
+          fi
+          if [ -n "${NOTICE}" ]; then
+            echo "stopped=true" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## Rebalance Runners"
+              echo ""
+              echo "${NOTICE}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "${NOTICE}"
+          fi
+
+      - name: Retire idle burst runners
+        if: >-
+          steps.inflight.outputs.busy != 'true' && steps.probe.outputs.skip != 'true'
+          && steps.admit.outputs.stopped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          EXPECTED_SHA: ${{ steps.validate.outputs.expected_sha }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "❌ Error: RUNNER_TOKEN secret is not set!"
+            exit 1
+          fi
+          # Re-check the SHA immediately before the step that deletes.
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Error: checked-out SHA changed after validation"
+            exit 1
+          fi
+          ./scripts/retire-idle-burst-runners.sh \
+            --identities "${RUNNER_TEMP}/pool-identities.json" \
+            | tee "${RUNNER_TEMP}/retire.log"
+          {
+            echo "## Rebalance Runners"
+            echo ""
+            tail -n 1 "${RUNNER_TEMP}/retire.log"
+          } >> "${GITHUB_STEP_SUMMARY}"

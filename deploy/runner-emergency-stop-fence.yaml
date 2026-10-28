@@ -1,0 +1,73 @@
+# Emergency Stop server-side fence (Ruling 36,
+# docs/specs/2026-10-26-runner-burst-autoscaling-design.md, "Emergency Stop
+# fence"). Emergency Stop writes the marker ConfigMap
+# arc-runners/runner-fleet-emergency-stop before its Helm write. While that
+# ConfigMap exists, this policy makes the API server deny every CREATE or
+# UPDATE of an AutoscalingRunnerSet in arc-runners unless it keeps
+# maxRunners=0 and minRunners 0 (or absent). The marker is the policy's
+# parameter (paramRef); with no marker the binding allows everything
+# (parameterNotFoundAction: Allow), so the policy is inert outside a stop.
+#
+# The client-side fence in scripts/lib/fleet-ops.sh only runs after `helm`
+# returns in the writing process; a fleet run cancelled (or whose runner is
+# lost) after a stale Helm write never reaches it. This policy is enforced by
+# the API server for every writer, so such a write is denied instead.
+#
+# Emergency Stop's own write (0/0) is allowed. Only the main resource is
+# matched: "autoscalingrunnersets" does not match the status subresource, so
+# ARC's status updates are never denied. DELETE is not matched.
+#
+# Deploy `deploy` and `rollback` apply this file server-side before their Helm
+# write (server dry run first; the returned specs must equal this file's
+# specs exactly, so every field below is written in its defaulted form), and
+# every other fleet mutator's admission requires the live objects' specs to
+# equal it (scripts/lib/runner_stop_fence.py).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: runner-fleet-emergency-stop-fence
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: arc-runners
+    objectSelector: {}
+    resourceRules:
+      - apiGroups:
+          - actions.github.com
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - autoscalingrunnersets
+        scope: Namespaced
+  validations:
+    - expression: "has(object.spec.maxRunners) && object.spec.maxRunners == 0 && (!has(object.spec.minRunners) || object.spec.minRunners == 0)"
+      message: "runner-fleet-emergency-stop-fence: an Emergency Stop is in effect (ConfigMap arc-runners/runner-fleet-emergency-stop exists); an AutoscalingRunnerSet may only be written with maxRunners=0 and minRunners=0 until Deploy deploy or rollback acknowledges the stop"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: runner-fleet-emergency-stop-fence
+spec:
+  policyName: runner-fleet-emergency-stop-fence
+  paramRef:
+    name: runner-fleet-emergency-stop
+    namespace: arc-runners
+    parameterNotFoundAction: Allow
+  validationActions:
+    - Deny
+  matchResources:
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: arc-runners
+    objectSelector: {}
