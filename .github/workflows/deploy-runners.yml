@@ -446,13 +446,19 @@ jobs:
           fi
           echo "✅ deploy/dind-values.yaml is the burst contract (2/20)"
 
-      - name: Render and preflight candidate
+      - name: Render and validate candidate
         if: needs.validate-inputs.outputs.operation == 'deploy'
         env:
           NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
           RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
           RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
+          # Local only (Codex PR #35 review 3 finding 1): render, burst-contract
+          # validation, the manifest hash gate and the preflight objects. Nothing
+          # here reaches the API server, so on an acknowledged recovery it runs
+          # before the Emergency Stop marker is deleted; the nonzero ASRS server
+          # dry run, which the fence would deny while the marker exists, runs in
+          # "Server-side preflight candidate" after the acknowledgement.
           echo "🔬 Rendering and validating the exact deployment candidate..."
           CANDIDATE="${RUNNER_TEMP}/runner-candidate.yaml"
           ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
@@ -522,6 +528,52 @@ jobs:
           with open(preflight_target, "w", encoding="utf-8") as stream:
               yaml.safe_dump(preflight, stream, sort_keys=False)
           PY
+          echo "✅ Candidate rendered and validated as burst 2/20"
+
+      - name: Acknowledge Emergency Stop
+        if: needs.validate-inputs.outputs.acknowledge_emergency_stop == 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
+        run: |
+          # Runs after the local render and validation and before any nonzero
+          # ASRS server dry run (Codex PR #35 review 3 finding 1).
+          # Ruling 33: delete the Emergency Stop marker, bracketed (compare,
+          # acknowledged admission, delete with the read uid/resourceVersion as
+          # preconditions, compare), before the first write. Later admissions
+          # run without the acknowledgement, so a newer stop refuses them.
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA"
+            exit 1
+          fi
+          # shellcheck source=/dev/null
+          source scripts/lib/fleet-ops.sh
+          fleet_acknowledge_stop "${RUNNER_TEMP}/pool-identities.json" deploy
+
+      - name: Server-side preflight candidate
+        if: needs.validate-inputs.outputs.operation == 'deploy'
+        env:
+          NAMESPACE: ${{ needs.validate-inputs.outputs.namespace }}
+          RUNNER_IMAGE: ${{ needs.validate-inputs.outputs.runner_image }}
+        run: |
+          # Server dry runs of the rendered ASRS (as a differently named
+          # object) and a representative Pod. The Emergency Stop fence (Ruling
+          # 36) judges dry runs like real writes, so on an acknowledged
+          # recovery this runs only after "Acknowledge Emergency Stop" deleted
+          # the marker and waited until the fence allows nonzero writes. If it
+          # fails there, nothing was written to the release: the fleet stays
+          # 0/0 without a marker (runbook, "Emergency Stop").
+          ASRS="${RUNNER_TEMP}/runner-candidate-asrs.yaml"
+          PREFLIGHT_ASRS="${RUNNER_TEMP}/runner-preflight-asrs.yaml"
+          ADMITTED_ASRS="${RUNNER_TEMP}/runner-admitted-asrs.json"
+          REPRESENTATIVE_POD="${RUNNER_TEMP}/runner-representative-pod.json"
+          ADMITTED_POD="${RUNNER_TEMP}/runner-admitted-pod.json"
+          umask 077
+          for FILE in "${ASRS}" "${PREFLIGHT_ASRS}" "${RUNNER_TEMP}/runner-candidate.sha256"; do
+            if [ ! -s "${FILE}" ]; then
+              echo "❌ Error: ${FILE} from 'Render and validate candidate' is missing"
+              exit 1
+            fi
+          done
 
           kubectl apply --server-side --force-conflicts --dry-run=server \
             -f "${PREFLIGHT_ASRS}" -o json > "${ADMITTED_ASRS}"
@@ -932,24 +984,6 @@ jobs:
               raise SystemExit("admitted representative Pod request changed")
           PY
           echo "✅ Live API compatibility and admitted-request preflight passed"
-
-
-      - name: Acknowledge Emergency Stop
-        if: needs.validate-inputs.outputs.acknowledge_emergency_stop == 'true'
-        env:
-          EXPECTED_SHA: ${{ needs.validate-inputs.outputs.expected_sha }}
-        run: |
-          # Ruling 33: delete the Emergency Stop marker, bracketed (compare,
-          # acknowledged admission, delete with the read uid/resourceVersion as
-          # preconditions, compare), before the first write. Later admissions
-          # run without the acknowledgement, so a newer stop refuses them.
-          if [ "$(git rev-parse HEAD)" != "${EXPECTED_SHA}" ]; then
-            echo "❌ Error: expected_sha ${EXPECTED_SHA} does not match checked-out SHA"
-            exit 1
-          fi
-          # shellcheck source=/dev/null
-          source scripts/lib/fleet-ops.sh
-          fleet_acknowledge_stop "${RUNNER_TEMP}/pool-identities.json" deploy
 
       - name: Dry-run Emergency Stop fence
         run: |

@@ -2222,9 +2222,12 @@ for job in jobs.values():
     for step in job.get('steps', []):
         if '${{ github.event.inputs.' in step.get('run', ''):
             raise SystemExit(f'raw workflow_dispatch input interpolation in shell step: {step.get("name")}')
-preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and preflight candidate')
+render_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Render and validate candidate')
+preflight_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Server-side preflight candidate')
 deploy_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Deploy runners')
-preflight = steps[preflight_index].get('run', '')
+preflight = steps[render_index].get('run', '') + steps[preflight_index].get('run', '')
+if '--dry-run=server' in steps[render_index].get('run', '') or not render_index < preflight_index:
+    raise SystemExit('the render step must be local and precede the server-side preflight')
 deploy_shell = steps[deploy_index].get('run', '')
 rollback_steps = jobs.get('rollback', {}).get('steps', [])
 rollback = next(step for step in rollback_steps if step.get('name') == 'Roll back to committed density values').get('run', '')
@@ -2325,7 +2328,9 @@ run_deploy_preflight_fixture() {  # dry-run fail, memory Mi, CPU m, admission mu
     local script="$FIXTURE_DIR/deploy-preflight.sh"
     : > "$script"
     materialize_workflow_step .github/workflows/deploy-runners.yml \
-      'Render and preflight candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+      'Render and validate candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
+    materialize_workflow_step .github/workflows/deploy-runners.yml \
+      'Server-side preflight candidate' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
     materialize_workflow_step .github/workflows/deploy-runners.yml \
       'Deploy runners' "$FIXTURE_ACTUAL_SHA" 4 2 2 "$script" || return 1
     : > "$FIXTURE_DIR/preflight-calls"
@@ -3358,7 +3363,8 @@ steps = deploy['jobs']['deploy']['steps']
 names = [step['name'] for step in steps]
 if not (names.index('Admit pool state and record identities')
         < names.index('Validate committed burst values')
-        < names.index('Render and preflight candidate')
+        < names.index('Render and validate candidate')
+        < names.index('Server-side preflight candidate')
         < names.index('Deploy runners')):
     raise SystemExit('Deploy does not admit and validate the committed burst values before Helm')
 values_step = steps[names.index('Validate committed burst values')]['run']
@@ -3461,7 +3467,7 @@ if "operation == 'deploy'" not in str(deploy_job.get('if', '')):
     raise SystemExit('deployment job is not deploy-only')
 steps = deploy_job['steps']
 pre = next(i for i, item in enumerate(steps) if item.get('name') == 'Verify prepared platform prerequisites')
-render = next(i for i, item in enumerate(steps) if item.get('name') == 'Render and preflight candidate')
+render = next(i for i, item in enumerate(steps) if item.get('name') == 'Server-side preflight candidate')
 if pre >= render:
     raise SystemExit('prepared-platform checks do not precede ASRS dry-run')
 pre_shell = steps[pre]['run']

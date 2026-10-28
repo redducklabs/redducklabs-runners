@@ -417,6 +417,26 @@ does not wait for a running Deploy `drain` or Scale Runners Phase C (both hold
   to 30 s after deleting the marker until the fence allows writes; if it
   still denies, the run fails before writing: re-dispatch it (the marker is
   gone, so no acknowledgement is needed).
+- **Order of an acknowledged Deploy `deploy`.** The fence judges server-side
+  dry runs like real writes, so the nonzero ASRS compatibility preflight
+  cannot run while the marker exists. The run therefore does every local check
+  first ("Render and validate candidate": render, burst-contract validation,
+  manifest hash; the admission and `expected_sha` checks before it), then
+  "Acknowledge Emergency Stop" (preconditioned delete and the wait above),
+  then "Server-side preflight candidate", then the fence and NetworkPolicy
+  steps, the re-admission and Helm. Rollback renders and validates locally
+  before its acknowledgement and has no ASRS server dry run. Without the
+  acknowledgement the order is the same with the acknowledgement skipped.
+- **Stopped without a marker.** If anything after the acknowledgement fails
+  before the Helm write (the server-side preflight, the fence or NetworkPolicy
+  steps, a re-admission or identity comparison), nothing was written to the
+  release: the fleet stays at its stopped state (0/0) but the marker is gone,
+  so the server-side fence no longer holds it. Runner Status shows the
+  `*-stopped` state with no `STOP:` line. Fix the cause, then re-dispatch the
+  same recovery (Deploy `deploy` from `burst-stopped`, `rollback` from
+  `drain-stopped`/`density-stopped`); `acknowledge_emergency_stop` is not
+  needed and is a no-op without a marker. If the fleet must stay stopped
+  until then, re-dispatch Emergency Stop, which writes a new marker.
 
 Treat those failures as expected and recover from the stopped state:
 

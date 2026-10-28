@@ -1795,7 +1795,7 @@ assert_deploy_ops() {
     for scenario in drop-annotation annotation-true; do
         dir=$(fleet_dir "{\"arc\": \"arc-burst\", \"knobs\": {\"admission\": \"${scenario}\"}}" base arc-burst pools-open)
         run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "{\"operation\":\"deploy\",\"accept_privileged_runner_co_tenancy\":\"true\",\"expected_sha\":\"${FLEET_SHA}\"}"
-        expect_fleet "deploy with admission ${scenario}" $? 1 - arc-burst "STEP Render and preflight candidate: failure" "safe-to-evict" "$dir"
+        expect_fleet "deploy with admission ${scenario}" $? 1 - arc-burst "STEP Server-side preflight candidate: failure" "safe-to-evict" "$dir"
     done
 
     # deploy is not admitted without the burst pools or from drain.
@@ -2743,7 +2743,8 @@ assert "Check node pool capacity" not in names and not any("Bootstrap" in n for 
 prereq = steps[names.index("Verify prepared platform prerequisites")]["run"]
 assert "verify_arc_identity" in prereq and "scripts/lib/arc-identity.sh" in prereq
 assert "gha-rs-controller" not in prereq and "helm list" not in prereq, "inline ARC identity check is duplicated"
-preflight = steps[names.index("Render and preflight candidate")]["run"]
+preflight = steps[names.index("Render and validate candidate")]["run"] + steps[names.index("Server-side preflight candidate")]["run"]
+assert "--dry-run=server" not in steps[names.index("Render and validate candidate")]["run"], "the render step must stay local"
 assert "safe-to-evict" in preflight and '"annotations"' in preflight and "--contract burst --kind manifest" in preflight
 assert "get nodes" not in preflight and "get pods -A" not in preflight, "headroom belongs to the pool-state gate"
 
@@ -3311,7 +3312,7 @@ import yaml
 with open(sys.argv[1], encoding="utf-8") as stream:
     steps = yaml.safe_load(stream)["jobs"]["deploy"]["steps"]
 names = [step["name"] for step in steps]
-order = ["Render and preflight candidate", "Dry-run runner network policy", "Apply runner network policy",
+order = ["Render and validate candidate", "Dry-run runner network policy", "Apply runner network policy",
          "Verify runner network policy set", "Re-admit immediately before Helm", "Deploy runners"]
 indices = [names.index(name) for name in order]
 assert indices == sorted(indices), names
@@ -3689,12 +3690,15 @@ import yaml
 
 steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["jobs"]["deploy"]["steps"]
 names = [step["name"] for step in steps]
-order = ["Acknowledge Emergency Stop", "Dry-run Emergency Stop fence", "Apply Emergency Stop fence",
+order = ["Render and validate candidate", "Acknowledge Emergency Stop", "Server-side preflight candidate",
+         "Dry-run Emergency Stop fence", "Apply Emergency Stop fence",
          "Dry-run runner network policy", "Re-admit immediately before Helm", "Deploy runners"]
 indices = [names.index(name) for name in order]
 assert indices == sorted(indices), names
-assert "fleet_fence_dry_run" in steps[indices[1]]["run"]
-apply = steps[indices[2]]["run"]
+assert "--dry-run=server" not in steps[indices[0]]["run"] and "helm template" in steps[indices[0]]["run"]
+assert "--dry-run=server" in steps[indices[2]]["run"]
+assert "fleet_fence_dry_run" in steps[indices[3]]["run"]
+apply = steps[indices[4]]["run"]
 assert apply.index("git rev-parse HEAD") < apply.index('fleet_install_fence "${RUNNER_TEMP}/pool-identities.json" deploy')
 stop = yaml.safe_load(open(sys.argv[2], encoding="utf-8"))["jobs"]["emergency-stop"]["steps"]
 names = [step.get("name") for step in stop]
@@ -3825,6 +3829,48 @@ PY
     dir=$(fleet_dir '{"arc": "arc-burst", "knobs": {"fence_probe": "error"}}' base arc-burst pools-open)
     run_emergency_stop "$dir"
     expect_fleet "emergency stop whose fence probe errors" $? 1 stop-marker:set,helm-upgrade:stopped arc-burst-stopped "STEP Report fence failure: failure" "failed for another reason" "$dir"
+
+    # Codex PR #35 review 3 finding 1: recovery through the enforced fence.
+    # Emergency Stop runs for real (the fake API server enforces the fence,
+    # including for Deploy's nonzero ASRS server-side preflight); the
+    # acknowledged Deploy must delete the marker before that preflight.
+    dir=$(fleet_dir "$FLEET_IDLE_BURST" base arc-burst pools-open)
+    run_emergency_stop "$dir"
+    expect_fleet "enforced stop before an acknowledged recovery" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-burst-stopped "STEP Verify stop fence: success" - "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$DEPLOY_ACK_INPUTS"
+    expect_fleet "acknowledged deploy recovers an enforced burst-stopped fleet" $? 0 \
+        stop-marker:delete,probe:allowed,apply-fence,apply-netpol,helm-upgrade:burst arc-burst "STEP Verify Helm transition and burst readback: success" - "$dir"
+    if python3 - "$FLEET_OUT" <<'PY'
+import sys
+
+steps = [line.split(": ")[0][5:] for line in open(sys.argv[1], encoding="utf-8") if line.startswith("STEP ")]
+order = ["Render and validate candidate", "Acknowledge Emergency Stop", "Server-side preflight candidate",
+         "Dry-run Emergency Stop fence", "Deploy runners"]
+assert [steps.index(name) for name in order] == sorted(steps.index(name) for name in order), steps
+PY
+    then
+        pass "acknowledged deploy: local render and validation, then the acknowledgement, then the ASRS server-side preflight"
+    else
+        fail "acknowledged deploy ran its steps out of order ($(fleet_steps))"
+    fi
+    # Rollback renders and validates locally before its acknowledgement and
+    # has no ASRS server-side preflight; its recovery passes the enforced fence.
+    dir=$(fleet_dir "{\"arc\": \"arc-drain\", \"history\": ${FLEET_DENSITY_HISTORY}, \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}]}" base arc-drain)
+    run_emergency_stop "$dir"
+    expect_fleet "enforced stop on drain without pools" $? 0 stop-marker:set,probe:denied,helm-upgrade:stopped arc-drain-stopped - - "$dir"
+    run_fleet_workflow "$DEPLOY_WORKFLOW" "$dir" "$ROLLBACK_ACK_INPUTS"
+    expect_fleet "acknowledged rollback recovers an enforced drain-stopped fleet" $? 0 \
+        stop-marker:delete,probe:allowed,apply-fence,helm-upgrade:density arc-density "STEP Verify pool state after rollback: success" - "$dir"
+    # The fake judges ASRS server-side dry runs: with the marker present and
+    # the fence enforcing, a nonzero preflight is denied.
+    dir=$(fleet_dir "{\"arc\": \"arc-burst-stopped\", ${marker}}" base arc-burst-stopped pools-open)
+    printf '%s\n' '{"apiVersion": "actions.github.com/v1alpha1", "kind": "AutoscalingRunnerSet", "metadata": {"name": "redducklabs-runners-compatibility-preflight", "namespace": "arc-runners"}, "spec": {"minRunners": 2, "maxRunners": 20}}' > "${dir}/preflight-asrs.json"
+    if ! with_fakes "$dir" kubectl apply --server-side --force-conflicts --dry-run=server -f "${dir}/preflight-asrs.json" -o json > /dev/null 2> "${WORK_DIR}/preflight.err" \
+        && grep -q "ValidatingAdmissionPolicy 'runner-fleet-emergency-stop-fence'" "${WORK_DIR}/preflight.err"; then
+        pass "fleet fake: a nonzero ASRS server-side dry run is denied by the enforced fence while the marker exists"
+    else
+        fail "fleet fake accepted a nonzero ASRS dry run under the marker"
+    fi
 
     # An acknowledged deploy waits until the fence allows writes after the
     # delete; if it never does, nothing is written.

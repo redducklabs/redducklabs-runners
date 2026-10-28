@@ -79,6 +79,9 @@ The view lags the marker by knobs.fence_lag reads (each fence probe or Helm
 write admission is one read) after Emergency Stop's marker write or the
 acknowledged delete; an injected stop (knobs.stop_before) is complete, so its
 marker is already visible.
+  kubectl apply --server-side --dry-run=server -f <AutoscalingRunnerSet>
+    (Deploy's compatibility preflight, any name) is judged by the fence like a
+    real write: denied ("asrs-dry-run:denied") unless it is 0/0.
   kubectl patch autoscalingrunnersets.actions.github.com <name> -n arc-runners
     --type merge -p <maxRunners=1> --dry-run=server -o name
     the fence probe ("probe:denied" | "probe:allowed"): denied with the
@@ -756,6 +759,20 @@ def kubectl(directory, world, args):
     if args[:1] == ["apply"] and "--dry-run=server" in args:
         with open(option(args, "-f"), encoding="utf-8") as stream:
             document = yaml.safe_load(stream)
+        # Ruling 36: server-side dry runs go through admission, so the fence
+        # judges an AutoscalingRunnerSet dry run (whatever its name) as it
+        # judges a real write.
+        if document.get("kind") == "AutoscalingRunnerSet":
+            spec = document.get("spec") or {}
+            stopped = spec.get("maxRunners") == 0 and spec.get("minRunners", 0) == 0
+            denied = not stopped and fence_denies(world)
+            save(directory, "fleet.json", world)
+            if denied:
+                log(directory, "asrs-dry-run:denied")
+                name = (document.get("metadata") or {}).get("name")
+                print(f'Error from server (Forbidden): error when creating "{option(args, "-f")}": '
+                      f'autoscalingrunnersets.actions.github.com "{name}" is forbidden: {DENIAL}', file=sys.stderr)
+                return 1
         mutation = world["knobs"].get("admission", "none")
         if mutation != "none":
             if document.get("kind") == "Pod":

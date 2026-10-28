@@ -414,6 +414,23 @@ enforced by the API server:
   was chosen over letting the Helm write fail: a denied Helm upgrade inside
   the bracket is a failed write that needs review, while a dry-run poll writes
   nothing.
+- Ordering on the acknowledged path (PR #35 review 3 finding 1). Server-side
+  dry runs pass through admission, so while the marker exists the fence also
+  denies Deploy's nonzero ASRS compatibility preflight (any object name). The
+  fence makes no exception for dry runs or for the preflight name: Emergency
+  Stop's self-test relies on dry-run denial, and a name exemption would admit
+  a real ASRS of that name. Deploy `deploy` therefore splits its candidate
+  step: "Render and validate candidate" (local render, burst-contract
+  validation, manifest hash) runs after admission and the `expected_sha`
+  checks and before "Acknowledge Emergency Stop"; "Server-side preflight
+  candidate" (the ASRS and representative Pod dry runs) runs after it, then
+  the fence and NetworkPolicy steps, the re-admission and Helm, all inside
+  the identity bracket. Without the acknowledgement the order is unchanged
+  (the acknowledgement is skipped). Rollback renders and validates before its
+  acknowledgement and has no ASRS dry run. If a step after the acknowledgement
+  fails before the Helm write, nothing was written to the release: the fleet
+  stays stopped (0/0) without a marker, and the operator re-dispatches the
+  same recovery (or Emergency Stop, to restore the marker).
 - The client-side post-write re-check above stays as defense in depth.
 
 Residual risks: while the marker exists the API server also denies the ARC
