@@ -20,6 +20,13 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "A-compatibility-missing": {
+  "criteria": [
+   "A-compatibility"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-container-oomkilled": {
   "criteria": [
    "runner-health"

@@ -1,1 +1,1 @@
-.items |= map(if .metadata.name == "github-runners-burst-16g-p1q2r" then .metadata.creationTimestamp = "2026-10-26T11:30:00Z" | .spec.taints += [{"key": "node.cloudprovider.kubernetes.io/uninitialized", "value": "true", "effect": "NoSchedule"}] else . end)
+.items |= map(if .metadata.name == "github-runners-burst-amd-16g-p1q2r" then .metadata.creationTimestamp = "2026-10-26T11:30:00Z" | .spec.taints += [{"key": "node.cloudprovider.kubernetes.io/uninitialized", "value": "true", "effect": "NoSchedule"}] else . end)

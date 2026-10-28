@@ -199,13 +199,15 @@ helm template redducklabs-runners \
 ### Reviewed target: capacity, cost and diagnostics
 
 Each 13.32 GiB / 7880m runner node fits two 3 CPU / 5 GiB pods; a third does
-not fit. The baseline pool `github-runners-pool-16g` keeps two `s-8vcpu-16gb`
-nodes ($192/month). The burst pools `github-runners-burst-16g` (0..6) and
-`github-runners-burst-amd-16g` (0..2) are opened by Node Pool Sizing
-`enable-burst` and scale from zero with the cluster autoscaler, primary first
-(priority expander). The billed ceiling is 10 runner nodes ($992/month only if
-all ran all month); the estimate from measured demand is about $150/month of
-burst nodes. `scripts/runner-cost-report.sh --month YYYY-MM` reports measured
+not fit (measured on the baseline size; assumed for the burst sizes until
+acceptance Phases A and B measure them). The baseline pool
+`github-runners-pool-16g` keeps two `s-8vcpu-16gb` nodes ($192/month). The
+burst pools `github-runners-burst-amd-16g` (`s-8vcpu-16gb-amd`, 0..6) and
+`github-runners-burst-intel-16g` (`s-8vcpu-16gb-intel`, 0..2), $0.16667 per
+node-hour each, are opened by Node Pool Sizing `enable-burst` and scale from
+zero with the cluster autoscaler, primary first (priority expander). The
+billed ceiling is 10 runner nodes ($1,088/month only if all ran all month);
+the estimate from measured demand is about $175/month of burst nodes. `scripts/runner-cost-report.sh --month YYYY-MM` reports measured
 runner node-hours and cost from the DigitalOcean invoice. Runner Status reports
 burst node counts per pool and sanitized DOKS autoscaler `Backoff` diagnostics
 when its known provider text format is available; it reports diagnostics

@@ -14,15 +14,26 @@ such as "8 nodes - 16 GB / 8 vCPU / 320 GB SSD"; duration is node-hours. The
 same cluster also bills "pvc-... - 10.00GB Volume" and load-balancer lines.
 
 Attribution is therefore per cluster and node size, not per pool:
-  - 16 GB / 8 vCPU lines are runner nodes (baseline and primary burst share the
-    size string and cannot be split); a line whose description also says AMD is
-    the fallback burst size and is reported on its own;
+  - 16 GB / 8 vCPU lines are runner nodes. The baseline pool is s-8vcpu-16gb,
+    the primary burst pool s-8vcpu-16gb-amd and the fallback burst pool
+    s-8vcpu-16gb-intel: all three have the 16 GB / 8 vCPU / 320 GB shape. How
+    DigitalOcean words the AMD and Intel lines is not documented and no invoice
+    of this account has carried one, so every line of that shape counts as
+    runner cost, with or without a variant word before or after the size. A
+    line whose description says AMD is reported as the primary burst size, one
+    that says Intel as the fallback burst size, one that says both makes the
+    month unavailable; an unmarked line is the baseline (and burst nodes too,
+    if the invoice does not mark the variant);
   - 8 GB / 4 vCPU lines are worker nodes, reported separately and not as
     runner cost;
   - every other line of the cluster is summed as "other cluster items".
 Burst node-hours are derived: runner node-hours minus two baseline nodes for
 every hour of the invoice period (floor 0); estimated burst cost is those hours
-at the average runner price per node-hour.
+at the average runner price per node-hour. Burst sizes cost $0.16667/node-hour
+against $0.14286 for the baseline size, so the average understates burst cost
+(by more once the baseline is billed at its monthly cap, which lowers its
+effective hourly rate); marked AMD/Intel lines show the measured burst cost
+directly.
 
 Output is one of: the table for a completed month; the ACCOUNT-WIDE
 month-to-date usage for the month in progress (not itemized by DigitalOcean);
@@ -43,7 +54,8 @@ from decimal import Decimal, InvalidOperation
 MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 CLUSTER_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-NODE_RE = re.compile(r"^\d+ nodes? - (\d+) GB / (\d+) vCPU\b(.*)$")
+NODE_RE = re.compile(r"^\d+ nodes? - (?:(.*?)\s)?(\d+) GB / (\d+) vCPU\b(.*)$")
+RUNNER_LINES = ("runner", "runner_amd", "runner_intel")
 DEFAULT_CLUSTER = "redducklabs-cluster"
 BASELINE_NODES = 2
 CENT = Decimal("0.01")
@@ -120,12 +132,20 @@ def add(total, item, with_hours=True):
     total["lines"] += 1
 
 
+def runner_line(variant_text):
+    """The runner total a 16 GB / 8 vCPU line belongs to, from the words around the size."""
+    words = set(re.findall(r"[A-Z]+", variant_text.upper()))
+    if "AMD" in words and "INTEL" in words:
+        raise Unavailable("a cluster runner-size line names both AMD and Intel")
+    return "runner_amd" if "AMD" in words else "runner_intel" if "INTEL" in words else "runner"
+
+
 def cluster_costs(month, cluster):
     document = doctl_json(["invoice", "get", invoice_uuid(month)])
     items = document.get("invoice_items") if isinstance(document, dict) else None
     if not isinstance(items, list):
         raise Unavailable(f"the invoice for {month} has no itemization")
-    totals = {"runner": empty(), "runner_amd": empty(), "worker": empty(), "other": empty()}
+    totals = {"runner": empty(), "runner_amd": empty(), "runner_intel": empty(), "worker": empty(), "other": empty()}
     for item in items:
         if not isinstance(item, dict) or item.get("product") != "Kubernetes Clusters":
             continue
@@ -133,14 +153,14 @@ def cluster_costs(month, cluster):
             continue
         description = item.get("description")
         match = NODE_RE.match(description) if isinstance(description, str) else None
-        size = (match.group(1), match.group(2)) if match else None
+        size = (match.group(2), match.group(3)) if match else None
         if size == ("16", "8"):
-            add(totals["runner_amd" if "AMD" in match.group(3).upper() else "runner"], item)
+            add(totals[runner_line(f"{match.group(1) or ''} {match.group(4)}")], item)
         elif size == ("8", "4"):
             add(totals["worker"], item)
         else:
             add(totals["other"], item, with_hours=False)
-    if not totals["runner"]["lines"] and not totals["runner_amd"]["lines"]:
+    if not any(totals[line]["lines"] for line in RUNNER_LINES):
         raise Unavailable(f"the invoice for {month} has no runner-size (16 GB / 8 vCPU) line for cluster {cluster}")
     return totals
 
@@ -148,24 +168,26 @@ def cluster_costs(month, cluster):
 def table(month, cluster, totals):
     year, number = (int(part) for part in month.split("-"))
     period_hours = calendar.monthrange(year, number)[1] * 24
-    runner_hours = totals["runner"]["hours"] + totals["runner_amd"]["hours"]
-    runner_usd = totals["runner"]["usd"] + totals["runner_amd"]["usd"]
+    runner_hours = sum(totals[line]["hours"] for line in RUNNER_LINES)
+    runner_usd = sum(totals[line]["usd"] for line in RUNNER_LINES)
     if runner_hours <= 0:
         raise Unavailable(f"the runner-size lines of the invoice for {month} have no hours")
     burst_hours = max(Decimal(0), runner_hours - BASELINE_NODES * period_hours)
     burst_usd = burst_hours * (runner_usd / runner_hours)
     lines = [
         f"Runner cost for {month}, cluster {cluster} (DigitalOcean invoice; includes nodes that no longer exist)",
-        "Granularity is per cluster and node size, not per pool: baseline and primary burst nodes share one size line.",
+        "Granularity is per cluster and node size, not per pool; burst lines are split out only where the invoice marks AMD or Intel.",
         f"{'LINE':<56} {'HOURS':>10} {'USD':>10}",
     ]
 
     def row(label, total):
         lines.append(f"{label:<56} {money(total['hours']):>10} {money(total['usd']):>10}")
 
-    row("runner 16 GB / 8 vCPU (baseline + primary burst)", totals["runner"])
+    row("runner 16 GB / 8 vCPU (baseline; unmarked burst)", totals["runner"])
     if totals["runner_amd"]["lines"]:
-        row("runner 16 GB / 8 vCPU AMD (fallback burst)", totals["runner_amd"])
+        row("runner 16 GB / 8 vCPU AMD (primary burst)", totals["runner_amd"])
+    if totals["runner_intel"]["lines"]:
+        row("runner 16 GB / 8 vCPU Intel (fallback burst)", totals["runner_intel"])
     lines.append(f"{'RUNNER TOTAL':<56} {money(runner_hours):>10} {money(runner_usd):>10}")
     if totals["worker"]["lines"]:
         row("worker 8 GB / 4 vCPU (not runner cost)", totals["worker"])

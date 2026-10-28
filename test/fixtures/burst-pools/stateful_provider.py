@@ -38,8 +38,8 @@ import sys
 
 NOT_HANDLED = 100
 POOL_IDS = {
-    "github-runners-burst-16g": "3e9d7b20-8c4f-4d1a-a6e5-71f2c0b9d802",
-    "github-runners-burst-amd-16g": "9a4b2c6d-1e3f-4a5b-8c7d-0e1f2a3b4c03",
+    "github-runners-burst-amd-16g": "3e9d7b20-8c4f-4d1a-a6e5-71f2c0b9d802",
+    "github-runners-burst-intel-16g": "9a4b2c6d-1e3f-4a5b-8c7d-0e1f2a3b4c03",
 }
 CLUSTER_TAG = "k8s:c4e1f0a2-6b3d-4f58-9a07-1d2e3f4a5b60"
 

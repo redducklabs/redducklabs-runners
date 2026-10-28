@@ -41,9 +41,9 @@
       "apiVersion": "v1",
       "kind": "Node",
       "metadata": {
-        "name": "github-runners-burst-16g-p1q2r",
+        "name": "github-runners-burst-amd-16g-p1q2r",
         "labels": {
-          "doks.digitalocean.com/node-pool": "github-runners-burst-16g"
+          "doks.digitalocean.com/node-pool": "github-runners-burst-amd-16g"
         }
       },
       "status": {
@@ -59,9 +59,9 @@
       "apiVersion": "v1",
       "kind": "Node",
       "metadata": {
-        "name": "github-runners-burst-amd-16g-s3t4u",
+        "name": "github-runners-burst-intel-16g-s3t4u",
         "labels": {
-          "doks.digitalocean.com/node-pool": "github-runners-burst-amd-16g"
+          "doks.digitalocean.com/node-pool": "github-runners-burst-intel-16g"
         }
       },
       "status": {

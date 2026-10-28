@@ -1,1 +1,1 @@
-map(select(.name != "github-runners-burst-16g"))
+map(select(.name != "github-runners-burst-amd-16g"))

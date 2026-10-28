@@ -16,11 +16,14 @@ commit, passed as `expected_sha`; nothing here is done from a workstation.
 | Pool | Size | min | max | Role | Cost |
 |---|---|---|---|---|---|
 | `github-runners-pool-16g` | `s-8vcpu-16gb` | 2 | 2 (`count=2`) | baseline, two warm runners | $192/month fixed |
-| `github-runners-burst-16g` | `s-8vcpu-16gb` | 0 | 6 | primary burst (priority 100) | $0.143/node-hour |
-| `github-runners-burst-amd-16g` | `s-8vcpu-16gb-amd` | 0 | 2 | fallback burst (priority 50) | $0.167/node-hour |
+| `github-runners-burst-amd-16g` | `s-8vcpu-16gb-amd` | 0 | 6 | primary burst (priority 100) | $0.16667/node-hour |
+| `github-runners-burst-intel-16g` | `s-8vcpu-16gb-intel` | 0 | 2 | fallback burst (priority 50) | $0.16667/node-hour |
 
-The burst maxima sum to at most 8, so the autoscaler can never run more than
-10 runner nodes (worst case $992/month if every node ran all month). ARC runs
+The burst pools deliberately avoid the baseline's `s-8vcpu-16gb`: on
+2026-10-28 DigitalOcean refused to create a pool of that size in `sfo3`
+(spec "Burst pool sizes (Ruling 38)"). The burst maxima sum to at most 8, so
+the autoscaler can never run more than 10 runner nodes (worst case
+$1,088/month if every node ran all month). ARC runs
 `minRunners=2`, `maxRunners=20`: two warm runners prefer baseline (weight-100
 affinity) and every runner pod carries
 `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, so a node with a job
@@ -110,6 +113,35 @@ the period (DigitalOcean does not itemize per pool).
   pool, `create-burst` stops and creates nothing further. Stop the rollout and
   re-plan. Never work around it with `min_nodes=1`: that is a permanent cost
   floor the design rejects. Recover with `remove-burst` if one pool was created.
+- **Regional capacity (`422 ... region has insufficient capacity for requested
+  worker pool for slug: <size>`).** DigitalOcean checks regional stock for the
+  size even for a closed (`0/0`) pool. `create-burst` fails with `RESULT:
+  failed: create closed pool <name> failed (exit 1; identities unchanged); no
+  further mutation`; nothing is created by that call. Read `PLAN`/`RESULT` to
+  see whether the other burst pool was created earlier in the run (recover
+  with `remove-burst` if the rollout stops). Do not swap in another size from a
+  workstation or a workflow input: pool sizes are fixed in
+  `scripts/lib/runner_pool_state.py`, and a different size is a reviewed
+  re-plan (Ruling 38 replaced `s-8vcpu-16gb` this way). Retrying the same
+  run later is safe; it re-admits and is a no-op for pools that already exist.
+- **Baseline node replacement during a shortage.** The baseline pool still
+  uses `s-8vcpu-16gb`. Its two existing nodes are unaffected, but if DOKS
+  replaces one (node repair, recycle or a cluster upgrade) the new droplet
+  can hit the same shortage. What you see: the pool-state check (Runner Status
+  and every fleet mutation) reports `baseline pool must have exactly two Ready
+  nodes; found 1 Ready of ...` (or the maintenance check fails while a surge
+  node is pending), so every fleet mutation fails closed; jobs keep running on the
+  remaining baseline node and, while burst is open, on the AMD/Intel burst
+  pools, which can absorb the warm runners that no longer fit on baseline. What
+  you do: nothing in these workflows changes the baseline pool, so do not try
+  to fix it with them. Check `doctl kubernetes cluster node-pool get
+  redducklabs-cluster github-runners-pool-16g` (read-only) for a node that
+  stays not running, and look for the same capacity text in its status. If
+  the fleet must shrink while you wait, Deploy `drain` is refused by the same
+  gate; use Emergency Stop. Once DigitalOcean provides the droplet the gate
+  passes again. If the shortage persists, moving the baseline to another size
+  is a reviewed re-plan of the spec (new pool, `count=2`, and new baseline
+  identities), not a runbook action.
 - **Fork-PR policy read.** `prepare-trust-boundary` re-reads
   `GET /repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos`
   for every member with `RUNNER_TOKEN`, which therefore needs repository
@@ -292,8 +324,8 @@ anchor runs; a rejected anchor run still cancels the verified probe.
 
 | Phase | Setup | Probe | Evidence dispatch | Pass criteria |
 |---|---|---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=16`, `network_targets` | `phase=A`, probe | 16 distinct concurrent runners; exactly 4 on baseline; every burst node in the primary pool; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
-| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=8` | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 4 runners on baseline and 4 on exactly two new fallback nodes; a passing pool-state check (compatibility, headroom) covering both fallback nodes; primary back at 0/6; pickup thresholds |
+| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=16`, `network_targets` | `phase=A`, probe | 16 distinct concurrent runners; exactly 4 on baseline; every burst node in the primary pool; `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
+| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=8` | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 4 runners on baseline and 4 on exactly two new fallback nodes; a passing pool-state check (compatibility, headroom) covering both fallback nodes, the first live measurement of `s-8vcpu-16gb-intel` allocatable; primary back at 0/6; pickup thresholds |
 | C. Idle retirement and return to zero | after A, pools at 0 nodes | none | dispatch Scale Runners `acceptance-phase-c`, then `phase=C`, `phase_c_run_id` | every cycle 4 baseline + 4 burst at minRunners=8 with nothing retired; a burst survivor retired (or three cycles recorded `fixture-only`, which passes with a tracked follow-up); burst pools at zero nodes within 60 minutes; `jobs_killed=0` (fleet jobs, on `redducklabs-runners-*` runners, cancelled or failed with `completed_at` inside the Phase C run, in every attempt of every workflow run created up to 65 days before it, measured by the evidence workflow); ARC `burst` |
 | D. Drain under continuing load | after C | `continuous` | start the probe, wait until about 12 entries run, dispatch Deploy `drain`, then `phase=D`, probe, `drain_run_id` | drain run is this repository's Deploy `drain` at `$SHA`, success; ≥ 8 entries in progress when its "Drain runners" step started; ≥ 1 in progress throughout until it completed; entries still queued or running when it completed; every entry succeeded; every scheduled runner pod created after the drain READBACK is on baseline (pods never seen scheduled are reported, not failed); no `TriggeredScaleUp` for a runner pod after it; burst pools at zero nodes; ARC `drain` |
 | E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` | `phase=E`, probe, `rollback_run_id`, `baseline_run_id` | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline, observed in the evidence workflow's final collection (`latest_collection_at`): Running, Ready, not terminating and idle; smoke run passes; prints `READY_FOR_MIGRATION=true` |
@@ -495,3 +527,9 @@ starting the next step.
 | | 5C | Scale Runners `acceptance-phase-c` + evidence | | | result `retired` / `fixture-only` |
 | | 5D | Deploy `drain` + evidence | | | |
 | | 5E | `remove-burst`, `rollback`, steps 3–4, evidence | | | `READY_FOR_MIGRATION=` |
+
+2026-10-28, first attempt at main `badfb93`: steps 1 and 2 passed; step 3
+`create-burst` apply failed twice (Node Pool Sizing runs 40647394663 and
+40647530519) with the regional-capacity 422 for `s-8vcpu-16gb`; nothing was
+created and ARC stayed `density`. The burst sizes were re-planned (Ruling 38).
+Start again from step 1 at the new reviewed commit.

@@ -5,9 +5,9 @@ name: Node Pool Sizing
 #
 # Pools (docs/specs/2026-10-26-runner-burst-autoscaling-design.md, "Node pools
 # and the aggregate ceiling"):
-#   github-runners-pool-16g       s-8vcpu-16gb      baseline, min=max=count=2 (never changed here)
-#   github-runners-burst-16g      s-8vcpu-16gb      primary burst, 0..6
-#   github-runners-burst-amd-16g  s-8vcpu-16gb-amd  fallback burst, 0..2
+#   github-runners-pool-16g         s-8vcpu-16gb        baseline, min=max=count=2 (never changed here)
+#   github-runners-burst-amd-16g    s-8vcpu-16gb-amd    primary burst, 0..6
+#   github-runners-burst-intel-16g  s-8vcpu-16gb-intel  fallback burst, 0..2
 # The burst maxima sum to at most 8.
 #
 # Operations:
@@ -41,12 +41,12 @@ on:
           - set-burst-maxima
           - remove-burst
       primary_max:
-        description: 'set-burst-maxima only: github-runners-burst-16g max_nodes (0..6)'
+        description: 'set-burst-maxima only: github-runners-burst-amd-16g max_nodes (0..6)'
         required: false
         default: ''
         type: string
       fallback_max:
-        description: 'set-burst-maxima only: github-runners-burst-amd-16g max_nodes (0..2)'
+        description: 'set-burst-maxima only: github-runners-burst-intel-16g max_nodes (0..2)'
         required: false
         default: ''
         type: string

@@ -548,7 +548,8 @@ valid-burst-mixed|drain|0|STATE: arc=burst pools=both burst=open
 valid-burst-mixed|deploy|0|STATE: arc=burst pools=both burst=open
 valid-burst-mixed|remove-burst|1|registered node
 unknown-eligible-pool|status|1|unknown eligible pool 'github-runners-extra-16g'
-wrong-size|status|1|size is 's-8vcpu-16gb-intel'
+legacy-burst-16g-pool|create-burst|1|unknown eligible pool 'github-runners-burst-16g'
+wrong-size|status|1|size is 's-8vcpu-16gb'
 missing-taint|status|1|taints are not exactly github-runner=true:NoSchedule
 extra-noschedule-taint|status|1|extra NoSchedule/NoExecute taint 'dedicated'
 taint-capitalized|status|0|STATE: arc=burst pools=both burst=open
@@ -611,14 +612,14 @@ burst-ready-uninitialized-30min|status|1|extra NoSchedule/NoExecute taint 'node.
 burst-ready-not-ready-taint-40min|status|1|extra NoSchedule/NoExecute taint 'node.kubernetes.io/not-ready'
 burst-notready-uninitialized-10min|status|0|STATE: arc=burst pools=both burst=open
 burst-unreachable-10min|status|1|extra NoSchedule/NoExecute taint 'node.kubernetes.io/unreachable'
-wrong-size|deploy|1|size is 's-8vcpu-16gb-intel'
-base arc-density pool-primary-closed patch-primary-wrong-size|create-burst|1|size is 's-8vcpu-16gb-intel'
+wrong-size|deploy|1|size is 's-8vcpu-16gb'
+base arc-density pool-primary-closed patch-primary-wrong-size|create-burst|1|size is 's-8vcpu-16gb'
 base arc-density pool-primary-closed patch-primary-autoscale-off|create-burst|1|auto_scale must be true
 base arc-burst pools-open|create-burst|0|STATE: arc=burst pools=both burst=open
 base arc-drain pools-closed patch-primary-wrong-size|remove-burst|0|STATE: arc=drain pools=both burst=closed
 base arc-density pools-closed patch-primary-autoscale-off|remove-burst|0|STATE: arc=density pools=both burst=closed
 base arc-burst pools-closed patch-primary-wrong-size|remove-burst|1|does not admit ARC state 'burst'
-base arc-drain pools-closed patch-primary-wrong-size|status|1|size is 's-8vcpu-16gb-intel'
+base arc-drain pools-closed patch-primary-wrong-size|status|1|size is 's-8vcpu-16gb'
 remove-malformed-with-node|remove-burst|1|registered node
 base arc-burst pools-open patch-burst-maxima-1-1|acceptance-phase-c|1|exactly 0/6 and 0/2
 base arc-burst pools-open|acceptance-phase-c|0|STATE: arc=burst pools=both burst=open
@@ -626,7 +627,7 @@ pool-name-missing|status|1|missing or non-string name
 cli-pools-fail|status|1|REJECTED: 'doctl kubernetes cluster node-pool ...' failed with exit 1
 cli-pods-fail|status|1|REJECTED: 'kubectl get pods -A ...' failed with exit 1
 cli-manifest-fail|status|1|REJECTED: 'helm get manifest redducklabs-runners ...' failed with exit 1
-remove-runner-pod-in-pool|remove-burst|1|zero runner pods in 'github-runners-burst-16g'
+remove-runner-pod-in-pool|remove-burst|1|zero runner pods in 'github-runners-burst-amd-16g'
 base arc-burst-stopped pools-open|status|0|STATE: arc=burst-stopped pools=both burst=open
 base arc-burst-stopped pools-open|rebalance|0|STATE: arc=burst-stopped pools=both burst=open
 base arc-burst-stopped pools-open|deploy|0|STATE: arc=burst-stopped pools=both burst=open
@@ -773,10 +774,10 @@ assert snap["immutable"]["baseline_nodes"] == [
     {"uid": "a0b1c2d3-2222-4aaa-8bbb-000000000002", "providerID": "digitalocean://500000002"},
 ]
 assert set(snap["pools"]) == {"worker-pool", "github-runners-pool-16g",
-                              "github-runners-burst-16g", "github-runners-burst-amd-16g"}
+                              "github-runners-burst-amd-16g", "github-runners-burst-intel-16g"}
 for pool in snap["pools"].values():
     assert set(pool) == {"id", "size", "auto_scale", "min_nodes", "max_nodes", "labels", "taints"}, pool
-primary = snap["pools"]["github-runners-burst-16g"]
+primary = snap["pools"]["github-runners-burst-amd-16g"]
 assert primary["taints"] == [{"key": "github-runner", "value": "true", "effect": "NoSchedule"}]
 assert (primary["min_nodes"], primary["max_nodes"], primary["auto_scale"]) == (0, 6, True)
 arc = snap["arc"]
@@ -827,12 +828,12 @@ drift-baseline-node-uid|immutable.baseline_nodes:
 drift-baseline-provider-id|immutable.baseline_nodes:
 drift-values-hash|arc.values_sha256:
 drift-asrs-generation|arc.asrs_generation:
-drift-pool-max|pools.github-runners-burst-16g.max_nodes:
-drift-pool-min|pools.github-runners-burst-16g.min_nodes:
-drift-pool-autoscale|pools.github-runners-burst-16g.auto_scale:
-drift-pool-size|pools.github-runners-burst-16g.size:
-drift-pool-label|pools.github-runners-burst-16g.labels.workload-type:
-drift-pool-taint|pools.github-runners-burst-16g.taints:
+drift-pool-max|pools.github-runners-burst-amd-16g.max_nodes:
+drift-pool-min|pools.github-runners-burst-amd-16g.min_nodes:
+drift-pool-autoscale|pools.github-runners-burst-amd-16g.auto_scale:
+drift-pool-size|pools.github-runners-burst-amd-16g.size:
+drift-pool-label|pools.github-runners-burst-amd-16g.labels.workload-type:
+drift-pool-taint|pools.github-runners-burst-amd-16g.taints:
 DRIFT
 
     emit_snapshot "base arc-burst-acceptance-8 pools-open" acceptance-phase-c "$snap" \
@@ -902,29 +903,29 @@ assert_pool_state_transitions() {
     [ -f "$POOL_STATE_GATE" ] || { fail "scripts/verify-runner-pool-state.sh does not exist"; return; }
     local none="base arc-density"
     expect_transition "$none" create-burst "base arc-density created-primary-max6" \
-        pool-created:github-runners-burst-16g:s-8vcpu-16gb:0/0 3 "github-runners-burst-16g.max_nodes: expected=0 live=6"
+        pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-amd:0/0 3 "github-runners-burst-amd-16g.max_nodes: expected=0 live=6"
     expect_transition "$none" create-burst "base arc-density created-primary-no-label" \
-        pool-created:github-runners-burst-16g:s-8vcpu-16gb:0/0 3 "github-runners-burst-16g.labels.workload-type: expected"
+        pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-amd:0/0 3 "github-runners-burst-amd-16g.labels.workload-type: expected"
     expect_transition "$none" create-burst "base arc-density created-primary-autoscale-off" \
-        pool-created:github-runners-burst-16g:s-8vcpu-16gb:0/0 3 "github-runners-burst-16g.auto_scale: expected=true live=false"
+        pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-amd:0/0 3 "github-runners-burst-amd-16g.auto_scale: expected=true live=false"
     expect_transition "$none" create-burst "base arc-density pools-closed" \
-        pool-created:github-runners-burst-16g:s-8vcpu-16gb:0/0 3 "pools.github-runners-burst-amd-16g: unexpected"
+        pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-amd:0/0 3 "pools.github-runners-burst-intel-16g: unexpected"
     expect_transition "$none" create-burst "base arc-density pool-primary-closed" \
-        pool-created:github-runners-burst-16g:s-8vcpu-16gb-amd:0/0 2 "is not the size of"
+        pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-intel:0/0 2 "is not the size of"
     expect_transition "base arc-burst pools-closed" enable-burst "base arc-burst bounds-primary-0-5" \
-        pool-bounds:github-runners-burst-16g:0/6 3 "github-runners-burst-16g.max_nodes: expected=6 live=5"
+        pool-bounds:github-runners-burst-amd-16g:0/6 3 "github-runners-burst-amd-16g.max_nodes: expected=6 live=5"
     expect_transition "base arc-burst pools-closed" enable-burst "base arc-burst enable-stage-middle" \
-        pool-bounds:github-runners-burst-16g:0/6 0
+        pool-bounds:github-runners-burst-amd-16g:0/6 0
     expect_transition "base arc-burst pools-closed" enable-burst "base arc-burst enable-stage-middle" \
-        pool-bounds:github-runners-burst-amd-16g:0/2 3 "github-runners-burst-16g.max_nodes: expected=0 live=6"
+        pool-bounds:github-runners-burst-intel-16g:0/2 3 "github-runners-burst-amd-16g.max_nodes: expected=0 live=6"
     expect_transition "base arc-density pools-closed" remove-burst "base arc-density pools-closed primary-gone" \
-        pool-deleted:github-runners-burst-amd-16g 3 "pools.github-runners-burst-16g: expected, absent live"
+        pool-deleted:github-runners-burst-intel-16g 3 "pools.github-runners-burst-amd-16g: expected, absent live"
     expect_transition "base arc-density pools-closed" remove-burst "base arc-density pools-closed primary-gone" \
         pool-deleted:github-runners-pool-16g 2 "not a burst pool"
     expect_transition "base arc-burst-acceptance-8 pools-open" acceptance-phase-c "base arc-burst-acceptance-4 pools-open" \
         arc:burst:2/20 3 "arc.minRunners: expected=2 live=4"
     expect_transition "base arc-burst pools-open" drain "base arc-drain pools-open patch-primary-max-5" \
-        arc:drain:2/4 3 "github-runners-burst-16g.max_nodes: expected=6 live=5"
+        arc:drain:2/4 3 "github-runners-burst-amd-16g.max_nodes: expected=6 live=5"
     expect_transition "base arc-burst pools-open" drain "base arc-drain pools-open" \
         arc:drain:2/20 2 "not a canonical ARC state"
     expect_transition "base arc-burst pools-open" drain "base arc-drain pools-open" \
@@ -941,11 +942,11 @@ assert_pool_state_transitions() {
         none 1 "missing or non-string name"
 
     expect_chain "create primary then fallback" "$none" create-burst \
-        "base arc-density pool-primary-closed" pool-created:github-runners-burst-16g:s-8vcpu-16gb:0/0 \
-        "base arc-density pools-closed" pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-amd:0/0
+        "base arc-density pool-primary-closed" pool-created:github-runners-burst-amd-16g:s-8vcpu-16gb-amd:0/0 \
+        "base arc-density pools-closed" pool-created:github-runners-burst-intel-16g:s-8vcpu-16gb-intel:0/0
     expect_chain "delete both" "base arc-density pools-closed" remove-burst \
-        "base arc-density pools-closed primary-gone" pool-deleted:github-runners-burst-16g \
-        "base arc-density" pool-deleted:github-runners-burst-amd-16g
+        "base arc-density pools-closed primary-gone" pool-deleted:github-runners-burst-amd-16g \
+        "base arc-density" pool-deleted:github-runners-burst-intel-16g
     expect_chain "density -> burst -> drain -> density" "base arc-density" status \
         "base arc-burst" arc:burst:2/20 \
         "base arc-drain" arc:drain:2/4 \
@@ -982,8 +983,8 @@ assert_pool_state_usage() {
 --cluster-name redducklabs-cluster --operation status --transition none
 --cluster-name redducklabs-cluster --compare-identities @SNAP@
 --cluster-name redducklabs-cluster --operation status --compare-identities @SNAP@ --transition none
---cluster-name redducklabs-cluster --compare-identities @SNAP@ --transition pool-created:github-runners-burst-16g
---cluster-name redducklabs-cluster --compare-identities @SNAP@ --transition pool-bounds:github-runners-burst-16g:0/7
+--cluster-name redducklabs-cluster --compare-identities @SNAP@ --transition pool-created:github-runners-burst-amd-16g
+--cluster-name redducklabs-cluster --compare-identities @SNAP@ --transition pool-bounds:github-runners-burst-amd-16g:0/7
 --cluster-name redducklabs-cluster --compare-identities @SNAP@ --transition arc:burst:2/4
 --cluster-name redducklabs-cluster --compare-identities @SNAP@ --transition bogus
 --cluster-name redducklabs-cluster --operation status --bogus
@@ -1285,7 +1286,7 @@ import os
 import sys
 
 names = {"3e9d7b20-8c4f-4d1a-a6e5-71f2c0b9d802": "primary", "9a4b2c6d-1e3f-4a5b-8c7d-0e1f2a3b4c03": "fallback",
-         "github-runners-burst-16g": "primary", "github-runners-burst-amd-16g": "fallback"}
+         "github-runners-burst-amd-16g": "primary", "github-runners-burst-intel-16g": "fallback"}
 tokens = []
 if os.path.isfile(sys.argv[1]):
     for line in open(sys.argv[1], encoding="utf-8"):
@@ -1310,7 +1311,7 @@ PY
 burst_pools_state() {  # dir -> "primary=<min/max|absent> fallback=<...>"
     jq -r '
         def b($n): ([.[] | select(.name == $n)] | if length == 1 then "\(.[0].min_nodes)/\(.[0].max_nodes)" else "absent" end);
-        "primary=\(b("github-runners-burst-16g")) fallback=\(b("github-runners-burst-amd-16g"))"
+        "primary=\(b("github-runners-burst-amd-16g")) fallback=\(b("github-runners-burst-intel-16g"))"
     ' "${1}/pools.json"
 }
 
@@ -1382,14 +1383,14 @@ assert_burst_pools() {
         expect_burst "$label" "$dir" "$snap" "$code" "$mutations" "$pools" "$text" $args
     done <<'CASES'
 create from none creates both closed|valid-density-no-burst|create-burst|0|create:primary,create:fallback|primary=0/0 fallback=0/0|RESULT: create-burst applied|create-burst
-create with the primary present creates only the fallback|create-one-closed|create-burst|0|create:fallback|primary=0/0 fallback=0/0|NOOP: pool 'github-runners-burst-16g' already exists closed|create-burst
+create with the primary present creates only the fallback|create-one-closed|create-burst|0|create:fallback|primary=0/0 fallback=0/0|NOOP: pool 'github-runners-burst-amd-16g' already exists closed|create-burst
 create with both closed is a no-op|base arc-density pools-closed|create-burst|0|-|primary=0/0 fallback=0/0|-|create-burst
 create narrows an open primary to 0/0 and creates the fallback|base arc-density created-primary-max6|create-burst|0|update:primary:0,create:fallback|primary=0/0 fallback=0/0|-|create-burst
 create refuses an existing pool with auto_scale off|base arc-density created-primary-autoscale-off|remove-burst|1|-|primary=0/0 fallback=absent|auto_scale must be true|create-burst
-create refuses an existing pool with the wrong size|base arc-density pool-primary-closed patch-primary-wrong-size|remove-burst|1|-|primary=0/0 fallback=absent|size is 's-8vcpu-16gb-intel'|create-burst
+create refuses an existing pool with the wrong size|base arc-density pool-primary-closed patch-primary-wrong-size|remove-burst|1|-|primary=0/0 fallback=absent|size is 's-8vcpu-16gb'|create-burst
 create treats a 422 droplet-limit error as a plain failure, not SCALE_TO_ZERO_REJECTED|valid-density-no-burst -- create-droplet-limit|create-burst|1|create:primary|primary=absent fallback=absent|failed (exit 1; identities unchanged)|create-burst
 create stops on SCALE_TO_ZERO_REJECTED after one attempt|valid-density-no-burst -- scale-to-zero-rejected|create-burst|1|create:primary|primary=absent fallback=absent|SCALE_TO_ZERO_REJECTED|create-burst
-create dry run plans and changes nothing|valid-density-no-burst|-|0|-|primary=absent fallback=absent|PLAN: create closed pool github-runners-burst-16g|create-burst
+create dry run plans and changes nothing|valid-density-no-burst|-|0|-|primary=absent fallback=absent|PLAN: create closed pool github-runners-burst-amd-16g|create-burst
 expander from unset writes cluster expanders then the ConfigMap|base arc-density pool-primary-closed pool-fallback-closed|configure-expander|0|expanders:priority,random,patch-configmap|-|READBACK: expanders priority,random|configure-expander
 expander already configured is a no-op|base arc-density pools-closed|configure-expander|0|-|-|NOOP: cluster expanders already priority,random|configure-expander
 expander ConfigMap readback mismatch fails|base arc-density pool-primary-closed pool-fallback-closed -- configmap-patch-ignored|configure-expander|1|expanders:priority,random,patch-configmap|-|ConfigMap mismatch|configure-expander
@@ -1410,14 +1411,14 @@ set fails explicitly when a pool vanishes after admission|base arc-burst pools-o
 set 7/1 is rejected|base arc-burst pools-open|-|2|-|primary=0/6 fallback=0/2|exceeds 6|set-burst-maxima --primary-max 7 --fallback-max 1
 set 6/3 is rejected|base arc-burst pools-open|-|2|-|primary=0/6 fallback=0/2|exceeds 2|set-burst-maxima --primary-max 6 --fallback-max 3
 set maxima flags are refused for other operations|base arc-burst pools-open|-|2|-|-|only valid for set-burst-maxima|enable-burst --primary-max 6 --fallback-max 2
-remove with a node in a burst pool deletes nothing|race-node-registered|status|1|-|primary=0/6 fallback=0/2|zero nodes in 'github-runners-burst-16g'|remove-burst
+remove with a node in a burst pool deletes nothing|race-node-registered|status|1|-|primary=0/6 fallback=0/2|zero nodes in 'github-runners-burst-amd-16g'|remove-burst
 remove after one pool was deleted deletes the other|base arc-drain pool-fallback-closed|remove-burst|0|delete:fallback|primary=absent fallback=absent|-|remove-burst
 remove from drain resets expanders then deletes both|drain-for-remove|remove-burst|0|expanders:,delete:primary,delete:fallback|primary=absent fallback=absent|READBACK: only github-runners-pool-16g remains|remove-burst
 remove from density with open pools is rejected|density-open-pools-remove|-|1|-|primary=0/6 fallback=0/2|at max_nodes=0|remove-burst
 remove: provider count becomes 1 before the delete|drain-for-remove -- race-count-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|provider count 0; found provider count 1|remove-burst
-remove: a node registers before the delete|drain-for-remove -- race-node-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|zero nodes in 'github-runners-burst-16g'|remove-burst
-remove: a runner pod schedules into the pool before the delete|drain-for-remove -- race-pod-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|zero runner pods in 'github-runners-burst-16g'|remove-burst
-identity drift after a mutation stops the run|valid-density-no-burst -- drift-after-create|create-burst|3|create:primary|primary=0/0 fallback=absent|RESULT: identity drift after create closed pool github-runners-burst-16g|create-burst
+remove: a node registers before the delete|drain-for-remove -- race-node-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|zero nodes in 'github-runners-burst-amd-16g'|remove-burst
+remove: a runner pod schedules into the pool before the delete|drain-for-remove -- race-pod-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|zero runner pods in 'github-runners-burst-amd-16g'|remove-burst
+identity drift after a mutation stops the run|valid-density-no-burst -- drift-after-create|create-burst|3|create:primary|primary=0/0 fallback=absent|RESULT: identity drift after create closed pool github-runners-burst-amd-16g|create-burst
 CASES
 
     # The expander update keeps the live (non-default) maintenance window and
@@ -1470,7 +1471,7 @@ CASES
         # shellcheck disable=SC2086
         dir=$(burst_dir $layers) || { fail "burst ${sequence}: fixture could not be built"; continue; }
         expect_burst "${sequence} -> remove-burst" "$dir" remove-burst 0 "$mutations" "primary=absent fallback=absent" - remove-burst
-        expect_burst "${sequence} -> remove-burst re-run" "$dir" remove-burst 0 - "primary=absent fallback=absent" "NOOP: pool 'github-runners-burst-16g' already absent" remove-burst
+        expect_burst "${sequence} -> remove-burst re-run" "$dir" remove-burst 0 - "primary=absent fallback=absent" "NOOP: pool 'github-runners-burst-amd-16g' already absent" remove-burst
     done <<'CASES'
 density + one closed pool|create-one-closed|delete:primary
 density + two closed pools + expander|density-closed-pools-remove|expanders:,delete:primary,delete:fallback
@@ -1527,8 +1528,8 @@ assert_node_pool_workflow() {
     rc=$?
     if [ "$rc" -eq 0 ] && [ "$(burst_mutations "$dir")" = create:primary,create:fallback ] \
         && [ "$(burst_pools_state "$dir")" = "primary=0/0 fallback=0/0" ] \
-        && grep -qF '| `github-runners-burst-16g` | absent | 0/0 |' "$BURST_OUT" \
-        && grep -qF '| `github-runners-burst-amd-16g` | absent | 0/0 |' "$BURST_OUT"; then
+        && grep -qF '| `github-runners-burst-amd-16g` | absent | 0/0 |' "$BURST_OUT" \
+        && grep -qF '| `github-runners-burst-intel-16g` | absent | 0/0 |' "$BURST_OUT"; then
         pass "workflow: matching expected_sha runs admission then create-burst; summary lists before/after per pool"
     else
         fail "workflow: create-burst apply -> exit ${rc}, mutations $(burst_mutations "$dir"), $(tail -c 600 "$BURST_ERR" | tr '\n' ' ')"
@@ -1749,8 +1750,8 @@ expect_fleet() {
     fi
 }
 
-FLEET_IDLE_BURST='{"arc": "arc-burst", "burst_nodes": [{"name": "github-runners-burst-16g-p1q2r", "pool": "github-runners-burst-16g"}], "runners": [{"name": "base0", "node": "baseline-a"}, {"name": "burstaa", "node": "github-runners-burst-16g-p1q2r"}]}'
-FLEET_BUSY_BURST='{"arc": "arc-burst", "knobs": {"sleep_scale": 60}, "burst_nodes": [{"name": "github-runners-burst-16g-p1q2r", "pool": "github-runners-burst-16g"}], "runners": [{"name": "base0", "node": "baseline-a"}, {"name": "burstbusy", "node": "github-runners-burst-16g-p1q2r", "busy": true}]}'
+FLEET_IDLE_BURST='{"arc": "arc-burst", "burst_nodes": [{"name": "github-runners-burst-amd-16g-p1q2r", "pool": "github-runners-burst-amd-16g"}], "runners": [{"name": "base0", "node": "baseline-a"}, {"name": "burstaa", "node": "github-runners-burst-amd-16g-p1q2r"}]}'
+FLEET_BUSY_BURST='{"arc": "arc-burst", "knobs": {"sleep_scale": 60}, "burst_nodes": [{"name": "github-runners-burst-amd-16g-p1q2r", "pool": "github-runners-burst-amd-16g"}], "runners": [{"name": "base0", "node": "baseline-a"}, {"name": "burstbusy", "node": "github-runners-burst-amd-16g-p1q2r", "busy": true}]}'
 FLEET_DENSITY_HISTORY='[{"revision": 12, "arc": "arc-density", "status": "superseded"}, {"revision": 13, "arc": "arc-burst", "status": "superseded"}, {"revision": 14, "arc": "arc-drain", "status": "deployed"}]'
 
 # repo_with_values <python statements on `doc`>: a copy of the repository
@@ -2843,7 +2844,7 @@ regular init peak|lacks headroom|{"metadata":{"name":"x","namespace":"kube-syste
 overhead|lacks headroom|{"metadata":{"name":"x","namespace":"kube-system"},"spec":{"nodeName":"github-runners-pool-16g-a1b2c","overhead":{"cpu":"2","memory":"1500Mi"},"containers":[{}]},"status":{"phase":"Running"}}
 malformed quantity|headroom could not be computed|{"metadata":{"name":"x","namespace":"kube-system"},"spec":{"nodeName":"github-runners-pool-16g-a1b2c","containers":[{"resources":{"requests":{"memory":"not-a-quantity"}}}]},"status":{"phase":"Running"}}
 alternate valid quantities|admit|{"metadata":{"name":"x","namespace":"kube-system"},"spec":{"nodeName":"github-runners-pool-16g-a1b2c","containers":[{"resources":{"requests":{"cpu":"100000u","memory":"104857600"}}}]},"status":{"phase":"Running"}}
-headroom on a burst node|lacks headroom|{"metadata":{"name":"x","namespace":"kube-system"},"spec":{"nodeName":"github-runners-burst-amd-16g-s3t4u","containers":[{"resources":{"requests":{"cpu":"2","memory":"1500Mi"}}}]},"status":{"phase":"Running"}}
+headroom on a burst node|lacks headroom|{"metadata":{"name":"x","namespace":"kube-system"},"spec":{"nodeName":"github-runners-burst-intel-16g-s3t4u","containers":[{"resources":{"requests":{"cpu":"2","memory":"1500Mi"}}}]},"status":{"phase":"Running"}}
 CASES
 }
 
@@ -2904,7 +2905,7 @@ assert_cost_report() {
 
     expect_cost "sums runner node lines, separates workers and derives burst" burst-derived 2026-09 0 \
         'Granularity is per cluster and node size, not per pool' \
-        '^runner 16 GB / 8 vCPU \(baseline \+ primary burst\) 1460\.00 194\.67$' \
+        '^runner 16 GB / 8 vCPU \(baseline; unmarked burst\) 1460\.00 194\.67$' \
         '^RUNNER TOTAL 1460\.00 194\.67$' \
         '^worker 8 GB / 4 vCPU \(not runner cost\) 1440\.00 48\.00$' \
         '^other cluster items \(volumes, load balancers, other\) 13\.00$' \
@@ -2928,11 +2929,22 @@ assert_cost_report() {
     else
         fail "cost report printed a worker line for a cluster without workers"
     fi
-    expect_cost "reports the AMD fallback size on its own line" amd-fallback 2026-09 0 \
-        '^runner 16 GB / 8 vCPU AMD \(fallback burst\) 10\.00 1\.50$' \
-        '^RUNNER TOTAL 1450\.00 193\.50$' \
-        '^burst node-hours, derived \(baseline assumed 2 nodes\) 10\.00$' \
-        '^burst cost, estimated \(derived hours x average price\) 1\.33$'
+    # The AMD and Intel invoice wording is undocumented: a variant word before
+    # or after the size is accepted, and every 16 GB / 8 vCPU line is runner cost.
+    expect_cost "reports the AMD primary and Intel fallback burst sizes on their own lines" burst-variants 2026-09 0 \
+        '^runner 16 GB / 8 vCPU \(baseline; unmarked burst\) 1440\.00 192\.00$' \
+        '^runner 16 GB / 8 vCPU AMD \(primary burst\) 10\.00 1\.67$' \
+        '^runner 16 GB / 8 vCPU Intel \(fallback burst\) 2\.00 0\.33$' \
+        '^RUNNER TOTAL 1452\.00 194\.00$' \
+        '^burst node-hours, derived \(baseline assumed 2 nodes\) 12\.00$' \
+        '^burst cost, estimated \(derived hours x average price\) 1\.60$'
+    expect_cost "a runner-size line naming both AMD and Intel makes the month unavailable" variant-ambiguous 2026-09 0 \
+        '^cost data unavailable: a cluster runner-size line names both AMD and Intel$'
+    if ! grep -q 'RUNNER TOTAL' "$COST_OUT"; then
+        pass "cost report prints no runner total for an ambiguous runner-size line"
+    else
+        fail "cost report printed a runner total for an ambiguous runner-size line"
+    fi
     expect_cost "floors derived burst hours at zero" below-baseline 2026-09 0 \
         '^burst node-hours, derived \(baseline assumed 2 nodes\) 0\.00$'
     expect_cost "no runner-size line is unavailable, not zero" no-runner-line 2026-09 0 '^cost data unavailable'
@@ -3087,8 +3099,8 @@ PY
     expect_fleet "status with open burst pools and a burst node" $? 0 - arc-burst "STEP Admit pool state (status): success" - "$dir"
     if status_summary | grep -qF 'Pool state**: `arc=burst pools=both burst=open` (admitted)' \
         && status_summary | grep -Eq '^POOL github-runners-pool-16g provider_count=2 min=2 max=2 auto_scale=[a-z]+ registered=2 ready=2$' \
-        && status_summary | grep -Eq '^POOL github-runners-burst-16g provider_count=1 min=0 max=6 auto_scale=true registered=1 ready=1$' \
-        && status_summary | grep -Eq '^POOL github-runners-burst-amd-16g provider_count=0 min=0 max=2 ' \
+        && status_summary | grep -Eq '^POOL github-runners-burst-amd-16g provider_count=1 min=0 max=6 auto_scale=true registered=1 ready=1$' \
+        && status_summary | grep -Eq '^POOL github-runners-burst-intel-16g provider_count=0 min=0 max=2 ' \
         && status_summary | grep -q '^EXPANDER ' \
         && ! grep -qi 'capacity drift' "$FLEET_OUT" "$FLEET_ERR" \
         && grep -qx 'STEP Fail on rejected pool state or unreadable pool report: success' "$FLEET_OUT"; then
@@ -3118,7 +3130,7 @@ PY
     run_status "$dir"
     expect_fleet "status on the density baseline" $? 0 - arc-density "STEP Admit pool state (status): success" - "$dir"
     if status_summary | grep -qF '`arc=density pools=none burst=closed`' \
-        && status_summary | grep -qx 'POOL github-runners-burst-16g absent' \
+        && status_summary | grep -qx 'POOL github-runners-burst-amd-16g absent' \
         && status_summary | grep -qx 'EXPANDER n/a: no burst pools'; then
         pass "Runner Status on density reports absent burst pools"
     else
@@ -3152,11 +3164,11 @@ PY
     local edited
     edited=$(mktemp -d "${WORK_DIR}/report.XXXXXX")
     cp -r "${dir}/." "${edited}/"
-    jq 'map(if .name == "github-runners-burst-16g" then del(.count, .min_nodes, .max_nodes) else . end)
+    jq 'map(if .name == "github-runners-burst-amd-16g" then del(.count, .min_nodes, .max_nodes) else . end)
         + [(.[] | select(.name == "github-runners-pool-16g"))]' "${dir}/pools.json" > "${edited}/pools.json"
     with_fakes "$edited" env "NOW_CMD=echo ${POOL_STATE_NOW}" bash "${REPO_ROOT}/scripts/report-runner-pools.sh" \
         --cluster-name redducklabs-cluster > "$GATE_OUT" 2> "$GATE_ERR"
-    if grep -q '^POOL github-runners-burst-16g provider_count=unknown min=unknown max=unknown ' "$GATE_OUT" \
+    if grep -q '^POOL github-runners-burst-amd-16g provider_count=unknown min=unknown max=unknown ' "$GATE_OUT" \
         && grep -q '^POOL github-runners-pool-16g duplicate: 2 pools share this name' "$GATE_OUT" \
         && ! grep -q 'None' "$GATE_OUT"; then
         pass "pool report prints unknown for missing fields and flags a duplicated pool name"
@@ -3539,7 +3551,7 @@ PY
     expect_fleet "emergency stop whose marker write fails" $? 1 helm-upgrade:stopped arc-burst-stopped "STEP Report marker failure: failure" - "$dir"
 
     # Rebalance and Runner Status report the marker as a stopped condition.
-    dir=$(fleet_dir "{\"arc\": \"arc-burst\", ${marker}, \"burst_nodes\": [{\"name\": \"github-runners-burst-16g-p1q2r\", \"pool\": \"github-runners-burst-16g\"}], \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"burstaa\", \"node\": \"github-runners-burst-16g-p1q2r\"}]}" base arc-burst pools-open)
+    dir=$(fleet_dir "{\"arc\": \"arc-burst\", ${marker}, \"burst_nodes\": [{\"name\": \"github-runners-burst-amd-16g-p1q2r\", \"pool\": \"github-runners-burst-amd-16g\"}], \"runners\": [{\"name\": \"base0\", \"node\": \"baseline-a\"}, {\"name\": \"burstaa\", \"node\": \"github-runners-burst-amd-16g-p1q2r\"}]}" base arc-burst pools-open)
     FLEET_GITHUB_CONTEXT="{\"event_name\":\"workflow_dispatch\",\"sha\":\"${FLEET_SHA}\",\"ref\":\"refs/heads/main\"}" \
         run_fleet_workflow "$REBALANCE_WORKFLOW" "$dir" "{\"expected_sha\":\"${FLEET_SHA}\"}"
     expect_fleet "rebalance on burst with the stop marker" $? 0 - arc-burst "STEP Retire idle burst runners: skipped" - "$dir"

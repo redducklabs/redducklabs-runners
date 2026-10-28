@@ -46,7 +46,7 @@
         }
       },
       "spec": {
-        "nodeName": "github-runners-burst-16g-p1q2r"
+        "nodeName": "github-runners-burst-amd-16g-p1q2r"
       },
       "status": {
         "phase": "Running"

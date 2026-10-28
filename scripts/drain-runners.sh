@@ -169,8 +169,8 @@ while :; do
     fi
     if ! read -r ON_BURST BURST_NODES PRIMARY_COUNT FALLBACK_COUNT < <(jq -r '
         [.runner_pods.burst, .burst_nodes,
-         (.burst_pool_counts["github-runners-burst-16g"] // 0),
-         (.burst_pool_counts["github-runners-burst-amd-16g"] // 0)] | @tsv' <<<"$OCCUPANCY"); then
+         (.burst_pool_counts["github-runners-burst-amd-16g"] // 0),
+         (.burst_pool_counts["github-runners-burst-intel-16g"] // 0)] | @tsv' <<<"$OCCUPANCY"); then
         echo "ERROR: could not parse runner placement; the fleet is left in drain" >&2
         exit 1
     fi

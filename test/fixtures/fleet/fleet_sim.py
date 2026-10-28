@@ -107,8 +107,8 @@ NOT_HANDLED = 100
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYERS = os.path.join(HERE, "..", "pool-state")
 BASELINE = "github-runners-pool-16g"
-PRIMARY = "github-runners-burst-16g"
-FALLBACK = "github-runners-burst-amd-16g"
+PRIMARY = "github-runners-burst-amd-16g"
+FALLBACK = "github-runners-burst-intel-16g"
 BURST = (PRIMARY, FALLBACK)
 POOL_LABEL = "doks.digitalocean.com/node-pool"
 PREFIX = "redducklabs-runners-7xk2p-runner-"
@@ -196,7 +196,7 @@ def burst_node_document(world, node):
     labels["doks.digitalocean.com/node-pool-id"] = world["pool_ids"][node["pool"]]
     labels["doks.digitalocean.com/node-id"] = f"{node['name']}-id"
     labels["kubernetes.io/hostname"] = node["name"]
-    labels["node.kubernetes.io/instance-type"] = "s-8vcpu-16gb-amd" if node["pool"] == FALLBACK else "s-8vcpu-16gb"
+    labels["node.kubernetes.io/instance-type"] = "s-8vcpu-16gb-intel" if node["pool"] == FALLBACK else "s-8vcpu-16gb-amd"
     template["spec"]["providerID"] = f"digitalocean://burst-{node['name']}"
     return template
 
