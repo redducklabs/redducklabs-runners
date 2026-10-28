@@ -181,18 +181,6 @@ jobs:
           chmod +x test/verify-runner-resources.sh
           ./test/verify-runner-resources.sh
 
-      - name: Verify burst autoscaling contracts
-        run: |
-          echo "🔍 Verifying burst, burst-acceptance and drain contracts..."
-          chmod +x test/verify-burst-autoscaling.sh
-          ./test/verify-burst-autoscaling.sh
-
-      - name: Verify acceptance verdicts and the evidence workflow
-        run: |
-          echo "🔍 Verifying acceptance verdict fixtures and runner-acceptance-evidence.yml..."
-          chmod +x test/verify-acceptance.sh
-          ./test/verify-acceptance.sh
-
       - name: Check ARC chart version pins agree
         run: |
           echo "🔍 Checking ARC chart version pins..."
@@ -326,3 +314,35 @@ jobs:
             echo "- Acceptance verdict fixtures and the evidence workflow against a simulator"
             echo "- No committed tokens"
           } >> $GITHUB_STEP_SUMMARY
+
+  # The burst and acceptance suites run as their own jobs, in parallel with
+  # "validate": together in one job they outgrew its 30-minute limit.
+  burst-suite:
+    name: Verify burst autoscaling contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify burst autoscaling contracts
+        run: |
+          echo "🔍 Verifying burst, burst-acceptance and drain contracts..."
+          chmod +x test/verify-burst-autoscaling.sh
+          ./test/verify-burst-autoscaling.sh
+
+  acceptance-suite:
+    name: Verify acceptance verdicts and the evidence workflow
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify acceptance verdicts and the evidence workflow
+        run: |
+          echo "🔍 Verifying acceptance verdict fixtures and runner-acceptance-evidence.yml..."
+          chmod +x test/verify-acceptance.sh
+          ./test/verify-acceptance.sh
