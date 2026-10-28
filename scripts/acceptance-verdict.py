@@ -33,7 +33,17 @@ cluster; any successful forbidden connection fails the phase.
 Runner health (every phase): no runner pod container may be OOMKilled,
 restarted or evicted, judged from the captured containerStatuses
 (restartCount, state, lastState.terminated.reason) and from OOMKilling,
-Evicted and Preempted events.
+OOMKilled, Evicted and Preempted events tied to a runner pod (a Pod in
+arc-runners) or a runner node (a captured node-type=github-runner node) that
+occurred inside the phase window: from the probe run's created_at (phase C:
+the Phase C run's start) to latest_collection_at. Other such events (for
+example a worker-pool node OOM, or an event that ended before the phase) are
+reported in notes as diagnostics only.
+
+Warm floor (phase E, criterion E-warm): exactly two warm_after runners, on
+baseline, each observed_at == latest_collection_at (the collector's final
+collection, not historical snapshots) and recorded Running, Ready,
+non-terminating and idle.
 
 Usage: acceptance-verdict.py --phase A|B|C|D|E EVIDENCE.json [--out VERDICT.json]
 Prints the verdict JSON; exit 0 when it passes, 1 when it fails or the
@@ -245,7 +255,37 @@ def expander_matches(evidence, failures, label):
 HEALTH_EVENTS = ("OOMKilling", "OOMKilled", "Evicted", "Preempted")
 
 
-def check_runner_health(evidence, failures):
+def phase_window(evidence):
+    """(start, end) epochs of the observation window; None for an unknown bound.
+
+    Start: the probe run's created_at, or for phase C the Phase C run's start.
+    End: latest_collection_at, the evidence collector's final collection. An
+    unknown bound is left open, so an event is never excused by missing data."""
+    start = ((evidence.get("probe") or {}).get("run") or {}).get("created_at") \
+        or (evidence.get("phase_c_run") or {}).get("started")
+    end = evidence.get("latest_collection_at")
+    return (ts(start, "phase window start") if start else None,
+            ts(end, "latest_collection_at") if end else None)
+
+
+def runner_health_event(evidence, event, window):
+    """A health event counts when it is tied to a runner pod (arc-runners Pod)
+    or a runner node (a captured node-type=github-runner node) and it occurred
+    inside the phase window. Other events stay in the evidence as diagnostics."""
+    runner_nodes = {node.get("name") for node in evidence.get("nodes") or []}
+    kind, name = event.get("involved_kind"), event.get("involved_name")
+    if not ((kind == "Pod" and event.get("namespace") == "arc-runners") or (kind == "Node" and name in runner_nodes)):
+        return False
+    start, end = window
+    first, last = event.get("first_timestamp"), event.get("last_timestamp") or event.get("first_timestamp")
+    if start is not None and last and ts(last, "event last_timestamp") < start:
+        return False
+    if end is not None and first and ts(first, "event first_timestamp") > end:
+        return False
+    return True
+
+
+def check_runner_health(evidence, failures, notes):
     """No runner container OOMKilled, restarted or evicted during the phase."""
     for pod in evidence.get("pods") or []:
         for status in pod.get("container_statuses") or []:
@@ -257,10 +297,19 @@ def check_runner_health(evidence, failures):
             elif (status.get("restart_count") or 0) > 0:
                 failures.append(f"runner-health: container {where} restarted {status.get('restart_count')} time(s)"
                                 f" (last exit {status.get('last_terminated_exit_code')})")
+    window = phase_window(evidence)
+    ignored = []
     for event in evidence.get("events") or []:
-        if event.get("reason") in HEALTH_EVENTS:
-            failures.append(f"runner-health: {event.get('reason')} event on {event.get('involved_kind')} "
-                            f"{event.get('involved_name')}: {str(event.get('message'))[:120]}")
+        if event.get("reason") not in HEALTH_EVENTS:
+            continue
+        if not runner_health_event(evidence, event, window):
+            ignored.append(f"{event.get('reason')}@{event.get('involved_kind')}/{event.get('involved_name')}")
+            continue
+        failures.append(f"runner-health: {event.get('reason')} event on {event.get('involved_kind')} "
+                        f"{event.get('involved_name')}: {str(event.get('message'))[:120]}")
+    if ignored:
+        notes.append("runner-health: diagnostic only (not a runner pod or node, or outside the phase window): "
+                     + ", ".join(ignored[:10]))
 
 
 # --- phases ----------------------------------------------------------------
@@ -460,8 +509,19 @@ def phase_e(evidence, failures, report, notes):
     if (evidence.get("trust_readback") or {}).get("pass") is not True:
         failures.append("E-trust: trust-boundary readback did not pass")
     warm = evidence.get("warm_after") or []
+    latest = evidence.get("latest_collection_at")
     if len(warm) != 2 or any(runner.get("pool") != BASELINE for runner in warm):
         failures.append(f"E-warm: warm runners {[(r.get('runner_name'), r.get('pool')) for r in warm]}, expected two on {BASELINE}")
+    elif not isinstance(latest, str) or not latest:
+        failures.append("E-warm: latest_collection_at is missing; the warm set cannot be tied to the final collection")
+    else:
+        stale = [runner.get("runner_name") for runner in warm
+                 if runner.get("observed_at") != latest or runner.get("phase") != "Running"
+                 or runner.get("ready") is not True or runner.get("terminating") is not False
+                 or runner.get("idle") is not True]
+        if stale or len({runner.get("runner_name") for runner in warm}) != 2:
+            failures.append(f"E-warm: warm runners {stale or [r.get('runner_name') for r in warm]} were not current, "
+                            f"Running, Ready, non-terminating and idle in the final collection at {latest}")
     check_batch("E", jobs, failures)
     check_pickup("E", evidence, jobs, failures, report)
 
@@ -595,7 +655,7 @@ def verdict(phase, evidence):
     else:
         try:
             PHASE_CHECKS[phase](evidence, failures, report, notes)
-            check_runner_health(evidence, failures)
+            check_runner_health(evidence, failures, notes)
         except EvidenceError as error:
             failures.append(f"evidence: {error}")
     passed = not failures

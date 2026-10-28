@@ -505,9 +505,31 @@ PY
         fail "phase C record: $(jq -c '.phase_c' "${REPO_COPY}/acceptance-C.json" 2>/dev/null)"
     fi
     # jobs_killed matches the scale-set runner-name prefix, not snapshot names.
-    dir=$(sim_dir C-pass-retired '{"repo_runs": {"redducklabs/keel": [{"id": 91, "updated_at": "2026-11-02T18:20:00Z"}]}, "extra_runs": {"k": {"repo": "redducklabs/keel", "id": 91, "jobs": [{"id": 9101, "runner_name": "redducklabs-runners-x7k2p-runner-abcde", "conclusion": "failure", "completed_at": "2026-11-02T18:05:00Z"}, {"id": 9102, "runner_name": "GitHub Actions 12", "conclusion": "failure", "completed_at": "2026-11-02T18:05:00Z"}]}}}')
+    dir=$(sim_dir C-pass-retired '{"repo_runs": {"redducklabs/keel": [{"id": 91, "created_at": "2026-11-02T17:50:00Z", "updated_at": "2026-11-02T18:20:00Z"}]}, "extra_runs": {"k": {"repo": "redducklabs/keel", "id": 91, "jobs": [{"id": 9101, "runner_name": "redducklabs-runners-x7k2p-runner-abcde", "conclusion": "failure", "completed_at": "2026-11-02T18:05:00Z"}, {"id": 9102, "runner_name": "GitHub Actions 12", "conclusion": "failure", "completed_at": "2026-11-02T18:05:00Z"}]}}}')
     run_evidence "$dir" "$phase_c"
     expect_evidence "phase C fails when a fleet job failed during the run (hosted failures ignored)" $? 1 - "C-jobs-killed: 1 fleet job(s)" - - "$dir"
+    # Runs are selected by the 65-day lookback, not a recent created_at: the
+    # simulator applies the created filter, so a narrower query misses these.
+    local run_list='^gh api --paginate --slurp repos/redducklabs/keel/actions/runs\?created=2026-08-29T18:00:00Z\.\.2026-11-02T18:10:00Z&per_page=100$'
+    dir=$(sim_dir C-pass-retired '{"repo_runs": {"redducklabs/keel": [{"id": 92, "created_at": "2026-10-30T09:00:00Z", "updated_at": "2026-11-02T18:07:00Z", "run_attempt": 2}]}, "extra_runs": {"k": {"repo": "redducklabs/keel", "id": 92, "jobs": [{"id": 9201, "run_attempt": 1, "runner_name": "redducklabs-runners-x7k2p-runner-aaaaa", "conclusion": "success", "completed_at": "2026-10-30T09:20:00Z"}, {"id": 9202, "run_attempt": 2, "runner_name": "redducklabs-runners-x7k2p-runner-bbbbb", "conclusion": "failure", "completed_at": "2026-11-02T18:06:00Z"}]}}}')
+    run_evidence "$dir" "$phase_c"
+    expect_evidence "phase C fails when a run created three days earlier is re-run and its fleet job fails during Phase C" $? 1 - \
+        "C-jobs-killed: 1 fleet job(s)" "$run_list" - "$dir"
+    dir=$(sim_dir C-pass-retired '{"repo_runs": {"redducklabs/keel": [{"id": 93, "created_at": "2026-11-01T12:00:00Z", "updated_at": "2026-11-02T18:08:00Z", "run_attempt": 2}]}, "extra_runs": {"k": {"repo": "redducklabs/keel", "id": 93, "jobs": [{"id": 9301, "run_attempt": 1, "runner_name": "redducklabs-runners-x7k2p-runner-ccccc", "conclusion": "cancelled", "completed_at": "2026-11-02T18:04:00Z"}, {"id": 9302, "run_attempt": 2, "runner_name": "redducklabs-runners-x7k2p-runner-ddddd", "conclusion": "success", "completed_at": "2026-11-02T18:08:00Z"}]}}}')
+    run_evidence "$dir" "$phase_c"
+    expect_evidence "phase C fails when a killed attempt was superseded by a successful re-run (every attempt is read)" $? 1 - \
+        "C-jobs-killed: 1 fleet job(s)" '^gh api --paginate --slurp repos/redducklabs/keel/actions/runs/93/jobs\?filter=all&per_page=100$' - "$dir"
+    # More runs than the search cap in the lookback: the range is bisected
+    # until each query is complete, and the re-run failure is still found.
+    dir=$(sim_dir C-pass-retired '{"run_overflow": {"redducklabs/keel": {"over_seconds": 3456000, "total_count": 1500}}, "repo_runs": {"redducklabs/keel": [{"id": 92, "created_at": "2026-10-30T09:00:00Z", "updated_at": "2026-11-02T18:07:00Z", "run_attempt": 2}]}, "extra_runs": {"k": {"repo": "redducklabs/keel", "id": 92, "jobs": [{"id": 9202, "run_attempt": 2, "runner_name": "redducklabs-runners-x7k2p-runner-bbbbb", "conclusion": "failure", "completed_at": "2026-11-02T18:06:00Z"}]}}}')
+    run_evidence "$dir" "$phase_c"
+    expect_evidence "phase C bisects a run list over the search cap and still finds the failed fleet job" $? 1 - \
+        "C-jobs-killed: 1 fleet job(s)" '^gh api --paginate --slurp repos/redducklabs/keel/actions/runs\?created=2026-10-01T06:05:00Z\.\.2026-11-02T18:10:00Z&per_page=100$' - "$dir"
+    # A run last updated before Phase C cannot hold a job completed in it.
+    dir=$(sim_dir C-pass-retired '{"repo_runs": {"redducklabs/keel": [{"id": 94, "created_at": "2026-10-23T10:00:00Z", "updated_at": "2026-10-24T10:00:00Z"}]}, "extra_runs": {"k": {"repo": "redducklabs/keel", "id": 94, "jobs": [{"id": 9401, "runner_name": "redducklabs-runners-x7k2p-runner-eeeee", "conclusion": "failure", "completed_at": "2026-10-24T10:00:00Z"}]}}}')
+    run_evidence "$dir" "$phase_c"
+    expect_evidence "phase C passes when the only failed fleet job ended before the run (its jobs are not read)" $? 0 - \
+        "✅ Phase C passed acceptance" "$run_list" '^gh api --paginate --slurp repos/redducklabs/keel/actions/runs/94/jobs' "$dir"
 
     # Transient read errors during the watch are retried; persistent ones fail.
     dir=$(sim_dir A-pass '{"faults": {"kubectl get events -A -o json": 2}}')
@@ -534,12 +556,53 @@ PY
     else
         fail "record: spec/statuses not captured as required"
     fi
+    # Health events: only runner pods/nodes inside the phase window count;
+    # the others stay in the record as diagnostics.
+    local oom_event='{"metadata": {"uid": "ev-oom", "namespace": "default"}, "reason": "OOMKilling", "type": "Warning", "message": "Memory cgroup out of memory", "involvedObject": {"kind": "Node", "name": "%s"}, "firstTimestamp": "%s", "lastTimestamp": "%s", "count": 1}'
+    dir=$(sim_dir A-pass "{\"events\": [$(printf "$oom_event" worker-pool-x1y2z 2026-11-02T18:10:00Z 2026-11-02T18:10:00Z)]}")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A passes with a worker-node OOM event (diagnostic only)" $? 0 - "✅ Phase A passed acceptance" - - "$dir"
+    if jq -e '[.events[] | select(.uid == "ev-oom" and .involved_name == "worker-pool-x1y2z")] | length == 1' "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1 \
+        && jq -e '.verdict.notes | any(startswith("runner-health: diagnostic only"))' "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: the worker-node OOM event is kept and reported as a diagnostic"
+    else
+        fail "phase A record: worker-node OOM event $(jq -c '{events, notes: .verdict.notes}' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 300)"
+    fi
+    dir=$(sim_dir A-pass "{\"events\": [$(printf "$oom_event" baseline-a 2026-11-02T17:10:00Z 2026-11-02T17:12:00Z)]}")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A passes with a runner-node OOM event that ended before the probe run" $? 0 - "✅ Phase A passed acceptance" - - "$dir"
+    dir=$(sim_dir A-pass "{\"events\": [$(printf "$oom_event" p2 2026-11-02T18:10:00Z 2026-11-02T18:10:00Z)]}")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails runner-health with a runner-node OOM event inside the phase" $? 1 - "runner-health: OOMKilling event on Node p2" \
+        '^gh run cancel 777' - "$dir"
 
     # Phase E: READY_FOR_MIGRATION output.
     dir=$(sim_dir E-pass)
     run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
     expect_evidence "phase E passes and reports READY_FOR_MIGRATION=true" $? 0 "OUTPUT evidence.ready_for_migration=true" \
         "READY_FOR_MIGRATION=true" - "$READ_ONLY_VIOLATION" "$dir"
+    if jq -e '.latest_collection_at != null and (.warm_after | length) == 2
+              and all(.warm_after[]; .observed_at == $latest and .ready == true and .terminating == false and .idle == true)' \
+        --arg latest "$(jq -r '.latest_collection_at' "${REPO_COPY}/acceptance-E.json" 2>/dev/null)" \
+        "${REPO_COPY}/acceptance-E.json" > /dev/null 2>&1; then
+        pass "phase E record: warm_after observed in the final collection (latest_collection_at), Ready, not terminating, idle"
+    else
+        fail "phase E record: $(jq -c '{latest_collection_at, warm_after}' "${REPO_COPY}/acceptance-E.json" 2>/dev/null)"
+    fi
+    # Warm runners seen earlier in the phase but not current, Ready and
+    # non-terminating at finalization never authorize migration.
+    while IFS='|' read -r label override; do
+        [ -n "$label" ] || continue
+        dir=$(sim_dir E-pass "$override")
+        run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
+        expect_evidence "phase E fails E-warm when ${label} before finalization" $? 1 "OUTPUT evidence.ready_for_migration=false" \
+            "E-warm:" - "$READ_ONLY_VIOLATION" "$dir"
+    done <<'CASES'
+every runner pod and EphemeralRunner disappears (empty latest lists)|{"changes": [{"at": "2026-11-02T18:15:00Z", "kind": "pods", "name": "*", "remove": true}, {"at": "2026-11-02T18:15:00Z", "kind": "ephemeral_runners", "name": "*", "remove": true}]}
+a warm runner pod becomes unready|{"changes": [{"at": "2026-11-02T18:15:00Z", "kind": "pods", "name": "w1", "merge": {"status": {"conditions": [{"type": "Ready", "status": "False"}]}}}]}
+a warm runner pod begins terminating|{"changes": [{"at": "2026-11-02T18:15:00Z", "kind": "pods", "name": "w1", "merge": {"metadata": {"deletionTimestamp": "2026-11-02T18:15:00Z"}}}]}
+a warm EphemeralRunner begins terminating|{"changes": [{"at": "2026-11-02T18:15:00Z", "kind": "ephemeral_runners", "name": "w2", "merge": {"metadata": {"deletionTimestamp": "2026-11-02T18:15:00Z"}}}]}
+CASES
     dir=$(sim_dir E-trust-failed)
     printf '#!/bin/bash\necho "ERROR: runner-group readback failed" >&2\nexit 1\n' > "${dir}/trust"
     run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"

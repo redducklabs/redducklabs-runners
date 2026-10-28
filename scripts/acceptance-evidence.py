@@ -27,7 +27,13 @@ Subcommands (all share one state file, rewritten after every step):
   finalize  capture once more after completion, read the probe jobs and the
             phase's anchor runs, wait for the phase's after-state (B: primary
             restored to 0/6; E: two warm runners on baseline), and write the
-            evidence JSON read by scripts/acceptance-verdict.py. In phase A it
+            evidence JSON read by scripts/acceptance-verdict.py. The evidence
+            keeps every pod, node and event ever captured (history), and
+            latest_collection_at, the time of the final collection; Phase E's
+            warm_after holds only runners of that final collection (Running,
+            Ready, not terminating, idle), each with observed_at. Phase C's
+            jobs_killed reads every attempt of every run that can have a job in
+            the Phase C run (see jobs_killed). In phase A it
             also reads the probe's network-probe job log (its
             NETWORK_PROBE_RESULT line) and resolves the probe's targets in the
             cluster: the node pool of each node address (VPC InternalIP, and the
@@ -92,6 +98,11 @@ CLEANUP_POLL_SECONDS = 15
 CLEANUP_WAIT_SECONDS = 10 * 60
 RESTORE_WAIT_SECONDS = 30 * 60
 WARM_WAIT_SECONDS = 15 * 60
+# jobs_killed: a run created this long before Phase C can still run jobs in
+# it (re-runs up to 30 days after the initial run, plus the 35-day run limit).
+RUN_LOOKBACK_DAYS = 65
+RUN_LIST_CAP = 1000
+RUN_MIN_SLICE_SECONDS = 3600
 GATE_EVERY_POLLS = 5
 READ_ATTEMPTS = 3
 READ_BACKOFF_SECONDS = (5, 15)
@@ -373,6 +384,12 @@ def ready_at(node):
     return None
 
 
+def pod_ready(pod):
+    """Pod condition Ready=True (every container passed its readiness)."""
+    return any(condition.get("type") == "Ready" and condition.get("status") == "True"
+               for condition in (pod.get("status") or {}).get("conditions") or [])
+
+
 def required_baseline(pod):
     terms = ((((pod.get("spec") or {}).get("affinity") or {}).get("nodeAffinity") or {})
              .get("requiredDuringSchedulingIgnoredDuringExecution") or {}).get("nodeSelectorTerms") or []
@@ -460,12 +477,14 @@ def snapshot(state, final=False):
                      required_baseline_affinity=required_baseline(item),
                      spec=redacted_spec(item.get("spec")),
                      container_statuses=container_statuses(item.get("status")) or entry.get("container_statuses", []),
-                     phase=(item.get("status") or {}).get("phase"), last_seen=stamp)
+                     phase=(item.get("status") or {}).get("phase"), ready=pod_ready(item),
+                     terminating=bool(meta.get("deletionTimestamp")), last_seen=stamp)
     runners = run_json(["kubectl", "get", "ephemeralrunners.actions.github.com", "-n", NAMESPACE, "-o", "json"]).get("items") or []
     for item in runners:
         meta, status = item.get("metadata") or {}, item.get("status") or {}
         shots["ephemeral_runners"][meta.get("name")] = {
             "name": meta.get("name"), "phase": status.get("phase"), "last_seen": stamp,
+            "terminating": bool(meta.get("deletionTimestamp")),
             "job": {field: status.get(field) for field in ER_JOB_FIELDS if status.get(field) not in (None, "", 0)}}
     events = run_json(["kubectl", "get", "events", "-A", "-o", "json"]).get("items") or []
     for item in events:
@@ -490,6 +509,12 @@ def snapshot(state, final=False):
         state["pools_before"] = summary
     state["pools_latest"] = summary
     known = sorted(item["metadata"]["name"] for item in nodes)
+    # The membership of this collection, kept apart from the historical
+    # snapshots: an object absent from the latest lists is not current.
+    state["latest_collection"] = {
+        "at": stamp, "nodes": known,
+        "pods": sorted(str((item.get("metadata") or {}).get("uid")) for item in pods),
+        "ephemeral_runners": sorted(str((item.get("metadata") or {}).get("name")) for item in runners)}
     if final or state["polls"] % GATE_EVERY_POLLS == 0 or known != state.get("last_node_names"):
         state["pool_state_checks"].append(pool_state_check(state, nodes))
     state["last_node_names"] = known
@@ -588,34 +613,66 @@ def to_epoch(value):
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
 
 
+def runs_created_between(repo, start, end):
+    """Workflow runs of ORG/repo created in [start, end] (epochs), complete.
+
+    The list endpoint returns at most RUN_LIST_CAP results for a search with
+    the created filter, so a range whose total_count exceeds it is bisected
+    (bounded ranges overlap at their endpoints; callers deduplicate by ID)."""
+    pages = run_json(["gh", "api", "--paginate", "--slurp",
+                      f"repos/{ORG}/{repo}/actions/runs?created={iso(start)}..{iso(end)}&per_page=100"])
+    if not isinstance(pages, list) or not all(isinstance(page, dict) for page in pages):
+        raise ReadError(f"workflow run list of {ORG}/{repo} is not a list of pages")
+    total = max((page.get("total_count") or 0 for page in pages), default=0)
+    if total > RUN_LIST_CAP:
+        if end - start <= RUN_MIN_SLICE_SECONDS:
+            raise ReadError(f"{ORG}/{repo} has {total} runs created in {iso(start)}..{iso(end)}, "
+                            f"more than the {RUN_LIST_CAP}-result search limit")
+        middle = start + (end - start) // 2
+        return runs_created_between(repo, start, middle) + runs_created_between(repo, middle, end)
+    return [run_data for page in pages for run_data in page.get("workflow_runs") or []]
+
+
 def jobs_killed(state, window_start, window_end):
     """Fleet jobs that ended cancelled or failed while Phase C ran.
 
+    Runs are not selected by a recent created_at: a run created long before
+    Phase C can be re-run during it, and the jobs of its later attempts keep
+    the run's original created_at. GitHub's run list has no updated-time
+    filter, so every run created from RUN_LOOKBACK_DAYS before the window (a
+    run can be re-run up to 30 days after the initial run, and a run is
+    limited to 35 days) up to the window end is listed; a run last updated
+    before the window is skipped (a job completing in the window updates its
+    run), and the jobs of every attempt (filter=all) are read for the rest.
+
     A job is a fleet job when its runner name carries the scale set's prefix
     (ARC names runners "redducklabs-runners-<set>-runner-<id>"). Every
-    cancelled or failed fleet job in the window counts, including a genuine
-    test failure: the check fails closed and Phase C is re-run.
+    cancelled or failed fleet job completed in the window counts, including a
+    genuine test failure: the check fails closed and Phase C is re-run.
     """
-    since = iso(to_epoch(window_start) - 6 * 3600)
+    start, end = int(to_epoch(window_start)), int(to_epoch(window_end))
     killed = []
     for repo in trusted_repositories():
-        pages = run_json(["gh", "api", "--paginate", "--slurp",
-                          f"repos/{ORG}/{repo}/actions/runs?created=%3E%3D{since}&per_page=100"])
-        for page in pages if isinstance(pages, list) else []:
-            for run_data in page.get("workflow_runs") or []:
-                if trim_ts(run_data.get("updated_at")) and to_epoch(trim_ts(run_data["updated_at"])) < to_epoch(window_start):
+        seen = set()
+        for run_data in runs_created_between(repo, start - RUN_LOOKBACK_DAYS * 86400, end):
+            if run_data.get("id") in seen:
+                continue
+            seen.add(run_data.get("id"))
+            updated = trim_ts(run_data.get("updated_at"))
+            if updated and to_epoch(updated) < start:
+                continue
+            job_pages = run_json(["gh", "api", "--paginate", "--slurp",
+                                  f"repos/{ORG}/{repo}/actions/runs/{run_data.get('id')}/jobs?filter=all&per_page=100"])
+            for job in (job for page in job_pages if isinstance(page, dict) for job in page.get("jobs") or []):
+                completed = trim_ts(job.get("completed_at"))
+                if not str(job.get("runner_name") or "").startswith(RUNNER_NAME_PREFIX) or not completed:
                     continue
-                job_pages = run_json(["gh", "api", "--paginate", "--slurp",
-                                      f"repos/{ORG}/{repo}/actions/runs/{run_data.get('id')}/jobs?filter=all&per_page=100"])
-                for job in (job for page in job_pages if isinstance(page, dict) for job in page.get("jobs") or []):
-                    completed = trim_ts(job.get("completed_at"))
-                    if not str(job.get("runner_name") or "").startswith(RUNNER_NAME_PREFIX) or not completed:
-                        continue
-                    if not to_epoch(window_start) <= to_epoch(completed) <= to_epoch(window_end):
-                        continue
-                    if job.get("conclusion") in ("cancelled", "failure"):
-                        killed.append({"repository": f"{ORG}/{repo}", "id": job.get("id"),
-                                       "runner_name": job.get("runner_name"), "conclusion": job.get("conclusion")})
+                if not start <= to_epoch(completed) <= end:
+                    continue
+                if job.get("conclusion") in ("cancelled", "failure"):
+                    killed.append({"repository": f"{ORG}/{repo}", "run_id": run_data.get("id"),
+                                   "run_attempt": job.get("run_attempt"), "id": job.get("id"),
+                                   "runner_name": job.get("runner_name"), "conclusion": job.get("conclusion")})
     return killed
 
 
@@ -633,7 +690,8 @@ def phase_c_evidence(state):
     killed = jobs_killed(state, run_info["started"], run_info["completed"])
     evidence.update(jobs_killed=len(killed), killed_jobs=killed,
                     jobs_killed_note="measured by runner-acceptance-evidence from GitHub job conclusions of "
-                                     f"jobs on {RUNNER_NAME_PREFIX}* runners during the Phase C run")
+                                     f"jobs on {RUNNER_NAME_PREFIX}* runners completed during the Phase C run, "
+                                     f"in every attempt of every run created up to {RUN_LOOKBACK_DAYS} days before it")
     return run_info, evidence
 
 
@@ -679,19 +737,32 @@ def restored(state):
 
 
 def warm_runners(state):
-    """Idle runners whose pods were seen in the latest snapshot."""
+    """Warm runners of the latest collection only (never the historical snapshots).
+
+    A warm runner is a pod in the latest pod list that is Running, has the pod
+    condition Ready=True and no deletionTimestamp, whose EphemeralRunner is in
+    the latest EphemeralRunner list, Running, not terminating and holds no job,
+    on a node in the latest node list. Each entry records the collection time
+    it was observed at (observed_at == latest_collection_at)."""
+    latest = state.get("latest_collection")
+    if not latest:
+        return []
     shots = state["snapshots"]
-    latest = max((pod["last_seen"] for pod in shots["pods"].values()), default=None)
+    pods, runners = set(latest["pods"]), set(latest["ephemeral_runners"])
     nodes = shots["nodes"]
     warm = []
-    for pod in shots["pods"].values():
-        runner = shots["ephemeral_runners"].get(pod["runner_name"])
-        if pod["last_seen"] != latest or runner is None or runner["last_seen"] != latest:
+    for uid in sorted(pods):
+        pod = shots["pods"].get(uid) or {}
+        runner = shots["ephemeral_runners"].get(pod.get("runner_name"))
+        if runner is None or runner.get("name") not in runners or pod.get("node") not in latest["nodes"]:
             continue
-        if runner["job"] or runner["phase"] != "Running" or pod.get("phase") != "Running":
+        if pod.get("phase") != "Running" or pod.get("ready") is not True or pod.get("terminating") is not False:
+            continue
+        if runner.get("job") or runner.get("phase") != "Running" or runner.get("terminating") is not False:
             continue
         warm.append({"runner_name": pod["runner_name"], "node": pod["node"],
-                     "pool": (nodes.get(pod["node"]) or {}).get("pool")})
+                     "pool": (nodes.get(pod["node"]) or {}).get("pool"), "observed_at": latest["at"],
+                     "phase": pod["phase"], "ready": True, "terminating": False, "idle": True})
     return warm
 
 
@@ -824,6 +895,7 @@ def cmd_finalize(args):
             "nodes": sorted(nodes.values(), key=lambda n: (n["created_at"] or "", n["name"])),
             "events": sorted(state["snapshots"]["events"].values(), key=lambda e: (e["first_timestamp"] or "", e["uid"] or "")),
             "pool_state_checks": state["pool_state_checks"],
+            "latest_collection_at": state["latest_collection"]["at"],
             "pools_before": state["pools_before"], "pools_after": state.get("pools_latest"),
             "arc_contract_after": arc_contract(state), "phase_c": None,
             "trust_readback": None, "expander_readback": expander_readback(state),

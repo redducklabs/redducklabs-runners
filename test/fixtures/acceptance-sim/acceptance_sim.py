@@ -15,6 +15,11 @@ Run status: "completed" once the clock reaches the run's complete_at; after
 `gh run cancel` a run with cancel=completes is completed (conclusion
 cancelled) 30 s later, while cancel=ignored never completes.
 
+Run lists honour the created (A..B, >=X, ...) and status filters, job lists
+the filter (latest/all by run_attempt) parameter; an unsupported query
+parameter exits 97. Scenario "changes" alter pods and EphemeralRunners from a
+clock time on (see live()).
+
 Faults: scenario "faults" maps a full call line ("kubectl get events -A -o
 json") to the number of times it fails (exit 1) before it answers normally.
 Runner pods carry a spec with one literal env value
@@ -28,6 +33,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from urllib.parse import parse_qs
 
 PROBE_REPO = "redducklabs/aurolegal.ai"
 FLEET_REPO = "redducklabs/redducklabs-runners"
@@ -150,7 +156,8 @@ def init(directory, evidence_path, overrides):
     for warm in ev.get("warm_after") or []:
         pods.append({"metadata": {"name": warm["runner_name"], "uid": "uid-" + warm["runner_name"],
                                   "creationTimestamp": "2026-11-02T18:30:00Z", "annotations": {}},
-                     "spec": {"nodeName": warm["node"]}, "status": {"phase": "Running"}})
+                     "spec": {"nodeName": warm["node"]},
+                     "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}})
         runners.append({"metadata": {"name": warm["runner_name"]}, "status": {"phase": "Running"}})
     scenario["pods"], scenario["ephemeral_runners"] = pods, runners
     scenario["events"] = [{"metadata": {"uid": event["uid"], "namespace": event["namespace"]},
@@ -260,6 +267,57 @@ def out(document):
     return 0
 
 
+def created_matches(value, created):
+    """GitHub's created filter: A..B (inclusive, * open), >=X, <=X, >X, <X, or X."""
+    if not created:
+        return True
+    if not value:
+        return False
+    at = epoch(value)
+
+    def bound(text):
+        text = text.strip()
+        return None if text == "*" else epoch(text)
+
+    if ".." in created:
+        low, high = (bound(text) for text in created.split("..", 1))
+        return (low is None or at >= low) and (high is None or at <= high)
+    for prefix, test in ((">=", lambda x: at >= x), ("<=", lambda x: at <= x),
+                         (">", lambda x: at > x), ("<", lambda x: at < x)):
+        if created.startswith(prefix):
+            return test(epoch(created[len(prefix):]))
+    return at == epoch(created)
+
+
+def select_runs(runs, query):
+    """The run list endpoint's selection: created and status filters; None for
+    an unsupported parameter, so a collector query the fake cannot honour fails."""
+    if set(query) - {"created", "status", "per_page", "page"}:
+        return None
+    created = (query.get("created") or [""])[0]
+    status = (query.get("status") or [""])[0]
+    try:
+        selected = [run for run in runs if created_matches(run.get("created_at"), created)]
+    except ValueError:
+        return None
+    if status:
+        selected = [run for run in selected if status in (run.get("status"), run.get("conclusion"))]
+    return selected
+
+
+def select_jobs(jobs, query):
+    """filter=latest (default): jobs of the highest run_attempt; filter=all: every attempt."""
+    if set(query) - {"filter", "per_page", "page"}:
+        return None
+    mode = (query.get("filter") or ["latest"])[0]
+    if mode == "all":
+        return jobs
+    if mode != "latest":
+        return None
+    latest = max((job.get("run_attempt", 1) for job in jobs), default=1)
+    return [job for job in jobs if job.get("run_attempt", 1) == latest]
+
+
 def gh(sim, args):
     line = " ".join(args)
     if args[:2] == ["run", "cancel"]:
@@ -289,6 +347,7 @@ def gh(sim, args):
     paginate = args[1:3] == ["--paginate", "--slurp"]
     path = args[3] if paginate else args[1]
     parts = path.split("?")[0].split("/")
+    query = parse_qs(path.split("?", 1)[1], keep_blank_values=True) if "?" in path else {}
     if parts[0] == "repos" and len(parts) >= 5:
         repo = "/".join(parts[1:3])
         if parts[3:5] == ["git", "ref"] and parts[5] == "tags":
@@ -306,13 +365,31 @@ def gh(sim, args):
             sys.stdout.write(text)
             return 0
         if parts[3:5] == ["actions", "runs"] and len(parts) == 5 and paginate:
-            return out([{"workflow_runs": sim.scenario["repo_runs"].get(repo, [])}])
+            selected = select_runs(sim.scenario["repo_runs"].get(repo, []), query)
+            if selected is None:
+                print(f"fake gh: unsupported run list query: {line}", file=sys.stderr)
+                return 97
+            # total_count is the match count. scenario "run_overflow" maps a repo to
+            # {"over_seconds": S, "total_count": N}: a created range wider than S
+            # reports N matches and returns none of them (results past the search
+            # cap are lost), so only a bisected query sees the runs.
+            overflow = sim.scenario.get("run_overflow", {}).get(repo)
+            created = (query.get("created") or [""])[0]
+            if overflow and ".." in created and "*" not in created:
+                low, high = (epoch(text) for text in created.split("..", 1))
+                if high - low > overflow["over_seconds"]:
+                    return out([{"total_count": overflow["total_count"], "workflow_runs": []}])
+            return out([{"total_count": len(selected), "workflow_runs": selected}])
         if parts[3:5] == ["actions", "runs"] and len(parts) >= 6:
             run = sim.find_run(repo, parts[5])
             if run is None:
                 for extra in sim.scenario.get("extra_runs", {}).values():
                     if extra["repo"] == repo and str(extra["id"]) == parts[5] and paginate and parts[6:] == ["jobs"]:
-                        return out([{"jobs": extra["jobs"]}])
+                        jobs = select_jobs(extra["jobs"], query)
+                        if jobs is None:
+                            print(f"fake gh: unsupported job list query: {line}", file=sys.stderr)
+                            return 97
+                        return out([{"total_count": len(jobs), "jobs": jobs}])
                 return 1
             if paginate and parts[6:9] == ["attempts", "1", "jobs"]:
                 jobs = run.get("jobs") or []
@@ -325,6 +402,32 @@ def gh(sim, args):
                 return out(sim.run_json(run))
     print(f"fake gh: unexpected call: {line}", file=sys.stderr)
     return 97
+
+
+def deep_merge(target, patch):
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            deep_merge(target[key], value)
+        else:
+            target[key] = value
+
+
+def live(sim, kind):
+    """scenario[kind] after the scenario "changes" due by the clock: each
+    {"at": ISO, "kind": "pods"|"ephemeral_runners", "name": metadata.name,
+    "remove": true} drops the object (name "*": every object), {"merge": {...}}
+    deep-merges into it."""
+    items = json.loads(json.dumps(sim.scenario[kind]))
+    for change in sim.scenario.get("changes") or []:
+        if change["kind"] != kind or sim.clock < epoch(change["at"]):
+            continue
+        if change.get("remove"):
+            items = [item for item in items if change["name"] not in ("*", item["metadata"]["name"])]
+            continue
+        for item in items:
+            if item["metadata"]["name"] == change["name"]:
+                deep_merge(item, change["merge"])
+    return items
 
 
 def kubectl(sim, args):
@@ -340,9 +443,9 @@ def kubectl(sim, args):
         return out({"items": [node for node in scenario["nodes"]
                               if sim.clock < removed.get(node["metadata"]["name"], sim.clock + 1)]})
     if line == "get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners -o json":
-        return out({"items": scenario["pods"]})
+        return out({"items": live(sim, "pods")})
     if line == "get ephemeralrunners.actions.github.com -n arc-runners -o json":
-        return out({"items": scenario["ephemeral_runners"]})
+        return out({"items": live(sim, "ephemeral_runners")})
     if line == "get events -A -o json":
         return out({"items": scenario["events"]})
     if line == "get configmap cluster-autoscaler-priority-expander -n kube-system -o json":

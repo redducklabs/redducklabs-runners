@@ -130,6 +130,23 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-pre-phase-runner-node-oom": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "A-pass-worker-node-oom-diagnostic": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "A-runner-node-oom": {
+  "criteria": [
+   "runner-health"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-warm-p95-120s": {
   "criteria": [
    "pickup-warm"
@@ -424,7 +441,28 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "E-warm-no-latest-collection": {
+  "criteria": [
+   "E-warm"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "E-warm-runner-on-burst": {
+  "criteria": [
+   "E-warm"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-warm-stale-collection": {
+  "criteria": [
+   "E-warm"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "E-warm-unready": {
   "criteria": [
    "E-warm"
   ],
