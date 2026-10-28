@@ -596,6 +596,17 @@ events. After completion it captures OOM, restart, eviction, and scheduling
 events. Failure or timeout cancels the probe run and proceeds to cleanup
 verification.
 
+Runner health is judged on container statuses of captured runner pods and on
+OOM, eviction and preemption events tied to an `arc-runners` pod or a runner
+node and occurring within the phase window (from the probe run's creation, or
+the Phase C run's start, to the final evidence collection); other events are
+recorded as diagnostics only (PR #35 review 2, Ruling 37). Postconditions about
+current fleet state, such as Phase E's two warm runners, use only the final
+collection's membership (`latest_collection_at`), never historical
+observations. Phase C's `jobs_killed` covers every attempt of every workflow run
+that could have run a fleet job inside the window, not only runs created
+during it.
+
 | Phase | Setup | Pass criteria |
 |---|---|---|
 | A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=16 | 16 distinct runners concurrent; 4 on baseline; all burst nodes from the primary pool (proves priority order); warm and cold pickup within thresholds |
