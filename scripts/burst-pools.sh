@@ -26,6 +26,10 @@
 # followed by a readback of what the mutation changed. Any difference stops the
 # run with no further mutation.
 #
+# configure-expander --apply waits (bounded, "WAIT:" lines) for DOKS to create
+# the priority-expander ConfigMap after the expander update (Ruling 40); the
+# sleep between reads is injectable for tests (SLEEP_CMD, default "sleep").
+#
 # Output: "PLAN:"/"APPLY:"/"NOOP:" lines while running, then a summary of
 # "POOL <name>: before=<min/max|absent> after=<min/max|absent>" lines, an
 # "EXPANDERS:" line and one "RESULT:" line.
@@ -210,11 +214,15 @@ render_priorities() {  # primary-id fallback-id
 }
 
 # configmap_state <primary-id> <fallback-id>: prints "priorities=<equal|differ>
-# managed=<yes|no>" for the live priority-expander ConfigMap.
+# managed=<yes|no>" for the live priority-expander ConfigMap. Returns 2 and
+# prints nothing when the ConfigMap does not exist (DOKS creates it only after
+# the priority expander is enabled, Ruling 40); returns 1 on any other read
+# failure, which the callers treat as fatal.
 configmap_state() {
     local configmap
-    configmap=$(kubectl get configmap "$EXPANDER_CONFIGMAP" -n "$EXPANDER_NAMESPACE" -o json) || return 1
-    CONFIGMAP_JSON=$configmap python3 -B - "$1" "$2" "$EXPANDER_MANAGED_LABEL" <<'PY'
+    configmap=$(kubectl get configmap "$EXPANDER_CONFIGMAP" -n "$EXPANDER_NAMESPACE" --ignore-not-found --request-timeout=20s -o json) || return 1
+    [ -n "${configmap//[[:space:]]/}" ] || return 2
+    CONFIGMAP_JSON=$configmap python3 -B - "$1" "$2" "$EXPANDER_MANAGED_LABEL" <<'PY' || return 1
 import json
 import os
 import sys
@@ -442,19 +450,88 @@ op_create_burst() {
     final_check
 }
 
+# Ruling 40: DOKS creates kube-system/cluster-autoscaler-priority-expander
+# (with its doks.digitalocean.com labels and a starter "1: [.*]") only after
+# the priority expander is enabled on the cluster, and DigitalOcean does not
+# document how long that takes. After the expander update, apply reads it
+# every EXPANDER_CONFIGMAP_POLL_SECONDS for up to EXPANDER_CONFIGMAP_WAIT_SECONDS
+# (every 15 s for 10 minutes, 41 reads, well inside the 30-minute job
+# timeout), then fails. configure-expander never changes pool bounds; during
+# the rollout both burst pools are closed (0/0), so a timeout leaves no burst
+# capacity, only the expander list changed. A re-run continues the wait.
+EXPANDER_CONFIGMAP_POLL_SECONDS=15
+EXPANDER_CONFIGMAP_WAIT_SECONDS=600
+EXPANDER_CONFIGMAP_POLLS=$((EXPANDER_CONFIGMAP_WAIT_SECONDS / EXPANDER_CONFIGMAP_POLL_SECONDS + 1))
+
+burst_sleep() {  # seconds; SLEEP_CMD (default "sleep") is the test seam
+    local cmd
+    read -r -a cmd <<<"${SLEEP_CMD:-sleep}"
+    "${cmd[@]}" "$1"
+}
+
+# wait_for_configmap <primary-id> <fallback-id>: sets CONFIGMAP_STATE once the
+# ConfigMap exists; any read error other than NotFound fails the run.
+wait_for_configmap() {
+    # Each read is bounded by --request-timeout (a timed-out read fails closed),
+    # and the wait stops at whichever comes first: the read budget or the
+    # elapsed-time deadline, so slow reads cannot stretch it past 600 s.
+    local poll=1 rc started=$SECONDS
+    while :; do
+        rc=0
+        CONFIGMAP_STATE=$(configmap_state "$1" "$2") || rc=$?
+        case "$rc" in
+            0)
+                [ "$poll" -eq 1 ] \
+                    || echo "READBACK: DOKS created ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} (read ${poll})"
+                return 0
+                ;;
+            2) ;;
+            *) fail_run "could not read ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} (a read error other than NotFound)" ;;
+        esac
+        [ "$poll" -lt "$EXPANDER_CONFIGMAP_POLLS" ] \
+          && [ $((SECONDS - started)) -lt "$EXPANDER_CONFIGMAP_WAIT_SECONDS" ] \
+            || fail_run "ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} still absent after waiting ${EXPANDER_CONFIGMAP_WAIT_SECONDS}s (${EXPANDER_CONFIGMAP_POLLS} reads, every ${EXPANDER_CONFIGMAP_POLL_SECONDS}s); DOKS creates it after the priority expander is enabled (expanders are '$(cluster_expanders)'); pool bounds were not changed; re-run configure-expander to continue"
+        echo "WAIT: ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} not created by DOKS yet (read ${poll}/${EXPANDER_CONFIGMAP_POLLS}); next read in ${EXPANDER_CONFIGMAP_POLL_SECONDS}s"
+        burst_sleep "$EXPANDER_CONFIGMAP_POLL_SECONDS"
+        poll=$((poll + 1))
+    done
+}
+
 op_configure_expander() {
-    local primary_id fallback_id state patch
+    local primary_id fallback_id state patch rc
     primary_id=$(pool_id "$PRIMARY")
     fallback_id=$(pool_id "$FALLBACK")
+    patch=$(jq -cn --arg p "$(render_priorities "$primary_id" "$fallback_id")" '{data: {priorities: $p}}')
     if [ "$(cluster_expanders)" != "$EXPANDERS" ]; then
         cluster_update "set cluster expanders to ${EXPANDERS}" "$EXPANDERS"
     else
         echo "NOOP: cluster expanders already ${EXPANDERS}"
     fi
-    state=$(configmap_state "$primary_id" "$fallback_id") \
-        || fail_run "could not read ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP}"
+    if [ "$APPLY" = true ]; then
+        # Re-read after the update: expanders already set (re-run) and just
+        # set both wait here for DOKS to create the ConfigMap.
+        reread
+        [ "$(cluster_expanders)" = "$EXPANDERS" ] \
+            || fail_run "cluster expanders are '$(cluster_expanders)', expected '${EXPANDERS}'; not waiting for the ConfigMap"
+        wait_for_configmap "$primary_id" "$fallback_id"
+        state=$CONFIGMAP_STATE
+    else
+        rc=0
+        state=$(configmap_state "$primary_id" "$fallback_id") || rc=$?
+        case "$rc" in
+            0) ;;
+            2)
+                # Dry run: nothing was changed, so DOKS has not created it yet.
+                echo "PLAN: wait up to ${EXPANDER_CONFIGMAP_WAIT_SECONDS}s for DOKS to create ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} (it does so only after the priority expander is enabled), then write priorities 100: ${primary_id} (${PRIMARY}), 50: ${fallback_id} (${FALLBACK}), 1: .*: kubectl patch configmap ${EXPANDER_CONFIGMAP} -n ${EXPANDER_NAMESPACE} --type merge -p ${patch}"
+                final_check
+                return 0
+                ;;
+            *) fail_run "could not read ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} (a read error other than NotFound)" ;;
+        esac
+    fi
     if [[ "$state" != priorities=equal* ]]; then
-        patch=$(jq -cn --arg p "$(render_priorities "$primary_id" "$fallback_id")" '{data: {priorities: $p}}')
+        # A JSON merge patch replaces data.priorities only; metadata (the
+        # DOKS-managed name and doks labels) is left as DOKS created it.
         mutate none "write priority expander ConfigMap" \
             kubectl patch configmap "$EXPANDER_CONFIGMAP" -n "$EXPANDER_NAMESPACE" --type merge -p "$patch"
     else
@@ -464,8 +541,10 @@ op_configure_expander() {
         reread
         [ "$(cluster_expanders)" = "$EXPANDERS" ] \
             || fail_run "readback: cluster expanders are '$(cluster_expanders)', expected '${EXPANDERS}'"
-        state=$(configmap_state "$primary_id" "$fallback_id") \
-            || fail_run "readback could not read ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP}"
+        rc=0
+        state=$(configmap_state "$primary_id" "$fallback_id") || rc=$?
+        [ "$rc" -eq 0 ] \
+            || fail_run "readback could not read ConfigMap ${EXPANDER_NAMESPACE}/${EXPANDER_CONFIGMAP} (exit ${rc}; 2 = absent)"
         [ "$state" = "priorities=equal managed=yes" ] \
             || fail_run "readback: priority expander ConfigMap mismatch (${state}); expected ${PRIMARY}=100, ${FALLBACK}=50, .*=1 and the ${EXPANDER_MANAGED_LABEL} label"
         echo "READBACK: expanders ${EXPANDERS}; ConfigMap priorities and managed label verified"

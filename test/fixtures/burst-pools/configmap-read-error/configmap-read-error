@@ -1,0 +1,1 @@
+Flag: every read of the priority expander ConfigMap fails with a Forbidden error (not NotFound).
