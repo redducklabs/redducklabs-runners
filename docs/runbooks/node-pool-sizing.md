@@ -588,3 +588,14 @@ not found` because DOKS creates that ConfigMap only after the expander update
 (Ruling 40). Nothing was changed; ARC stayed `density`. Continue step 3 with
 `configure-expander` (dry run, then `apply`) at the reviewed commit that
 contains the Ruling 40 fix.
+
+2026-10-28, at main `5186a64`: the `configure-expander` dry run (run
+40768526948) planned the update and the wait. The apply (run 40768656384) set
+the cluster expanders to `priority,random` (DOKS then created the starter
+ConfigMap), and stopped before writing priorities: the cluster diff saw
+`scale_down_utilization_threshold: 0` and `scale_down_unneeded_time: ""`
+appear, zero values the API fills in once the autoscaler configuration exists
+(Ruling 41). Pools stayed closed. Re-run `configure-expander` (`apply`) at the
+reviewed commit that contains the Ruling 41 fix: the expanders are a `NOOP`
+and it writes the priorities. Phase C proves that scale-down still works with
+these zero values.

@@ -174,6 +174,27 @@ is unaffected. A re-run finds the expanders already set (`NOOP`) and waits
 again before writing. The test provider models this: no ConfigMap until a
 `priority` expander update, optionally after a few more reads.
 
+### Autoscaler zero values after the expander update (Ruling 41)
+
+The first `configure-expander` apply (Node Pool Sizing run 40768656384, main
+`5186a64`) set the expanders to `priority,random` and then stopped on the
+Ruling 13 diff. Before the update the cluster had no
+`cluster_autoscaler_configuration`. After it, the API returned
+`scale_down_utilization_threshold: 0` and `scale_down_unneeded_time: ""`
+next to the expanders. doctl had not sent those fields: its update request
+sets them only when their flags are given, so the server filled in zero values
+once the configuration object existed. DigitalOcean's API schema does not say
+what a zero threshold or an empty time means.
+
+Ruling: the Ruling 13 projection counts zero, empty and null autoscaler fields
+as unset, so this materialization is not a change; any customized value (for
+example a threshold of 0.65) must still stay the same, or the run fails. The
+test provider returns the zero values the same way. Whether DOKS applies its
+defaults for these zero values is proven live by acceptance Phase C, which
+requires both burst pools back at zero nodes within 60 minutes. If Phase C
+fails on scale-down, the fix is to set the threshold and unneeded time
+explicitly through a reviewed change, not to wait longer.
+
 The two burst pools use two different droplet sizes, and neither is the
 baseline's `s-8vcpu-16gb`. The September 2026 incident showed the DOKS
 autoscaler receiving HTTP 422 while growing the sole eligible `s-8vcpu-16gb`

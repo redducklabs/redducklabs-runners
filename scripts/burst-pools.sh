@@ -354,11 +354,16 @@ mutate() {
 }
 
 # cluster_projection: every cluster field an expander update must not change.
+# DOKS returns the autoscaler fields doctl did not send as zero values once the
+# configuration object exists (scale_down_utilization_threshold 0,
+# scale_down_unneeded_time ""; run 40768656384, Ruling 41), so zero, empty and
+# null values count as unset; any customized value still has to stay the same.
 cluster_projection() {
     jq -cS --arg id "$CLUSTER_ID" '.[] | select(.id == $id) | {
         name, auto_upgrade, surge_upgrade, ha, tags, control_plane_firewall, routing_agent,
         maintenance_policy: (.maintenance_policy | if . == null then null else {day, start_time, duration} end),
-        autoscaler_other: ((.cluster_autoscaler_configuration // {}) | del(.expanders))
+        autoscaler_other: ((.cluster_autoscaler_configuration // {}) | del(.expanders)
+            | with_entries(select(.value != null and .value != 0 and .value != "")))
     }' <<<"$CLUSTER_JSON"
 }
 
