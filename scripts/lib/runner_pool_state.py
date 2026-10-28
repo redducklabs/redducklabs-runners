@@ -196,6 +196,40 @@ def items_of(document, what):
     return items
 
 
+# Ruling 39: `doctl kubernetes cluster node-pool list -o json` serializes the
+# godo NodePool struct, whose fields are tagged `omitempty`, so a zero count,
+# min_nodes or max_nodes, a false auto_scale and an empty nodes list are
+# omitted rather than printed. A closed burst pool (0/0, count 0) therefore
+# has no count, min_nodes or max_nodes key at all. Only key ABSENCE means the
+# zero value; an explicit null or any other value is left as read, so the
+# checks that follow still fail closed on it.
+OMITTED_POOL_DEFAULTS = {
+    "count": 0,
+    "min_nodes": 0,
+    "max_nodes": 0,
+    "auto_scale": False,
+    "nodes": [],
+}
+
+
+def normalize_pool_list(pools):
+    """Restore the zero values doctl omits from node-pool list JSON (Ruling 39).
+
+    Every reader of `doctl kubernetes cluster node-pool list -o json` calls
+    this before any check, identity snapshot, comparison or output. Non-list
+    documents and non-object entries are returned unchanged so the caller's
+    own shape check rejects them.
+    """
+    if not isinstance(pools, list):
+        return pools
+    normalized = []
+    for pool in pools:
+        if isinstance(pool, dict):
+            pool = {**copy.deepcopy(OMITTED_POOL_DEFAULTS), **pool}
+        normalized.append(pool)
+    return normalized
+
+
 def read_live(cluster_name, with_pods):
     """Read live state in the documented order. Raises ReadError."""
     clusters = run_json(["doctl", "kubernetes", "cluster", "list", "-o", "json"])
@@ -207,7 +241,9 @@ def read_live(cluster_name, with_pods):
             f"cluster '{cluster_name}' must resolve to exactly one DigitalOcean cluster; found {len(matches)}"
         )
     cluster = matches[0]
-    pools = run_json(["doctl", "kubernetes", "cluster", "node-pool", "list", cluster["id"], "-o", "json"])
+    pools = normalize_pool_list(
+        run_json(["doctl", "kubernetes", "cluster", "node-pool", "list", cluster["id"], "-o", "json"])
+    )
     if not isinstance(pools, list) or not all(isinstance(p, dict) for p in pools):
         raise ReadError("doctl node-pool list is not a JSON array of pools")
     for pool in pools:
