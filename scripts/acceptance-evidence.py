@@ -154,6 +154,21 @@ def run(argv):
     raise AssertionError("unreachable")
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def job_logs(repository, job_id):
+    """A job's log as plain text.
+
+    Job logs carry terminal escape sequences (colored run-step echoes), and
+    gh refuses to print such a response without --allow-escape-sequences
+    (live Phase A evidence run 40797455827). The sequences are removed before
+    any line is parsed.
+    """
+    text = run(["gh", "api", "--allow-escape-sequences", f"repos/{repository}/actions/jobs/{job_id}/logs"])
+    return ANSI_ESCAPE.sub("", text)
+
+
 def run_json(argv):
     text = run(argv)
     try:
@@ -598,7 +613,7 @@ def drain_anchor(state):
         # so its start bounds the upgrade and its completion is the end of the wait.
         anchor["started"] = trim_ts(steps[0].get("startedAt"))
         anchor["completed"] = trim_ts(steps[0].get("completedAt"))
-    logs = run(["gh", "api", f"repos/{FLEET_REPOSITORY}/actions/jobs/{job.get('databaseId')}/logs"])
+    logs = job_logs(FLEET_REPOSITORY, job.get("databaseId"))
     for line in logs.splitlines():
         if DRAIN_READBACK in line:
             anchor["effective"] = trim_ts(line.split(" ", 1)[0])
@@ -860,7 +875,7 @@ def network_probe_evidence(jobs):
         return evidence
     job = matches[0]
     evidence["job"] = {key: job.get(key) for key in ("id", "name", "conclusion", "runner_name")}
-    logs = run(["gh", "api", f"repos/{PROBE_REPOSITORY}/actions/jobs/{job.get('id')}/logs"])
+    logs = job_logs(PROBE_REPOSITORY, job.get("id"))
     reported = None
     for line in logs.splitlines():
         index = line.find(NETWORK_PROBE_MARKER)

@@ -187,7 +187,10 @@ def init(directory, evidence_path, overrides):
         report = {"pass": network["pass"], "targets": network["targets"], "results": network["results"]}
         started = probe_jobs_by_name["network-probe"]["started_at"][:-1]
         scenario["logs"][str(probe_jobs_by_name["network-probe"]["id"])] = (
-            f"{started}.1000000Z printf 'NETWORK_PROBE_%s %s\\n' RESULT \"${{REPORT}}\"\n"
+            # Live job logs carry terminal escape sequences (the run-step echo
+            # is colored), which gh refuses to print without
+            # --allow-escape-sequences.
+            f"{started}.1000000Z \x1b[36;1mprintf 'NETWORK_PROBE_%s %s\\n' RESULT \"${{REPORT}}\"\x1b[0m\n"
             f"{started}.2000000Z NETWORK_PROBE_RESULT {json.dumps(report)}\n")
         targets, checks = network["targets"], network["target_checks"]
         nodes = {}
@@ -347,6 +350,13 @@ def gh(sim, args):
         return 0
     if args[0] != "api":
         return None
+    if "--allow-escape-sequences" in args:
+        args = [arg for arg in args if arg != "--allow-escape-sequences"]
+    elif any("\x1b" in text for text in sim.scenario["logs"].values()) and "/logs" in line:
+        # Like gh 2.8x: a response with escape sequences is refused.
+        print("the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway",
+              file=sys.stderr)
+        return 1
     paginate = args[1:3] == ["--paginate", "--slurp"]
     path = args[3] if paginate else args[1]
     parts = path.split("?")[0].split("/")

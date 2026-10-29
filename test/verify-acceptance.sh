@@ -337,7 +337,7 @@ assert_evidence_workflow_runs() {
               and .network_probe.target_checks.service.port_declared == true
               and .network_probe.target_checks.pod.name == "metrics-server-7c9f8d5b4-q2w3e"
               and .network_probe.target_checks.pod.allowed_by_dns_rule == false' "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1 \
-        && grep -q '^gh api repos/redducklabs/aurolegal.ai/actions/jobs/9100/logs$' "${dir}/calls.log" \
+        && grep -q '^gh api --allow-escape-sequences repos/redducklabs/aurolegal.ai/actions/jobs/9100/logs$' "${dir}/calls.log" \
         && grep -q '^kubectl get pods -A --field-selector status.podIP=10.244.0.150 -o json$' "${dir}/calls.log"; then
         pass "phase A record: network probe result read from the job log, targets resolved read-only in the cluster"
     else
@@ -363,7 +363,7 @@ CASES
     expect_evidence "phase A fails when the metadata service was reachable" $? 1 - "A-network: forbidden connection to imds" '^gh run cancel 777' - "$dir"
     dir=$(sim_dir B-pass)
     run_evidence "$dir" "$(probe_inputs B)"
-    if ! grep -qE '^gh api repos/redducklabs/aurolegal.ai/actions/jobs/[0-9]+/logs|^kubectl get services' "${dir}/calls.log" \
+    if ! grep -qE '^gh api --allow-escape-sequences repos/redducklabs/aurolegal.ai/actions/jobs/[0-9]+/logs|^kubectl get services' "${dir}/calls.log" \
         && jq -e '.network_probe == null' "${REPO_COPY}/acceptance-B.json" > /dev/null 2>&1; then
         pass "phase B: no network probe evidence is read"
     else
