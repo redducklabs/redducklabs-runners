@@ -45,6 +45,15 @@ Subcommands (all share one state file, rewritten after every step):
             queued or in progress and no EphemeralRunner is assigned to it.
             Exit 1 ("CLEANUP: failed") otherwise.
 
+Runner pods: every pod of the scale set (actions.github.com/scale-set-name=
+redducklabs-runners), probe runners and idle warm runners alike, with its node,
+pool, created_at, first_seen and last_seen; ARC 0.14.2 runs minRunners + jobs
+runners (Ruling 43). Each collection also appends to pod_collections the pod
+read's interval (requested_at before the first attempt, observed_at after the
+successful response, retries included) and every runner pod it listed, with
+that read's node (null while unscheduled), pool, phase and terminating flag; the verdict judges placement
+during the hold from these observations, never from a pod's final node.
+
 Every read is tried up to three times with a short backoff; a persistent
 failure still fails the step. Runner pods are recorded with their full spec
 (literal env values redacted, valueFrom references kept) and their container
@@ -103,7 +112,10 @@ POLL_SECONDS = 60
 CLEANUP_POLL_SECONDS = 15
 CLEANUP_WAIT_SECONDS = 10 * 60
 RESTORE_WAIT_SECONDS = 30 * 60
-WARM_WAIT_SECONDS = 15 * 60
+# Phase E: after the smoke probe the operator dispatches Rebalance Runners to
+# retire idle runners left on burst nodes (a batch of N jobs runs minRunners + N
+# runners, Ruling 43), so the warm floor returns to baseline.
+WARM_WAIT_SECONDS = 30 * 60
 # jobs_killed: a run created this long before Phase C can still run jobs in
 # it (re-runs up to 30 days after the initial run, plus the 35-day run limit).
 RUN_LOOKBACK_DAYS = 65
@@ -152,6 +164,25 @@ def run(argv):
             log(f"RETRY: attempt {attempt}/{READ_ATTEMPTS} failed: {error}")
             sleep(READ_BACKOFF_SECONDS[attempt - 1])
     raise AssertionError("unreachable")
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def job_logs(repository, job_id):
+    """A job's log as plain text.
+
+    Job logs carry terminal escape sequences (colored run-step echoes), and
+    gh refuses to print such a response without --allow-escape-sequences
+    (live Phase A evidence run 40797455827). CSI sequences are removed before
+    any line is parsed; any other escape left in the text (OSC, a lone ESC)
+    fails the read rather than parsing a line normalization may have altered.
+    """
+    text = ANSI_ESCAPE.sub("", run(["gh", "api", "--allow-escape-sequences",
+                                    f"repos/{repository}/actions/jobs/{job_id}/logs"]))
+    if "\x1b" in text:
+        raise ReadError(f"job {job_id} log of {repository} contains an unsupported terminal escape sequence")
+    return text
 
 
 def run_json(argv):
@@ -472,7 +503,27 @@ def snapshot(state, final=False):
                      ready_at=ready_at(item) or entry.get("ready_at"),
                      kubelet_version=((item.get("status") or {}).get("nodeInfo") or {}).get("kubeletVersion"),
                      last_seen=stamp)
+    # The pod read's own interval, retries and backoff included: the placement
+    # it returns was observed somewhere in [requested_at, observed_at], which
+    # the verdict requires to lie wholly inside the hold (PR #41 review 2).
+    requested_at = iso(now())
     pods = run_json(["kubectl", "get", "pods", "-n", NAMESPACE, "-l", SCALE_SET_SELECTOR, "-o", "json"]).get("items") or []
+    observed_at = iso(now())
+    # Placement as this collection saw it (Ruling 43): the per-UID snapshot
+    # below keeps only the latest node, so the verdict judges placement during
+    # the hold from these timestamped observations, unscheduled pods included.
+    pools = {(item.get("metadata") or {}).get("name"): node_pool_of(item) for item in nodes}
+    observed = []
+    for item in pods:
+        meta = item.get("metadata") or {}
+        node_name = (item.get("spec") or {}).get("nodeName") or None
+        observed.append({"uid": meta.get("uid"), "runner_name": meta.get("name"), "node": node_name,
+                         "pool": pools.get(node_name) if node_name else None,
+                         "phase": (item.get("status") or {}).get("phase"),
+                         "terminating": bool(meta.get("deletionTimestamp"))})
+    state.setdefault("pod_collections", []).append(
+        {"requested_at": requested_at, "observed_at": observed_at,
+         "pods": sorted(observed, key=lambda pod: str(pod["runner_name"]))})
     for item in pods:
         meta = item.get("metadata") or {}
         entry = shots["pods"].setdefault(meta.get("uid"), {"first_seen": stamp})
@@ -598,7 +649,7 @@ def drain_anchor(state):
         # so its start bounds the upgrade and its completion is the end of the wait.
         anchor["started"] = trim_ts(steps[0].get("startedAt"))
         anchor["completed"] = trim_ts(steps[0].get("completedAt"))
-    logs = run(["gh", "api", f"repos/{FLEET_REPOSITORY}/actions/jobs/{job.get('databaseId')}/logs"])
+    logs = job_logs(FLEET_REPOSITORY, job.get("databaseId"))
     for line in logs.splitlines():
         if DRAIN_READBACK in line:
             anchor["effective"] = trim_ts(line.split(" ", 1)[0])
@@ -860,7 +911,7 @@ def network_probe_evidence(jobs):
         return evidence
     job = matches[0]
     evidence["job"] = {key: job.get(key) for key in ("id", "name", "conclusion", "runner_name")}
-    logs = run(["gh", "api", f"repos/{PROBE_REPOSITORY}/actions/jobs/{job.get('id')}/logs"])
+    logs = job_logs(PROBE_REPOSITORY, job.get("id"))
     reported = None
     for line in logs.splitlines():
         index = line.find(NETWORK_PROBE_MARKER)
@@ -903,6 +954,7 @@ def cmd_finalize(args):
             "events": sorted(state["snapshots"]["events"].values(), key=lambda e: (e["first_timestamp"] or "", e["uid"] or "")),
             "pool_state_checks": state["pool_state_checks"],
             "latest_collection_at": state["latest_collection"]["at"],
+            "pod_collections": state.get("pod_collections") or [],
             "pools_before": state["pools_before"], "pools_after": state.get("pools_latest"),
             "arc_contract_after": arc_contract(state), "phase_c": None,
             "trust_readback": None, "expander_readback": expander_readback(state),

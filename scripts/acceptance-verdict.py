@@ -40,6 +40,40 @@ the Phase C run's start) to latest_collection_at. Other such events (for
 example a worker-pool node OOM, or an event that ended before the phase) are
 reported in notes as diagnostics only.
 
+Runner pods (phases A and B, Ruling 43): ARC 0.14.2's listener sets the
+scale set's target to min(minRunners + assigned jobs, maxRunners)
+(actions-runner-controller gha-runner-scale-set-0.14.2,
+cmd/ghalistener/scaler/scaler.go:237), so the burst contract's warm floor
+(minRunners=2) is added to every probe: a batch of N jobs runs N + 2 runner
+pods, two of them idle. The placement criteria therefore count every runner
+pod of the scale set observed during the hold (probe runners and idle warm
+runners alike), not only the probe's runners. The hold is the interval in
+which every batch entry was in progress (latest started_at to earliest
+completed_at). Placement is judged only from the collector's
+pod_collections that lie wholly inside the hold: a collection's pod read was
+requested at requested_at and answered at observed_at (retries included), and
+it counts only when requested_at >= the hold start and observed_at <= the hold
+end, so a read that crosses the hold end cannot pass off later scheduling as
+in-hold. Each lists every runner pod with the node that read saw (null while
+unscheduled); a pod's final node or lifetime is never used:
+
+  - at least one collection must lie inside the hold;
+  - the latest in-hold collection must show exactly the required placement
+    (Phase A, 14 jobs: 4 pods on baseline and 12 on the primary pool; Phase B,
+    6 jobs: 4 on baseline and 4 on the fallback pool), so a pod still Pending
+    when the hold ends, or scheduled only after it, fails;
+  - every in-hold collection must hold no more than that many runner pods, no
+    pod on a pool outside the phase's pools and none on an unknown pool, so
+    idle-pod turnover or a detour through another pool at any point of the
+    hold fails.
+
+An earlier in-hold collection may still show an idle pod Pending: the hold
+starts when the last job starts, which can precede the node its idle runner
+waits for, and that pod is placed during the hold once the latest in-hold
+collection shows it scheduled. Requiring the exact placement in every in-hold
+collection would fail such runs without any placement having been wrong.
+The concurrency criteria use the probe's job count (14 and 6).
+
 Warm floor (phase E, criterion E-warm): exactly two warm_after runners, on
 baseline, each observed_at == latest_collection_at (the collector's final
 collection, not historical snapshots) and recorded Running, Ready,
@@ -78,8 +112,15 @@ WARM_P95_SECONDS = 90
 COLD_P95_SECONDS = 8 * 60
 
 PHASES = ("A", "B", "C", "D", "E")
-# Mode and matrix size of the probe run each phase requires.
-PROBE_SHAPE = {"A": ("batch", 16), "B": ("batch", 8), "D": ("continuous", 64), "E": ("batch", 8)}
+# Mode and matrix size of the probe run each phase requires. A batch of N jobs
+# runs MIN_RUNNERS + N runner pods (Ruling 43): A 14 -> 16, B 6 -> 8, E 8 -> 10.
+MIN_RUNNERS = 2
+PROBE_SHAPE = {"A": ("batch", 14), "B": ("batch", 6), "D": ("continuous", 64), "E": ("batch", 8)}
+# Runner pods by pool during the hold (every pod of the scale set).
+HOLD_PLACEMENT = {"A": {BASELINE: 4, PRIMARY: 12}, "B": {BASELINE: 4, FALLBACK: 4}}
+PLACEMENT_CRITERION = {"A": "A-primary-only", "B": "B-placement"}
+UNSCHEDULED = "unscheduled"
+UNKNOWN_POOL = "unknown-pool"
 PROBE_JOB = re.compile(r"^(batch|continuous) ([0-9]+)$")
 
 
@@ -222,9 +263,74 @@ def check_pickup(phase, evidence, jobs, failures, report):
         failures.append(f"pickup-cold: cold pickup p95 {p95(cold):.0f}s exceeds {COLD_P95_SECONDS}s")
 
 
-def probe_pods(evidence, jobs):
-    pods = pod_index(evidence)
-    return [pods[job.get("runner_name")] for job in jobs if job.get("runner_name") in pods]
+def hold_window(jobs):
+    """(start, end) epochs in which every batch entry was in progress; None
+    when an entry has no start or end, or the entries never all overlapped."""
+    if not jobs or any(not job.get("started_at") or not job.get("completed_at") for job in jobs):
+        return None
+    start = max(ts(job["started_at"], f"job {job.get('name')} started_at") for job in jobs)
+    end = min(ts(job["completed_at"], f"job {job.get('name')} completed_at") for job in jobs)
+    return (start, end) if start <= end else None
+
+
+def collection_placement(collection):
+    """Runner pods of one collection by pool, as that collection saw them."""
+    placement = {}
+    for pod in collection.get("pods") or []:
+        where = (pod.get("pool") or UNKNOWN_POOL) if pod.get("node") else UNSCHEDULED
+        placement[where] = placement.get(where, 0) + 1
+    return placement
+
+
+def iso_at(epoch):
+    return f"{datetime.fromtimestamp(epoch, timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
+
+
+def hold_placement(phase, evidence, jobs, failures, notes):
+    """Placement of every runner pod of the scale set during the hold, from
+    the collections taken inside it (Ruling 43; see the module docstring).
+
+    Returns the latest in-hold collection's placement, or None when it cannot
+    be judged: no hold fails {phase}-runners, no in-hold collection fails the
+    phase's placement criterion. Breaches in earlier in-hold collections are
+    appended to failures here."""
+    window = hold_window(jobs)
+    if window is None:
+        failures.append(f"{phase}-runners: no instant at which all {len(jobs)} entries were in progress; "
+                        "runner placement during the hold cannot be judged")
+        return None
+    start, end = window
+    label = PLACEMENT_CRITERION[phase]
+    held = []
+    for collection in evidence.get("pod_collections") or []:
+        requested = ts(collection.get("requested_at"), "pod collection requested_at")
+        observed = ts(collection.get("observed_at"), "pod collection observed_at")
+        if observed < requested:
+            raise EvidenceError(f"pod collection observed_at {collection.get('observed_at')} precedes its requested_at")
+        if start <= requested and observed <= end:
+            held.append((observed, collection))
+    held.sort(key=lambda item: item[0])
+    if not held:
+        failures.append(f"{label}: no runner-pod collection inside the hold {iso_at(start)}..{iso_at(end)}; "
+                        "placement during the hold was not observed")
+        return None
+    total = sum(HOLD_PLACEMENT[phase].values())
+    allowed = set(HOLD_PLACEMENT[phase]) | {UNSCHEDULED}
+    for at, collection in held:
+        placement = collection_placement(collection)
+        stray = {name: count for name, count in placement.items() if name not in allowed}
+        if stray or sum(placement.values()) > total:
+            failures.append(f"{label}: collection at {iso_at(at)} inside the hold saw runner pods {placement}; "
+                            f"at most {total}, only on {sorted(HOLD_PLACEMENT[phase])} or not yet scheduled")
+    at, latest = held[-1]
+    placement = collection_placement(latest)
+    probe_runners = {job.get("runner_name") for job in jobs}
+    idle = sum(1 for pod in latest.get("pods") or [] if pod.get("runner_name") not in probe_runners)
+    notes.append(f"Phase {phase}: runner pods during the hold {iso_at(start)}..{iso_at(end)} "
+                 f"({len(held)} collections wholly inside it; latest observed at {iso_at(at)}) by pool {placement} "
+                 f"({sum(placement.values()) - idle} probe runners, {idle} without a probe job; "
+                 f"ARC target minRunners {MIN_RUNNERS} + {len(jobs)} jobs)")
+    return placement
 
 
 def burst_nodes_before_run(evidence):
@@ -338,14 +444,16 @@ def phase_a(evidence, failures, report, notes):
         failures.append(f"A-setup: burst nodes existed before the probe (not from zero): {', '.join(pre)}")
     expander_matches(evidence, failures, "A-setup")
     check_batch("A", jobs, failures)
-    pods = probe_pods(evidence, jobs)
-    on_baseline = sum(1 for pod in pods if pod.get("pool") == BASELINE)
-    if on_baseline != 4:
-        failures.append(f"A-baseline: {on_baseline} probe runners on {BASELINE}, expected 4")
-    off_primary = [pod.get("runner_name") for pod in pods if pod.get("pool") not in (BASELINE, PRIMARY)]
+    placement = hold_placement("A", evidence, jobs, failures, notes)
+    expected = HOLD_PLACEMENT["A"]
+    if placement is not None and placement.get(BASELINE, 0) != expected[BASELINE]:
+        failures.append(f"A-baseline: {placement.get(BASELINE, 0)} runner pods on {BASELINE} in the latest collection inside the hold, "
+                        f"expected {expected[BASELINE]}")
+    outside = {name: count for name, count in (placement or {}).items() if name not in (BASELINE, PRIMARY)}
     fallback_nodes = [node.get("name") for node in evidence.get("nodes") or [] if node.get("pool") == FALLBACK]
-    if off_primary or fallback_nodes:
-        failures.append(f"A-primary-only: burst capacity outside {PRIMARY}: runners {off_primary}, fallback nodes {fallback_nodes}")
+    if (placement is not None and (placement.get(PRIMARY, 0) != expected[PRIMARY] or outside)) or fallback_nodes:
+        failures.append(f"A-primary-only: runner pods in the latest collection inside the hold {placement}, expected {expected[PRIMARY]} on "
+                        f"{PRIMARY} and none elsewhere; fallback nodes {fallback_nodes}")
     check_compatibility("A", evidence, PRIMARY, failures)
     check_pickup("A", evidence, jobs, failures, report)
     # A-network (runner network isolation): check_network_probe.
@@ -363,12 +471,10 @@ def phase_b(evidence, failures, report, notes):
     if pre:
         failures.append(f"B-setup: burst nodes existed before the probe (not from zero): {', '.join(pre)}")
     check_batch("B", jobs, failures)
-    pods = probe_pods(evidence, jobs)
-    placement = {}
-    for pod in pods:
-        placement[pod.get("pool")] = placement.get(pod.get("pool"), 0) + 1
-    if placement.get(BASELINE, 0) != 4 or placement.get(FALLBACK, 0) != 4 or len(pods) != 8:
-        failures.append(f"B-placement: probe runners by pool {placement}, expected 4 on {BASELINE} and 4 on {FALLBACK}")
+    placement = hold_placement("B", evidence, jobs, failures, notes)
+    if placement is not None and placement != HOLD_PLACEMENT["B"]:
+        failures.append(f"B-placement: runner pods in the latest collection inside the hold by pool {placement}, expected 4 on {BASELINE} "
+                        f"and 4 on {FALLBACK} (unscheduled pods count as placed nowhere)")
     fallback = [node for node in evidence.get("nodes") or [] if node.get("pool") == FALLBACK]
     primary = [node.get("name") for node in evidence.get("nodes") or [] if node.get("pool") == PRIMARY]
     if len(fallback) != 2 or primary:

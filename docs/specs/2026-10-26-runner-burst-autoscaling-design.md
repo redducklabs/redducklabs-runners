@@ -21,7 +21,10 @@ the stop marker); 2026-10-28, rollout Ruling 38 (the burst pools use
 (Ruling 38)"); 2026-10-28, rollout Ruling 39 (doctl omits zero-valued
 node-pool fields; see "Node-pool list encoding (Ruling 39)"); 2026-10-28,
 rollout Ruling 40 (DOKS creates the priority-expander ConfigMap only after
-the expander update; see "Priority-expander ConfigMap creation (Ruling 40)").
+the expander update; see "Priority-expander ConfigMap creation (Ruling 40)");
+2026-10-29, acceptance Ruling 43 (ARC adds `minRunners` to the job count, so
+the acceptance batch sizes and placement criteria count every runner pod; see
+"Runner count during a probe (Ruling 43)").
 
 ## Problem
 
@@ -788,11 +791,58 @@ during it.
 
 | Phase | Setup | Pass criteria |
 |---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=16 | 16 distinct runners concurrent; 4 on baseline; all burst nodes from the primary pool (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
-| B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=8 | 4 runners on baseline, 4 on two fallback nodes created from zero; fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
+| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no fallback node (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
+| B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=6 (8 runner pods) | 6 distinct runners concurrent; during the hold, of every runner pod of the scale set, 4 on baseline and 4 on exactly two fallback nodes created from zero, none on the primary and none unscheduled; fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
 | C. Idle retirement and return to zero | after A; Scale Runners `acceptance-phase-c` sets `minRunners=8` (4 idle runners must land on burst nodes because baseline holds 4); retirement runs with zero free baseline slots; then `minRunners` returns to 4 and then 2 | retirement deletes nothing while baseline is full; once ARC removes surplus runners, any idle runner left on a burst node is retired and replaced on baseline; both burst pools reach 0 nodes within 60 minutes; no job killed |
 | D. Drain under continuing load | a probe that keeps 12 jobs in flight, submitting a new job as each finishes, while Deploy `drain` runs | in-flight jobs on burst nodes complete; every runner pod created after `drain` is on baseline; no Pending runner pod triggers scale-up; burst pools reach zero nodes |
-| E. Restore and ready-for-migration | after D: Node Pool Sizing `remove-burst`, Deploy `rollback`, then rollout steps 3–4 again | `density` readback after rollback; then `burst` readback, three pools with expected IDs and bounds, expander readback, trust-boundary readback, two warm runners on baseline; an N=8 smoke run passes |
+| E. Restore and ready-for-migration | after D: Node Pool Sizing `remove-burst`, Deploy `rollback`, then rollout steps 3–4 again; after the smoke run, Rebalance Runners retires idle runners left on burst nodes | `density` readback after rollback; then `burst` readback, three pools with expected IDs and bounds, expander readback, trust-boundary readback, two warm runners on baseline; an N=8 smoke run (10 runner pods) passes |
+
+### Runner count during a probe (Ruling 43)
+
+ARC 0.14.2's listener sets the scale set's target to
+`min(minRunners + assigned jobs, maxRunners)`
+(`actions/actions-runner-controller` tag `gha-runner-scale-set-0.14.2`,
+`cmd/ghalistener/scaler/scaler.go:237`:
+`targetRunnerCount := min(w.config.MinRunners+count, w.config.MaxRunners)`).
+The burst contract's warm floor (`minRunners=2`) is therefore added to every
+probe: a batch of N jobs runs N + 2 runner pods, two of them idle. The first
+Phase A attempt (probe run `redducklabs/aurolegal.ai` 40797434260, 16 jobs)
+ran 18 runners and created six primary (`s-8vcpu-16gb-amd`) and two fallback
+(`s-8vcpu-16gb-intel`) burst nodes: baseline holds 4 runner pods and the
+primary at most 12, so the 16-job design could never pass "primary only", and
+the 8-job Phase B (10 runners, fallback capacity 4) would have left two pods
+Pending.
+
+Acceptance is re-planned to the capacity: Phase A runs 14 jobs (16 runner
+pods = 4 baseline + 12 primary on six nodes, no fallback) and Phase B runs 6
+jobs (8 runner pods = 4 baseline + 4 fallback on two nodes, primary closed).
+Placement counts every runner pod of the scale set observed during the hold
+(the interval in which every batch entry was in progress), probe runners and
+idle warm runners alike, because which runners stay idle is chosen by GitHub's
+job assignment, not by the fleet. It is judged only from the evidence run's
+collections wholly inside the hold, each recording every runner pod with the
+node its pod read saw (none while Pending), never from a pod's final node
+(PR #41 review). A collection records its pod read's interval, `requested_at`
+before the first attempt and `observed_at` after the successful response
+(retries and backoff included), and counts only when `requested_at` is at or
+after the hold start and `observed_at` at or before the hold end, so a read
+that crosses the hold end cannot pass off later scheduling as in-hold. At
+least one such collection must exist; the
+latest in-hold collection must show exactly the required placement, so a pod
+still Pending at the end of the hold, or scheduled only after it, fails; and
+no in-hold collection may list more runner pods than the target or a pod on
+another pool, so idle-pod turnover or a detour fails. An earlier in-hold
+collection may show an idle pod Pending, because the hold starts when the last
+job starts, which can precede the node that pod waits for. Concurrency
+criteria use the probe's job count (14 and 6). The probe's barrier waits for `jobs` entries in progress on
+distinct runners, and `jobs` batch entries exist, so it is reached with the new
+counts; the two extra runners are idle and outside it. Phase D is unaffected:
+before the drain, 12 entries in flight run 14 runners (within 20 and the 16
+runner slots), and after it the drain contract caps the fleet at four runners
+and the drain retires idle burst runners. Phase E's 8-job smoke run runs 10
+runners; its two idle runners can stay on burst nodes after the run, so the
+operator dispatches Rebalance Runners once the smoke run completes and the
+evidence run waits up to 30 minutes for two warm runners on baseline.
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
 uses that to make the fallback the only eligible burst group. There is no

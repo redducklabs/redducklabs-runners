@@ -6,9 +6,18 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "A-16-jobs-fallback-overflow": {
+  "criteria": [
+   "A-primary-only",
+   "probe-identity"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-baseline-3": {
   "criteria": [
-   "A-baseline"
+   "A-baseline",
+   "A-primary-only"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -16,6 +25,13 @@
  "A-cold-p95-9min": {
   "criteria": [
    "pickup-cold"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-collections-after-hold": {
+  "criteria": [
+   "A-primary-only"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -49,6 +65,20 @@
   "ready_for_migration": false
  },
  "A-fallback-node": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-idle-pending-through-hold": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-idle-turnover": {
   "criteria": [
    "A-primary-only"
   ],
@@ -137,7 +167,17 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-idle-pending-early": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-pre-phase-runner-node-oom": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "A-pass-warm-on-baseline": {
   "criteria": [],
   "pass": true,
   "ready_for_migration": false
@@ -175,6 +215,13 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "B-collection-crosses-hold-end": {
+  "criteria": [
+   "B-placement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "B-compatibility-missing": {
   "criteria": [
    "B-compatibility"
@@ -192,6 +239,20 @@
  "B-pass": {
   "criteria": [],
   "pass": true,
+  "ready_for_migration": false
+ },
+ "B-pending-pods": {
+  "criteria": [
+   "B-placement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-pending-then-scheduled-after-hold": {
+  "criteria": [
+   "B-placement"
+  ],
+  "pass": false,
   "ready_for_migration": false
  },
  "B-placement-on-primary": {

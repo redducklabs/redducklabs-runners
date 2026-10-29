@@ -255,6 +255,20 @@ or running and no runner is assigned to it. Its GitHub reads, the cancel, and
 the trust readback use `RUNNER_TOKEN`, which needs read access to
 `redducklabs/aurolegal.ai` Actions plus permission to cancel its runs.
 
+Runner count (Ruling 43): ARC 0.14.2 targets `minRunners` plus the assigned
+jobs, so a batch of N jobs runs N + 2 runner pods, two of them idle. Phase A
+therefore runs 14 jobs (16 pods: 4 baseline + 12 on six primary nodes) and
+Phase B 6 jobs (8 pods: 4 baseline + 4 on two fallback nodes); the placement
+criteria count every runner pod of the scale set seen during the hold, probe
+and idle runners alike, from the evidence run's collections whose pod read
+(request to response, retries included) lies wholly inside the hold (the latest
+must show the exact placement; none may list more pods or another pool), so
+the evidence run must be collecting before the hold ends. The probe's barrier waits for `jobs` entries in
+progress, so the two idle runners do not affect it. Do not raise the batch
+sizes: 16 jobs (18 pods) overflow into the fallback and fail `A-primary-only`.
+Idle runners can stay on burst nodes after a batch; Rebalance Runners retires
+them (hourly, or dispatch it as below).
+
 Pickup thresholds for phases A, B and E: warm pickup p95 ≤ 90 s, cold pickup
 p95 ≤ 8 minutes (a job is cold when its runner's node was created after the job
 was queued). Phase D has no pickup criterion: the drain caps the fleet at four
@@ -286,7 +300,7 @@ TAG=runner-burst-acceptance-$(date -u +%Y%m%d-%H%M%S)
 git -C aurolegal.ai tag -a "$TAG" "$AURO" -m "runner burst acceptance"
 git -C aurolegal.ai push origin "$TAG"
 gh workflow run runner-burst-acceptance.yml -R redducklabs/aurolegal.ai --ref "$TAG" \
-  -f expected_workflow_sha="$AURO" -f mode=batch -f jobs=16 -f network_targets="$TARGETS"
+  -f expected_workflow_sha="$AURO" -f mode=batch -f jobs=14 -f network_targets="$TARGETS"
 PROBE=$(gh run list -R redducklabs/aurolegal.ai -w runner-burst-acceptance.yml -b "$TAG" \
   -L 1 --json databaseId -q '.[0].databaseId')
 gh workflow run runner-acceptance-evidence.yml -R redducklabs/redducklabs-runners \
@@ -303,7 +317,7 @@ FLEET=redducklabs/redducklabs-runners
 AURO_REPO=redducklabs/aurolegal.ai
 probe() {  # mode [jobs]
   gh workflow run runner-burst-acceptance.yml -R "$AURO_REPO" --ref "$TAG" \
-    -f expected_workflow_sha="$AURO" -f mode="$1" -f jobs="${2:-16}"
+    -f expected_workflow_sha="$AURO" -f mode="$1" -f jobs="${2:-14}"
 }
 latest() {  # workflow file in $FLEET -> newest run ID
   gh run list -R "$FLEET" -w "$1" -L 1 --json databaseId -q '.[0].databaseId'
@@ -316,7 +330,7 @@ Phase B (fallback from zero):
 gh workflow run node-pool-sizing.yml -R "$FLEET" -f operation=set-burst-maxima \
   -f primary_max=0 -f fallback_max=2 -f apply=true -f expected_sha="$SHA"
 # wait for that run to succeed and both burst pools to show 0 nodes, then:
-probe batch 8    # then set PROBE as above
+probe batch 6    # 8 runner pods; then set PROBE as above
 gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=B \
   -f probe_run_id="$PROBE" -f dispatch_tag="$TAG" -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
 # when the probe run completes (the evidence run waits up to 30 minutes):
@@ -351,29 +365,36 @@ Phase E (restore and ready-for-migration): after Phase D, run Node Pool Sizing
 gh workflow run deploy-runners.yml -R "$FLEET" -f operation=rollback -f expected_sha="$SHA"
 ROLLBACK=$(latest deploy-runners.yml)   # wait for it to succeed, then rollout steps 3-4
 BASELINE_RUN=<the passing Phase A Runner Acceptance Evidence run ID>
-probe batch 8    # then set PROBE as above
+probe batch 8    # 10 runner pods; then set PROBE as above
 gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=E \
   -f probe_run_id="$PROBE" -f rollback_run_id="$ROLLBACK" -f baseline_run_id="$BASELINE_RUN" \
   -f dispatch_tag="$TAG" -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
+# when the probe run completes, retire the two idle runners left on burst
+# nodes (the evidence run waits up to 30 minutes for two warm runners on baseline):
+gh workflow run rebalance-runners.yml -R "$FLEET" -f expected_sha="$SHA"
 ```
+
+After Phases A and B the two idle runners can also hold burst nodes. Phase C
+needs both burst pools at 0 nodes, so dispatch Rebalance Runners the same way
+after the evidence run completes instead of waiting for the hourly run.
 
 The evidence run verifies the probe first and marks it for cleanup, then the
 anchor runs; a rejected anchor run still cancels the verified probe.
 
 | Phase | Setup | Probe | Evidence dispatch | Pass criteria |
 |---|---|---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=16`, `network_targets` | `phase=A`, probe | 16 distinct concurrent runners; exactly 4 on baseline; every burst node in the primary pool; `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
-| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=8` | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 4 runners on baseline and 4 on exactly two new fallback nodes; a passing pool-state check (compatibility, headroom) covering both fallback nodes, the first live measurement of `s-8vcpu-16gb-intel` allocatable; primary back at 0/6; pickup thresholds |
+| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=14` (16 runner pods), `network_targets` | `phase=A`, probe | 14 distinct concurrent runners; during the hold, of every runner pod of the scale set (probe and idle), exactly 4 on baseline and 12 on the primary pool, none elsewhere, and no fallback node; `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
+| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=6` (8 runner pods) | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 6 distinct concurrent runners; during the hold, of every runner pod of the scale set, exactly 4 on baseline and 4 on exactly two new fallback nodes, none on the primary and none unscheduled; a passing pool-state check (compatibility, headroom) covering both fallback nodes, the first live measurement of `s-8vcpu-16gb-intel` allocatable; primary back at 0/6; pickup thresholds |
 | C. Idle retirement and return to zero | after A, pools at 0 nodes | none | dispatch Scale Runners `acceptance-phase-c`, then `phase=C`, `phase_c_run_id` | every cycle 4 baseline + 4 burst at minRunners=8 with nothing retired; a burst survivor retired (or three cycles recorded `fixture-only`, which passes with a tracked follow-up); burst pools at zero nodes within 60 minutes; `jobs_killed=0` (fleet jobs, on `redducklabs-runners-*` runners, cancelled or failed with `completed_at` inside the Phase C run, in every attempt of every workflow run created up to 65 days before it, measured by the evidence workflow); ARC `burst` |
 | D. Drain under continuing load | after C | `continuous` | start the probe, wait until about 12 entries run, dispatch Deploy `drain`, then `phase=D`, probe, `drain_run_id` | drain run is this repository's Deploy `drain` at `$SHA`, success; ≥ 8 entries in progress when its "Drain runners" step started; ≥ 1 in progress throughout until it completed; entries still queued or running when it completed; every entry succeeded; every scheduled runner pod created after the drain READBACK is on baseline (pods never seen scheduled are reported, not failed); no `TriggeredScaleUp` for a runner pod after it; burst pools at zero nodes; ARC `drain` |
-| E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` | `phase=E`, probe, `rollback_run_id`, `baseline_run_id` | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline, observed in the evidence workflow's final collection (`latest_collection_at`): Running, Ready, not terminating and idle; smoke run passes; prints `READY_FOR_MIGRATION=true` |
+| E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` (10 runner pods) | `phase=E`, probe, `rollback_run_id`, `baseline_run_id`; **after the probe completes, dispatch Rebalance Runners** (the evidence run waits up to 30 minutes for two warm runners on baseline) | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline, observed in the evidence workflow's final collection (`latest_collection_at`): Running, Ready, not terminating and idle; smoke run passes; prints `READY_FOR_MIGRATION=true` |
 
 Phase B note: there is no alternate Phase B shape. `create-burst` already
 created both pools at `max_nodes=0`, so DigitalOcean accepts a closed primary. If
 the `set-burst-maxima primary_max=0` run is nevertheless rejected, stop
 acceptance: Phase B needs a reviewed change to this procedure and to
-`scripts/acceptance-verdict.py` (which accepts only primary 0/0, eight jobs and
-4 baseline + 4 fallback runners) before it is re-run. A provider 422/backoff is
+`scripts/acceptance-verdict.py` (which accepts only primary 0/0, six jobs and
+4 baseline + 4 fallback runner pods) before it is re-run. A provider 422/backoff is
 not reproduced live; that path is covered by fixtures and the documented
 autoscaler behavior and is recorded as untested live.
 
@@ -599,3 +620,11 @@ appear, zero values the API fills in once the autoscaler configuration exists
 reviewed commit that contains the Ruling 41 fix: the expanders are a `NOOP`
 and it writes the priorities. Phase C proves that scale-down still works with
 these zero values.
+
+2026-10-29, at main `18f6d50`: rollout steps 1-4 done. Phase A attempt 1:
+probe run 40797434260 (16 jobs) succeeded, but its evidence run 40797455827
+failed reading the network-probe log (terminal escape sequences, Ruling 42),
+and the probe created six primary and two fallback nodes because ARC ran
+16 + 2 runners (Ruling 43). Re-run Phase A with `jobs=14` at the reviewed
+commit that contains both fixes, once both burst pools are back at 0 nodes
+(dispatch Rebalance Runners to retire idle runners still holding burst nodes).
