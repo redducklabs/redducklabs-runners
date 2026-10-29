@@ -244,6 +244,16 @@ def doctl(directory, args):
         cluster = matches[0]
         expanders = [e for e in flags["expanders"][-1].split(",") if e]
         configuration = cluster.setdefault("cluster_autoscaler_configuration", {})
+        # Like DOKS (run 40768656384): once the configuration object exists,
+        # the API returns the fields doctl did not send as zero values.
+        configuration.setdefault("scale_down_utilization_threshold", 0)
+        configuration.setdefault("scale_down_unneeded_time", "")
+        if os.path.isfile(path(directory, "autoscaler-threshold-changed")):
+            configuration["scale_down_utilization_threshold"] = 0.8
+        if os.path.isfile(path(directory, "autoscaler-threshold-zeroed")):
+            configuration["scale_down_utilization_threshold"] = 0
+        if os.path.isfile(path(directory, "autoscaler-time-emptied")):
+            configuration["scale_down_unneeded_time"] = ""
         if expanders:
             configuration["expanders"] = expanders
         else:
