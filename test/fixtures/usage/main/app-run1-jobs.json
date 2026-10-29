@@ -14,7 +14,8 @@
     "runner_group_name": "redducklabs-private-runners",
     "labels": [
      "redducklabs-runners"
-    ]
+    ],
+    "name": "build ✓ ünïcode"
    },
    {
     "id": 102,

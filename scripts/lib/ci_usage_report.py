@@ -52,6 +52,7 @@ import re
 import shlex
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 DEFAULT_ORG = "redducklabs"
@@ -65,6 +66,7 @@ RUN_LIST_CAP = 1000
 RUN_MIN_SLICE_SECONDS = 3600
 RERUN_LOOKBACK_DAYS = 3
 READ_ATTEMPTS = 3
+JOB_READ_WORKERS = 6
 READ_BACKOFF_SECONDS = (5, 15)
 # Fleet thresholds: the baseline's two nodes run 4 jobs; ARC maxRunners is 20.
 CONCURRENCY_THRESHOLDS = (4, 16, 20)
@@ -113,14 +115,19 @@ class ReadError(Exception):
 
 def run_once(argv):
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+        completed = subprocess.run(argv, capture_output=True, check=False)
     except OSError as error:
         raise ReadError(f"could not run {argv[0]}: {error.strerror}") from error
     if completed.returncode != 0:
-        detail = (completed.stderr or "").strip().splitlines()
+        detail = completed.stderr.decode("utf-8", errors="replace").strip().splitlines()
         raise ReadError(f"'{' '.join(argv[:5])}' failed (exit {completed.returncode})"
                         + (f": {detail[0][:200]}" if detail else ""))
-    return completed.stdout
+    # gh prints UTF-8 (job and workflow names may hold any character), whatever
+    # the locale; decoding with the locale default (cp1252 on Windows) fails.
+    try:
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReadError(f"'{' '.join(argv[:5])}' did not print UTF-8") from error
 
 
 def sleep(seconds):
@@ -220,7 +227,7 @@ def run_jobs(org, repo, run_id):
 
 def window_jobs(org, repo, start, end):
     """Jobs (every attempt) of org/repo that started in [start, end)."""
-    seen, jobs = set(), []
+    seen, to_read, jobs = set(), [], []
     for run_data in runs_created_between(org, repo, start - RERUN_LOOKBACK_DAYS * 86400, end):
         run_id = run_data.get("id") if isinstance(run_data, dict) else None
         if not isinstance(run_id, int):
@@ -231,10 +238,15 @@ def window_jobs(org, repo, start, end):
         updated = epoch_of(run_data.get("updated_at"))
         if updated is not None and updated < start:
             continue
-        for job in run_jobs(org, repo, run_id):
-            started = epoch_of(job.get("started_at")) if isinstance(job, dict) else None
-            if started is not None and start <= started < end:
-                jobs.append(job)
+        to_read.append(run_id)
+    # Job lists are independent reads; a few in parallel keep a busy week well
+    # inside the workflow timeout without approaching GitHub's concurrency limits.
+    with ThreadPoolExecutor(max_workers=JOB_READ_WORKERS) as pool:
+        for run_job_list in pool.map(lambda run_id: run_jobs(org, repo, run_id), to_read):
+            for job in run_job_list:
+                started = epoch_of(job.get("started_at")) if isinstance(job, dict) else None
+                if started is not None and start <= started < end:
+                    jobs.append(job)
     return jobs
 
 
@@ -537,6 +549,10 @@ def main(argv):
             jobs_by_repo[repo["name"]] = window_jobs(org, repo["name"], start, end)
         except ReadError as error:
             unreadable.append({"repository": repo["name"], "reason": str(error)})
+            print(f"UNREADABLE: {org}/{repo['name']}: {error}", file=sys.stderr, flush=True)
+            continue
+        print(f"READ: {org}/{repo['name']}: {len(jobs_by_repo[repo['name']])} jobs started in the window",
+              file=sys.stderr, flush=True)
     report = summarize(org, repos, start, end, report_time, jobs_by_repo, unreadable)
     if options["json"]:
         with open(options["json"], "w", encoding="utf-8") as stream:
