@@ -409,23 +409,14 @@ RUN apt-get clean && \
     mkdir -p /home/runner/go/{bin,src,pkg} && \
     chown -R runner:runner /home/runner/go
 
-# Writable tool cache for actions/setup-* (setup-python, setup-node, setup-go,
-# ...). actions/runner resolves its tool directory from RUNNER_TOOL_CACHE, then
-# RUNNER_TOOLSDIRECTORY, then AGENT_TOOLSDIRECTORY, else <work>/_tool
-# (src/Runner.Common/HostContext.cs, WellKnownDirectory.Tools), and
-# @actions/tool-cache reads RUNNER_TOOL_CACHE. The Linux Python builds that
-# setup-python downloads from actions/python-versions are configured with
-# --prefix and an rpath under /opt/hostedtoolcache/Python/<ver>/x64, so their
-# libpython resolves only when installed at exactly that path; under the
-# default <work>/_tool they cannot load it. The python-versions installer
-# prefers AGENT_TOOLSDIRECTORY over RUNNER_TOOL_CACHE, so both name the same
-# path. The directory is owned by the runner user so jobs install into it
-# without sudo; it lives in the container's writable layer and is discarded
-# with the ephemeral pod. No pod-spec volume is needed, so the burst, drain and
-# density values contracts are unchanged.
-ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache
-ENV AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
-RUN install -d -m 0755 -o runner -g runner /opt/hostedtoolcache
+# The actions/setup-* tool cache (/opt/hostedtoolcache, RUNNER_TOOL_CACHE and
+# AGENT_TOOLSDIRECTORY) is deliberately NOT baked into this image. Container
+# jobs bind-mount the tool directory through the DinD sidecar, whose
+# filesystem never sees this image's layers, so the directory must be a pod
+# volume shared by the runner and dind containers. It is declared in
+# deploy/dind-values.yaml (burst and drain contracts). Pods without it, such
+# as the density rollback target, keep the runner default <work>/_tool on the
+# shared work volume.
 
 # Clean kubectl config to ensure no inherited contexts
 RUN rm -rf /root/.kube /home/runner/.kube

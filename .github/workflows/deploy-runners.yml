@@ -842,6 +842,8 @@ jobs:
               if {(item.get("name"), item.get("value")) for item in runner.get("env", [])} != {
                   ("DOCKER_HOST", "unix:///var/run/docker.sock"),
                   ("RUNNER_WAIT_FOR_DOCKER_IN_SECONDS", "120"),
+                  ("RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"),
+                  ("AGENT_TOOLSDIRECTORY", "/opt/hostedtoolcache"),
               }:
                   raise SystemExit("admission changed runner/DinD coordination")
               if dind.get("args") != [
@@ -852,10 +854,16 @@ jobs:
               if dind.get("env") != [{"name": "DOCKER_GROUP_GID", "value": "123"}]:
                   raise SystemExit("admission changed the DinD group identity")
 
-              validate_mounts(runner, {("work", "/home/runner/_work"), ("dind-sock", "/var/run")})
+              # The tool cache must be the same volume at the same path in the
+              # runner and dind: container jobs bind-mount it through dockerd.
+              validate_mounts(runner, {
+                  ("work", "/home/runner/_work"), ("dind-sock", "/var/run"),
+                  ("tool-cache", "/opt/hostedtoolcache"),
+              })
               validate_mounts(dind, {
                   ("work", "/home/runner/_work"), ("dind-sock", "/var/run"),
                   ("dind-externals", "/home/runner/externals"),
+                  ("tool-cache", "/opt/hostedtoolcache"),
               })
               validate_mounts(externals, {("dind-externals", "/home/runner/tmpDir")})
               volumes = spec.get("volumes", [])
@@ -871,7 +879,7 @@ jobs:
                   for mount in container.get("volumeMounts", [])
               ):
                   raise SystemExit("admission injected a service-account token mount")
-              expected_volumes = {"work", "dind-sock", "dind-externals"}
+              expected_volumes = {"work", "dind-sock", "dind-externals", "tool-cache"}
               for volume in volumes:
                   name = volume.get("name")
                   if name in expected_volumes:

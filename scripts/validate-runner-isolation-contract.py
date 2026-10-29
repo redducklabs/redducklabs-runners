@@ -111,6 +111,34 @@ BASELINE_POOL_EXPRESSION = {
 DOCKER_HUB_MIRROR_FLAG = "--registry-mirror=https://mirror.gcr.io"
 
 
+# Burst, burst-acceptance and drain carry the actions/setup-* tool cache: one
+# plain emptyDir mounted at the same path in the runner and the dind sidecar
+# (container jobs bind-mount the tool directory and dockerd resolves bind
+# sources in its own filesystem), with RUNNER_TOOL_CACHE and
+# AGENT_TOOLSDIRECTORY naming it. Density and legacy-isolated do not, so their
+# pods keep the runner default <work>/_tool and recorded releases still match.
+TOOL_CACHE_PATH = "/opt/hostedtoolcache"
+TOOL_CACHE_VOLUME = "tool-cache"
+TOOL_CACHE_ENV = [
+    {"name": "RUNNER_TOOL_CACHE", "value": TOOL_CACHE_PATH},
+    {"name": "AGENT_TOOLSDIRECTORY", "value": TOOL_CACHE_PATH},
+]
+
+
+def add_tool_cache(template: dict) -> None:
+    mount = {"mountPath": TOOL_CACHE_PATH, "name": TOOL_CACHE_VOLUME}
+    for container in template["initContainers"]:
+        if container["name"] == "dind":
+            container["volumeMounts"] = container["volumeMounts"] + [dict(mount)]
+    for container in template["containers"]:
+        if container["name"] == "runner":
+            container["env"] = container["env"] + [dict(item) for item in TOOL_CACHE_ENV]
+            container["volumeMounts"] = container["volumeMounts"] + [dict(mount)]
+    template["volumes"] = template["volumes"] + [
+        {"emptyDir": {}, "name": TOOL_CACHE_VOLUME}
+    ]
+
+
 def burst_metadata() -> dict:
     return {
         "annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}
@@ -118,11 +146,13 @@ def burst_metadata() -> dict:
 
 
 def burst_template(rendered: bool) -> dict:
-    """Density template plus a preferred (weight 100) baseline-pool affinity."""
+    """Density template plus the Docker Hub mirror, the shared tool cache and a
+    preferred (weight 100) baseline-pool affinity."""
     template = density_template(rendered)
     for container in template["initContainers"]:
         if container["name"] == "dind":
             container["args"] = container["args"] + [DOCKER_HUB_MIRROR_FLAG]
+    add_tool_cache(template)
     template["affinity"] = {
         "nodeAffinity": {
             "preferredDuringSchedulingIgnoredDuringExecution": [
