@@ -51,8 +51,12 @@ pool, created_at, first_seen and last_seen; ARC 0.14.2 runs minRunners + jobs
 runners (Ruling 43). Each collection also appends to pod_collections the pod
 read's interval (requested_at before the first attempt, observed_at after the
 successful response, retries included) and every runner pod it listed, with
-that read's node (null while unscheduled), pool, phase and terminating flag; the verdict judges placement
-during the hold from these observations, never from a pod's final node.
+that read's node (null while unscheduled), pool, phase, terminating flag and
+the job fields of its EphemeralRunner read in the same interval (Ruling 44:
+probe, non-probe or idle); pool_collections records each node-pool read
+(count, min, max, registered nodes per runner pool) with its own interval.
+The verdict judges placement during the hold from these observations, never
+from a pod's final node.
 
 Every read is tried up to three times with a short backoff; a persistent
 failure still fails the step. Runner pods are recorded with their full spec
@@ -472,6 +476,12 @@ def cluster_and_pools(cluster_name):
     return cluster, pools
 
 
+def runner_job(item):
+    """The job fields of an EphemeralRunner's status (empty when it holds none)."""
+    status = item.get("status") or {}
+    return {field: status.get(field) for field in ER_JOB_FIELDS if status.get(field) not in (None, "", 0)}
+
+
 def pool_summary(pools, registered):
     summary = {}
     for entry in pools:
@@ -506,21 +516,28 @@ def snapshot(state, final=False):
     # The pod read's own interval, retries and backoff included: the placement
     # it returns was observed somewhere in [requested_at, observed_at], which
     # the verdict requires to lie wholly inside the hold (PR #41 review 2).
+    # The interval also covers the EphemeralRunner read, whose job fields tell
+    # probe, non-probe (another repository's job on the shared fleet) and idle
+    # runners apart for this same collection (Ruling 44).
     requested_at = iso(now())
     pods = run_json(["kubectl", "get", "pods", "-n", NAMESPACE, "-l", SCALE_SET_SELECTOR, "-o", "json"]).get("items") or []
+    runners = run_json(["kubectl", "get", "ephemeralrunners.actions.github.com", "-n", NAMESPACE, "-o", "json"]).get("items") or []
     observed_at = iso(now())
     # Placement as this collection saw it (Ruling 43): the per-UID snapshot
     # below keeps only the latest node, so the verdict judges placement during
     # the hold from these timestamped observations, unscheduled pods included.
-    pools = {(item.get("metadata") or {}).get("name"): node_pool_of(item) for item in nodes}
+    node_pools = {(item.get("metadata") or {}).get("name"): node_pool_of(item) for item in nodes}
+    runner_jobs = {(item.get("metadata") or {}).get("name"): runner_job(item) for item in runners}
     observed = []
     for item in pods:
         meta = item.get("metadata") or {}
         node_name = (item.get("spec") or {}).get("nodeName") or None
         observed.append({"uid": meta.get("uid"), "runner_name": meta.get("name"), "node": node_name,
-                         "pool": pools.get(node_name) if node_name else None,
+                         "pool": node_pools.get(node_name) if node_name else None,
                          "phase": (item.get("status") or {}).get("phase"),
-                         "terminating": bool(meta.get("deletionTimestamp"))})
+                         "terminating": bool(meta.get("deletionTimestamp")),
+                         "ephemeral_runner": meta.get("name") in runner_jobs,
+                         "job": runner_jobs.get(meta.get("name")) or {}})
     state.setdefault("pod_collections", []).append(
         {"requested_at": requested_at, "observed_at": observed_at,
          "pods": sorted(observed, key=lambda pod: str(pod["runner_name"]))})
@@ -537,13 +554,11 @@ def snapshot(state, final=False):
                      container_statuses=container_statuses(item.get("status")) or entry.get("container_statuses", []),
                      phase=(item.get("status") or {}).get("phase"), ready=pod_ready(item),
                      terminating=bool(meta.get("deletionTimestamp")), last_seen=stamp)
-    runners = run_json(["kubectl", "get", "ephemeralrunners.actions.github.com", "-n", NAMESPACE, "-o", "json"]).get("items") or []
     for item in runners:
         meta, status = item.get("metadata") or {}, item.get("status") or {}
         shots["ephemeral_runners"][meta.get("name")] = {
             "name": meta.get("name"), "phase": status.get("phase"), "last_seen": stamp,
-            "terminating": bool(meta.get("deletionTimestamp")),
-            "job": {field: status.get(field) for field in ER_JOB_FIELDS if status.get(field) not in (None, "", 0)}}
+            "terminating": bool(meta.get("deletionTimestamp")), "job": runner_job(item)}
     events = run_json(["kubectl", "get", "events", "-A", "-o", "json"]).get("items") or []
     for item in events:
         meta = item.get("metadata") or {}
@@ -558,11 +573,20 @@ def snapshot(state, final=False):
             "count": item.get("count"),
             "first_timestamp": trim_ts(item.get("firstTimestamp") or item.get("eventTime") or meta.get("creationTimestamp")),
             "last_timestamp": trim_ts(item.get("lastTimestamp") or item.get("eventTime") or meta.get("creationTimestamp"))}
+    pools_requested_at = iso(now())
     _, pools = cluster_and_pools(state["cluster_name"])
+    pools_observed_at = iso(now())
     registered = {}
     for item in nodes:
         registered[node_pool_of(item)] = registered.get(node_pool_of(item), 0) + 1
     summary = pool_summary(pools, registered)
+    # The autoscaler's per-pool targets (count) over time: the verdict uses
+    # them to check that the fallback was only ever scaled up while the
+    # primary was at its maximum (Ruling 44).
+    state.setdefault("pool_collections", []).append(
+        {"requested_at": pools_requested_at, "observed_at": pools_observed_at,
+         "pools": {name: {key: entry[key] for key in ("count", "min", "max", "nodes")}
+                   for name, entry in summary.items()}})
     if state.get("pools_before") is None:
         state["pools_before"] = summary
     state["pools_latest"] = summary
@@ -955,6 +979,7 @@ def cmd_finalize(args):
             "pool_state_checks": state["pool_state_checks"],
             "latest_collection_at": state["latest_collection"]["at"],
             "pod_collections": state.get("pod_collections") or [],
+            "pool_collections": state.get("pool_collections") or [],
             "pools_before": state["pools_before"], "pools_after": state.get("pools_latest"),
             "arc_contract_after": arc_contract(state), "phase_c": None,
             "trust_readback": None, "expander_readback": expander_readback(state),

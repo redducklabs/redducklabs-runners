@@ -24,7 +24,9 @@ rollout Ruling 40 (DOKS creates the priority-expander ConfigMap only after
 the expander update; see "Priority-expander ConfigMap creation (Ruling 40)");
 2026-10-29, acceptance Ruling 43 (ARC adds `minRunners` to the job count, so
 the acceptance batch sizes and placement criteria count every runner pod; see
-"Runner count during a probe (Ruling 43)").
+"Runner count during a probe (Ruling 43)"); 2026-10-29, acceptance Ruling 44
+(the probe may share the fleet with other repositories' CI; see "Shared fleet
+during a probe (Ruling 44)").
 
 ## Problem
 
@@ -791,7 +793,7 @@ during it.
 
 | Phase | Setup | Pass criteria |
 |---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no fallback node (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
+| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no fallback node (other repositories' jobs during the probe allow only their excess beyond primary capacity on the fallback, Ruling 44) (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
 | B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=6 (8 runner pods) | 6 distinct runners concurrent; during the hold, of every runner pod of the scale set, 4 on baseline and 4 on exactly two fallback nodes created from zero, none on the primary and none unscheduled; fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
 | C. Idle retirement and return to zero | after A; Scale Runners `acceptance-phase-c` sets `minRunners=8` (4 idle runners must land on burst nodes because baseline holds 4); retirement runs with zero free baseline slots; then `minRunners` returns to 4 and then 2 | retirement deletes nothing while baseline is full; once ARC removes surplus runners, any idle runner left on a burst node is retired and replaced on baseline; both burst pools reach 0 nodes within 60 minutes; no job killed |
 | D. Drain under continuing load | a probe that keeps 12 jobs in flight, submitting a new job as each finishes, while Deploy `drain` runs | in-flight jobs on burst nodes complete; every runner pod created after `drain` is on baseline; no Pending runner pod triggers scale-up; burst pools reach zero nodes |
@@ -843,6 +845,37 @@ and the drain retires idle burst runners. Phase E's 8-job smoke run runs 10
 runners; its two idle runners can stay on burst nodes after the run, so the
 operator dispatches Rebalance Runners once the smoke run completes and the
 evidence run waits up to 30 minutes for two warm runners on baseline.
+
+### Shared fleet during a probe (Ruling 44)
+
+The probe may run while other repositories' CI uses the fleet. Live Phase A
+attempt 2 (probe run `redducklabs/aurolegal.ai` 40830762762, evidence run
+40830774010) ran while a `redducklabs/therapy-link` job held a runner: ARC ran
+2 + 14 + 1 = 17 runners, 13 of them on burst nodes, one more than the primary's
+12 slots, and the autoscaler set primary 6 and fallback 1 in one scale-up. The
+fallback node was correct, and the Ruling 43 placement rule failed the run.
+
+Each in-hold collection now records, from the EphemeralRunner read in the same
+interval, whether each runner pod runs a probe job (a probe job's runner, or
+the probe's `workflowRunId`), a non-probe job (another `workflowRunId`; the
+repository is reported) or nothing. A collection's target is `minRunners` +
+probe jobs + non-probe jobs in it, and more pods than that fails. Phase A:
+baseline holds 4; the other `target − 4` burst pods are on the primary (at most
+12) or the fallback (at most 2 × ⌈excess / 2⌉, excess = `target − 16`), none
+unscheduled; at most ⌈excess / 2⌉ fallback nodes exist, the primary has six
+nodes, every node-pool read before the hold end that shows a fallback target
+shows the primary at count = max = 6, and no fallback node is created more
+than 60 s before the sixth primary node. The creation-time check allows that
+skew because one scale-up creates its nodes in parallel (attempt 2 created the
+fallback node 4 s before the sixth primary node); the node-pool reads show the
+autoscaler's targets, which is where the priority decision is visible. The
+pod split between primary and fallback is not checked beyond those limits,
+because the scheduler may place a burst pod on either pool once both have
+Ready nodes (attempt 2: 11 primary, 2 fallback). Without a non-probe job these
+rules are exactly 4 baseline, 12 primary and no fallback. Phase B: baseline 4
+and the rest, at most 4, on the fallback, none on the primary; a non-probe job
+needs a ninth slot that Phase B does not have, so its pod stays Pending and
+the phase fails and is re-run while the fleet is quiet.
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
 uses that to make the fallback the only eligible burst group. There is no

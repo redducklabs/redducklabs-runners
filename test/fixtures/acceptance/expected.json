@@ -177,6 +177,11 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-shared-fleet": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-warm-on-baseline": {
   "criteria": [],
   "pass": true,
@@ -190,6 +195,34 @@
  "A-runner-node-oom": {
   "criteria": [
    "runner-health"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-excess-fallback-nodes": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-fallback-node-early": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-fallback-scaled-first": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-unaccounted-pod": {
+  "criteria": [
+   "A-primary-only"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -274,6 +307,13 @@
  "B-setup-primary-open": {
   "criteria": [
    "B-setup"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-shared-fleet-non-probe-pending": {
+  "criteria": [
+   "B-placement"
   ],
   "pass": false,
   "ready_for_migration": false

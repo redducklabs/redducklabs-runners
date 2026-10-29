@@ -22,7 +22,9 @@ clock time on (see live()).
 
 ARC model (Ruling 43): ARC 0.14.2 targets minRunners + assigned jobs
 (cmd/ghalistener/scaler/scaler.go:237), so a batch probe of N jobs runs
-MIN_RUNNERS + N runner pods. init refuses (exit 97) a batch scenario whose
+MIN_RUNNERS + N runner pods, plus one per non-probe job on the shared fleet
+(Ruling 44: a fixture pod whose collections carry job fields is served with
+an EphemeralRunner holding them). init refuses (exit 97) a batch scenario whose
 fixture pod_collections have no collection inside the hold (every entry in
 progress) or whose latest in-hold collection does not list MIN_RUNNERS + N
 runner pods. The pods are served per collection: each kubectl call returns
@@ -105,8 +107,12 @@ def arc_model_errors(ev):
     if not held:
         return f"acceptance-sim: the fixture has no pod collection inside the hold {iso(start)}..{iso(end)}"
     latest = max(held, key=lambda collection: epoch(collection["observed_at"]))
-    if len(latest["pods"]) != MIN_RUNNERS + len(batch):
-        return (f"acceptance-sim: {len(batch)} batch jobs need {MIN_RUNNERS + len(batch)} runner pods during the hold "
+    # Ruling 44: another repository's job on the shared fleet adds a runner.
+    non_probe = sum(1 for pod in latest["pods"]
+                    if (pod.get("job") or {}).get("workflowRunId") not in (None, "", run.get("id")))
+    if len(latest["pods"]) != MIN_RUNNERS + len(batch) + non_probe:
+        return (f"acceptance-sim: {len(batch)} batch jobs and {non_probe} non-probe jobs need "
+                f"{MIN_RUNNERS + len(batch) + non_probe} runner pods during the hold "
                 f"(ARC 0.14.2 targets minRunners + jobs), the fixture's collection observed at {latest['observed_at']} has "
                 f"{len(latest['pods'])}")
     return None
@@ -210,6 +216,16 @@ def init(directory, evidence_path, overrides):
                      "spec": {"nodeName": warm["node"]},
                      "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}})
         runners.append({"metadata": {"name": warm["runner_name"]}, "status": {"phase": "Running"}})
+    # A pod whose fixture collections record a job (another repository's job
+    # on the shared fleet, Ruling 44) gets an EphemeralRunner with those job
+    # fields in its status, as ARC 0.14.2 records them.
+    jobs = {}
+    for collection in ev.get("pod_collections") or []:
+        for item in collection.get("pods") or []:
+            if item.get("job"):
+                jobs[item["runner_name"]] = item["job"]
+    for name, job in sorted(jobs.items()):
+        runners.append({"metadata": {"name": name}, "status": dict(job, phase="Running")})
     scenario["pods"], scenario["ephemeral_runners"] = pods, runners
     scenario["events"] = [{"metadata": {"uid": event["uid"], "namespace": event["namespace"]},
                            "reason": event["reason"], "type": event["type"], "message": event["message"],

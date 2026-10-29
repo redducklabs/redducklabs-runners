@@ -121,6 +121,14 @@ for name, criterion in (("A-idle-pending-through-hold", "A-primary-only"), ("A-c
                         ("B-pending-then-scheduled-after-hold", "B-placement"),
                         ("B-collection-crosses-hold-end", "B-placement")):
     assert expected[name]["criteria"] == [criterion], name
+# Ruling 44: a shared fleet (another repository's job during the probe).
+assert expected["A-pass-shared-fleet"]["pass"] is True
+for name, criterion in (("A-shared-fleet-fallback-scaled-first", "A-primary-only"),
+                        ("A-shared-fleet-fallback-node-early", "A-primary-only"),
+                        ("A-shared-fleet-excess-fallback-nodes", "A-primary-only"),
+                        ("A-shared-fleet-unaccounted-pod", "A-primary-only"),
+                        ("B-shared-fleet-non-probe-pending", "B-placement")):
+    assert expected[name]["criteria"] == [criterion], name
 PY
     then
         pass "fixtures: every file is expected, each phase has passing and violating cases, cold p95 of 9 minutes fails A/B/E, D has no pickup criterion, only E-pass is ready"
@@ -345,7 +353,7 @@ assert_evidence_workflow_runs() {
     if jq -e '([.probe.run.jobs[] | select(.name | test("^batch "))] | length) == 14
               and ([.probe.run.jobs[].runner_name] as $busy | [.pods[] | select(.runner_name as $n | ($busy | index($n)) == null)] | length) == 2
               and all(.pods[]; .last_seen != null and .pool != null)
-              and any(.verdict.notes[]; test("by pool .{2}github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12. .*minRunners 2 . 14 jobs"))' \
+              and any(.verdict.notes[]; test("by pool .{2}github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12.*minRunners 2 . 14 probe jobs . 0 non-probe jobs = 16"))' \
         "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
         pass "phase A record: 14 jobs, 16 runner pods (2 idle) with pool and last_seen; placement counted every pod in the hold"
     else
@@ -477,12 +485,36 @@ CASES
     dir=$(mktemp -d "${WORK_DIR}/sim.XXXXXX")
     python3 -B "$SIM" "$dir" init "${WORK_DIR}/B-seven-pods.json" '{}' 2> "${WORK_DIR}/sim-init.err"
     rc=$?
-    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err" \
+    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs and 0 non-probe jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err" \
         && [ ! -e "${dir}/scenario.json" ]; then
         pass "simulator refuses a batch scenario without minRunners + jobs runner pods"
     else
         fail "simulator accepted 7 runner pods for 6 jobs (exit ${rc}): $(head -c 200 "${WORK_DIR}/sim-init.err")"
     fi
+
+    # Ruling 44: another repository's job shares the fleet during the probe
+    # (live Phase A attempt 2). The collector reads each runner's job fields
+    # with its collection and the node-pool targets; the phase passes with one
+    # fallback node for the one pod of demand beyond primary capacity.
+    dir=$(sim_dir A-pass-shared-fleet)
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A passes on a shared fleet with one non-probe job and one fallback node" $? 0 - \
+        "✅ Phase A passed acceptance" '^kubectl get ephemeralrunners' "${READ_ONLY_VIOLATION}|^gh run cancel" "$dir"
+    if jq -e 'all(.pod_collections[]; [.pods[] | select(.runner_name == "ar17")][0].job.jobRepositoryName == "redducklabs/therapy-link")
+              and any(.pod_collections[]; .pods[] | select(.runner_name == "ar1") | .ephemeral_runner == false and .job == {})
+              and (.pool_collections | length) > 0
+              and all(.pool_collections[]; .requested_at != null and .observed_at != null and .pools["github-runners-burst-intel-16g"].count == 1)
+              and any(.verdict.notes[]; test("non-probe jobs 1 .redducklabs/therapy-link.*= 17"))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: per-collection job fields, node-pool targets and the shared-fleet target of 17"
+    else
+        fail "phase A record: shared fleet $(jq -c '[.verdict.notes, .pool_collections[0]]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
+    # Without the job fields the seventeenth pod is unaccounted for.
+    dir=$(sim_dir A-pass-shared-fleet '{"ephemeral_runners": []}')
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails when a runner pod is not accounted for by a probe or non-probe job" $? 1 - \
+        "A-primary-only: collection at" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
 
     # Placement is judged from the collections inside the hold (PR #41 review).
     # Idle pods Pending through the hold and scheduled afterwards fail although
