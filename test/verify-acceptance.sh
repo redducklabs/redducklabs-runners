@@ -211,7 +211,9 @@ for match in re.finditer(r'\["kubectl",\s*"([a-z-]+)"', collector):
 for match in re.finditer(r'\["doctl",([^\]]*)\]', collector):
     assert match.group(1).count('"list"') == 1, match.group(0)
 gh_calls = set(re.findall(r'\["gh",\s*"([a-z]+)",\s*"([a-z-]+)"', collector))
-assert gh_calls <= {("api", "--paginate"), ("run", "view"), ("run", "download"), ("run", "cancel")}, gh_calls
+# --allow-escape-sequences (job logs, Ruling 42) only lets gh print the log; it stays a GET.
+assert gh_calls <= {("api", "--paginate"), ("api", "--allow-escape-sequences"), ("run", "view"), ("run", "download"),
+                    ("run", "cancel")}, gh_calls
 assert "--method" not in collector and '"-X"' not in collector
 # Scale Runners uploads the Phase C evidence for this workflow.
 scale = yaml.safe_load(open(scale_path, encoding="utf-8"))
