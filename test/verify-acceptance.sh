@@ -338,7 +338,8 @@ assert_evidence_workflow_runs() {
     if jq -e '([.probe.run.jobs[] | select(.name | test("^batch "))] | length) == 14
               and ([.probe.run.jobs[].runner_name] as $busy | [.pods[] | select(.runner_name as $n | ($busy | index($n)) == null)] | length) == 2
               and all(.pods[]; .last_seen != null and .pool != null)
-              and any(.verdict.notes[]; test("by pool \{.github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12\}.*minRunners 2 \+ 14 jobs"))'         "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+              and any(.verdict.notes[]; test("by pool .{2}github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12. .*minRunners 2 . 14 jobs"))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
         pass "phase A record: 14 jobs, 16 runner pods (2 idle) with pool and last_seen; placement counted every pod in the hold"
     else
         fail "phase A record: hold placement $(jq -c '.verdict.notes' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
@@ -461,14 +462,16 @@ CASES
     # Two of the eight runner pods never schedule (Ruling 43 regression).
     dir=$(sim_dir B-pending-pods)
     run_evidence "$dir" "$(probe_inputs B)"
-    expect_evidence "phase B fails B-placement when runner pods stay Pending through the hold" $? 1 -         "B-placement: runner pods during the hold by pool" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    expect_evidence "phase B fails B-placement when runner pods stay Pending through the hold" $? 1 - \
+        "B-placement: runner pods during the hold by pool" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
 
     # The simulator models ARC 0.14.2: a batch of N jobs holds minRunners + N pods.
     jq 'del(.pods[-1])' "${FIXTURES}/B-pass.json" > "${WORK_DIR}/B-seven-pods.json"
     dir=$(mktemp -d "${WORK_DIR}/sim.XXXXXX")
     python3 -B "$SIM" "$dir" init "${WORK_DIR}/B-seven-pods.json" '{}' 2> "${WORK_DIR}/sim-init.err"
     rc=$?
-    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err"         && [ ! -e "${dir}/scenario.json" ]; then
+    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err" \
+        && [ ! -e "${dir}/scenario.json" ]; then
         pass "simulator refuses a batch scenario without minRunners + jobs runner pods"
     else
         fail "simulator accepted 7 runner pods for 6 jobs (exit ${rc}): $(head -c 200 "${WORK_DIR}/sim-init.err")"

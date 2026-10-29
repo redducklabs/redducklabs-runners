@@ -268,7 +268,8 @@ def hold_placement(phase, evidence, jobs, failures, notes):
     placement, idle = {}, 0
     for pod in evidence.get("pods") or []:
         name = pod.get("runner_name")
-        if ts(pod.get("created_at"), f"pod {name} created_at") > end                 or ts(pod.get("last_seen"), f"pod {name} last_seen") < start:
+        if ts(pod.get("created_at"), f"pod {name} created_at") > end \
+                or ts(pod.get("last_seen"), f"pod {name} last_seen") < start:
             continue
         where = (pod.get("pool") or UNKNOWN_POOL) if pod.get("node") else UNSCHEDULED
         placement[where] = placement.get(where, 0) + 1
