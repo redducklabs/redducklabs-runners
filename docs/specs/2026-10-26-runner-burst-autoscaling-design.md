@@ -820,9 +820,14 @@ Placement counts every runner pod of the scale set observed during the hold
 (the interval in which every batch entry was in progress), probe runners and
 idle warm runners alike, because which runners stay idle is chosen by GitHub's
 job assignment, not by the fleet. It is judged only from the evidence run's
-timestamped collections inside the hold, each recording every runner pod with
-the node that collection saw (none while Pending), never from a pod's final
-node (PR #41 review): at least one collection must lie inside the hold; the
+collections wholly inside the hold, each recording every runner pod with the
+node its pod read saw (none while Pending), never from a pod's final node
+(PR #41 review). A collection records its pod read's interval, `requested_at`
+before the first attempt and `observed_at` after the successful response
+(retries and backoff included), and counts only when `requested_at` is at or
+after the hold start and `observed_at` at or before the hold end, so a read
+that crosses the hold end cannot pass off later scheduling as in-hold. At
+least one such collection must exist; the
 latest in-hold collection must show exactly the required placement, so a pod
 still Pending at the end of the hold, or scheduled only after it, fails; and
 no in-hold collection may list more runner pods than the target or a pod on

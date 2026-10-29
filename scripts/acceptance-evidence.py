@@ -48,9 +48,10 @@ Subcommands (all share one state file, rewritten after every step):
 Runner pods: every pod of the scale set (actions.github.com/scale-set-name=
 redducklabs-runners), probe runners and idle warm runners alike, with its node,
 pool, created_at, first_seen and last_seen; ARC 0.14.2 runs minRunners + jobs
-runners (Ruling 43). Each collection also appends to pod_collections its time
-and every runner pod it listed, with that collection's node (null while
-unscheduled), pool, phase and terminating flag; the verdict judges placement
+runners (Ruling 43). Each collection also appends to pod_collections the pod
+read's interval (requested_at before the first attempt, observed_at after the
+successful response, retries included) and every runner pod it listed, with
+that read's node (null while unscheduled), pool, phase and terminating flag; the verdict judges placement
 during the hold from these observations, never from a pod's final node.
 
 Every read is tried up to three times with a short backoff; a persistent
@@ -502,7 +503,12 @@ def snapshot(state, final=False):
                      ready_at=ready_at(item) or entry.get("ready_at"),
                      kubelet_version=((item.get("status") or {}).get("nodeInfo") or {}).get("kubeletVersion"),
                      last_seen=stamp)
+    # The pod read's own interval, retries and backoff included: the placement
+    # it returns was observed somewhere in [requested_at, observed_at], which
+    # the verdict requires to lie wholly inside the hold (PR #41 review 2).
+    requested_at = iso(now())
     pods = run_json(["kubectl", "get", "pods", "-n", NAMESPACE, "-l", SCALE_SET_SELECTOR, "-o", "json"]).get("items") or []
+    observed_at = iso(now())
     # Placement as this collection saw it (Ruling 43): the per-UID snapshot
     # below keeps only the latest node, so the verdict judges placement during
     # the hold from these timestamped observations, unscheduled pods included.
@@ -516,7 +522,8 @@ def snapshot(state, final=False):
                          "phase": (item.get("status") or {}).get("phase"),
                          "terminating": bool(meta.get("deletionTimestamp"))})
     state.setdefault("pod_collections", []).append(
-        {"at": stamp, "pods": sorted(observed, key=lambda pod: str(pod["runner_name"]))})
+        {"requested_at": requested_at, "observed_at": observed_at,
+         "pods": sorted(observed, key=lambda pod: str(pod["runner_name"]))})
     for item in pods:
         meta = item.get("metadata") or {}
         entry = shots["pods"].setdefault(meta.get("uid"), {"first_seen": stamp})

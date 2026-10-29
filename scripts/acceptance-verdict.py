@@ -49,10 +49,13 @@ pods, two of them idle. The placement criteria therefore count every runner
 pod of the scale set observed during the hold (probe runners and idle warm
 runners alike), not only the probe's runners. The hold is the interval in
 which every batch entry was in progress (latest started_at to earliest
-completed_at). Placement is judged only from the collector's timestamped
-pod_collections taken inside the hold (each lists every runner pod with the
-node that collection saw, null while unscheduled), never from a pod's final
-node or its lifetime:
+completed_at). Placement is judged only from the collector's
+pod_collections that lie wholly inside the hold: a collection's pod read was
+requested at requested_at and answered at observed_at (retries included), and
+it counts only when requested_at >= the hold start and observed_at <= the hold
+end, so a read that crosses the hold end cannot pass off later scheduling as
+in-hold. Each lists every runner pod with the node that read saw (null while
+unscheduled); a pod's final node or lifetime is never used:
 
   - at least one collection must lie inside the hold;
   - the latest in-hold collection must show exactly the required placement
@@ -298,9 +301,15 @@ def hold_placement(phase, evidence, jobs, failures, notes):
         return None
     start, end = window
     label = PLACEMENT_CRITERION[phase]
-    held = sorted(((ts(collection.get("at"), "pod collection at"), collection)
-                   for collection in evidence.get("pod_collections") or []), key=lambda item: item[0])
-    held = [(at, collection) for at, collection in held if start <= at <= end]
+    held = []
+    for collection in evidence.get("pod_collections") or []:
+        requested = ts(collection.get("requested_at"), "pod collection requested_at")
+        observed = ts(collection.get("observed_at"), "pod collection observed_at")
+        if observed < requested:
+            raise EvidenceError(f"pod collection observed_at {collection.get('observed_at')} precedes its requested_at")
+        if start <= requested and observed <= end:
+            held.append((observed, collection))
+    held.sort(key=lambda item: item[0])
     if not held:
         failures.append(f"{label}: no runner-pod collection inside the hold {iso_at(start)}..{iso_at(end)}; "
                         "placement during the hold was not observed")
@@ -318,7 +327,7 @@ def hold_placement(phase, evidence, jobs, failures, notes):
     probe_runners = {job.get("runner_name") for job in jobs}
     idle = sum(1 for pod in latest.get("pods") or [] if pod.get("runner_name") not in probe_runners)
     notes.append(f"Phase {phase}: runner pods during the hold {iso_at(start)}..{iso_at(end)} "
-                 f"({len(held)} collections inside it; latest at {iso_at(at)}) by pool {placement} "
+                 f"({len(held)} collections wholly inside it; latest observed at {iso_at(at)}) by pool {placement} "
                  f"({sum(placement.values()) - idle} probe runners, {idle} without a probe job; "
                  f"ARC target minRunners {MIN_RUNNERS} + {len(jobs)} jobs)")
     return placement

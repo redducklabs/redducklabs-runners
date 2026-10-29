@@ -215,6 +215,13 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "B-collection-crosses-hold-end": {
+  "criteria": [
+   "B-placement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "B-compatibility-missing": {
   "criteria": [
    "B-compatibility"

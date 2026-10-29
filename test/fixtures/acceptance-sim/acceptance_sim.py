@@ -37,6 +37,10 @@ markers and payload, so the collector parses them only after stripping.
 
 Faults: scenario "faults" maps a full call line ("kubectl get events -A -o
 json") to the number of times it fails (exit 1) before it answers normally.
+"faults_at" maps a call line to {"from": ISO, "count": N}: once the clock
+reaches "from", the next N such calls fail. The collector retries with
+backoff through SLEEP_CMD, so the clock advances during the read: this models
+a delayed, retried pod read whose response arrives later than it was asked.
 Runner pods carry a spec with one literal env value
 (LITERAL_ENV_VALUE) and one valueFrom reference, and the fixture's
 container_statuses as Kubernetes containerStatuses.
@@ -96,13 +100,14 @@ def arc_model_errors(ev):
     end = min(epoch(job["completed_at"]) for job in batch)
     if start > end:
         return None
-    held = [collection for collection in ev.get("pod_collections") or [] if start <= epoch(collection["at"]) <= end]
+    held = [collection for collection in ev.get("pod_collections") or []
+            if start <= epoch(collection["requested_at"]) and epoch(collection["observed_at"]) <= end]
     if not held:
         return f"acceptance-sim: the fixture has no pod collection inside the hold {iso(start)}..{iso(end)}"
-    latest = max(held, key=lambda collection: epoch(collection["at"]))
+    latest = max(held, key=lambda collection: epoch(collection["observed_at"]))
     if len(latest["pods"]) != MIN_RUNNERS + len(batch):
         return (f"acceptance-sim: {len(batch)} batch jobs need {MIN_RUNNERS + len(batch)} runner pods during the hold "
-                f"(ARC 0.14.2 targets minRunners + jobs), the fixture's collection at {latest['at']} has "
+                f"(ARC 0.14.2 targets minRunners + jobs), the fixture's collection observed at {latest['observed_at']} has "
                 f"{len(latest['pods'])}")
     return None
 
@@ -549,6 +554,12 @@ def main():
         faults[line] -= 1
         sim.save()
         print(f"fake {tool}: injected fault", file=sys.stderr)
+        return 1
+    timed = (sim.scenario.get("faults_at") or {}).get(line)
+    if timed and timed["count"] > 0 and sim.clock >= epoch(timed["from"]):
+        timed["count"] -= 1
+        sim.save()
+        print(f"fake {tool}: injected fault at {iso(sim.clock)}", file=sys.stderr)
         return 1
     if tool == "sleep":
         with open(os.path.join(directory, "clock"), "w", encoding="utf-8") as stream:

@@ -118,7 +118,8 @@ assert expected["B-pending-pods"]["criteria"] == ["B-placement"]
 assert expected["A-pass-idle-pending-early"]["pass"] is True
 for name, criterion in (("A-idle-pending-through-hold", "A-primary-only"), ("A-collections-after-hold", "A-primary-only"),
                         ("A-idle-turnover", "A-primary-only"),
-                        ("B-pending-then-scheduled-after-hold", "B-placement")):
+                        ("B-pending-then-scheduled-after-hold", "B-placement"),
+                        ("B-collection-crosses-hold-end", "B-placement")):
     assert expected[name]["criteria"] == [criterion], name
 PY
     then
@@ -502,7 +503,7 @@ CASES
         "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
         pass "phase A record: pod_collections keep the Pending observations although the final node is p6"
     else
-        fail "phase A record: pod_collections $(jq -c '[.pod_collections[] | {at, n: (.pods | length)}]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 300)"
+        fail "phase A record: pod_collections $(jq -c '[.pod_collections[] | {requested_at, observed_at, n: (.pods | length)}]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 300)"
     fi
     # The collector starts after the hold ended (clock 2026-11-02T18:21:00Z).
     dir=$(sim_dir A-pass '{"clock": 1793643660}')
@@ -520,6 +521,33 @@ CASES
     run_evidence "$dir" "$(probe_inputs A)"
     expect_evidence "phase A fails on idle-pod turnover inside the hold" $? 1 - \
         "inside the hold saw runner pods" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    # A pod read that crosses the hold end (PR #41 review 2): collections run
+    # every 60 s from 18:09:50; the one requested at 18:19:50 fails twice, the
+    # collector retries after 5 s and 15 s backoff, and its response at
+    # 18:20:10 (after the hold end, 18:20:00) sees the idle pods scheduled at
+    # 18:20:05. It is not wholly inside the hold, so the latest qualifying
+    # collection (18:18:50) still shows them Pending and the phase fails.
+    local crossing pod_read
+    pod_read="kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners -o json"
+    crossing='{"clock": 1793642990, "faults_at": {"'"${pod_read}"'": {"from": "2026-11-02T18:19:50Z", "count": 2}}, "changes": ['
+    crossing+='{"at": "2026-11-02T18:00:00Z", "kind": "pods", "name": "ar15", "merge": {"spec": {"nodeName": null}}},'
+    crossing+='{"at": "2026-11-02T18:00:00Z", "kind": "pods", "name": "ar16", "merge": {"spec": {"nodeName": null}}},'
+    crossing+='{"at": "2026-11-02T18:20:05Z", "kind": "pods", "name": "ar15", "merge": {"spec": {"nodeName": "p6"}}},'
+    crossing+='{"at": "2026-11-02T18:20:05Z", "kind": "pods", "name": "ar16", "merge": {"spec": {"nodeName": "p6"}}}]}'
+    dir=$(sim_dir A-pass "$crossing")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails when a retried pod read crosses the hold end and sees scheduling after it" $? 1 - \
+        "A-primary-only: runner pods in the latest collection inside the hold" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    if jq -e 'any(.pod_collections[]; .requested_at == "2026-11-02T18:19:50Z" and .observed_at == "2026-11-02T18:20:10Z"
+                  and any(.pods[]; .runner_name == "ar15" and .node == "p6"))
+              and any(.pod_collections[]; .requested_at == "2026-11-02T18:18:50Z"
+                  and any(.pods[]; .runner_name == "ar15" and .node == null))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1 \
+        && [ "$(grep -cxF "${pod_read}" "${dir}/calls.log")" -gt 2 ]; then
+        pass "phase A record: the crossing read is recorded 18:19:50..18:20:10 with the pods scheduled, after two retried attempts"
+    else
+        fail "phase A record: crossing read $(jq -c '[.pod_collections[] | {requested_at, observed_at}]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
 
     # Phase D: drain anchors from the Deploy drain run.
     dir=$(sim_dir D-pass '{}' drain)

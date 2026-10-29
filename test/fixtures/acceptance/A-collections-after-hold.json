@@ -60,8 +60,8 @@
  "phase": "A",
  "phase_c": null,
  "pod_collections": [
-   {"at": "2026-11-02T18:21:00Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}]},
-   {"at": "2026-11-02T18:24:00Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}]}
+   {"observed_at": "2026-11-02T18:21:05Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}], "requested_at": "2026-11-02T18:21:00Z"},
+   {"observed_at": "2026-11-02T18:24:05Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}], "requested_at": "2026-11-02T18:24:00Z"}
  ],
  "pods": [
    {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "first_seen": "2026-11-02T18:00:20Z", "last_seen": "2026-11-02T18:19:20Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "ar1", "uid": "uid-ar1"},
