@@ -1,6 +1,12 @@
 {
  "arc_contract_after": "burst",
- "events": [],
+ "events": [
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:20Z", "involved_kind": "Pod", "involved_name": "ar5", "last_timestamp": "2026-11-02T18:00:20Z", "message": "pod triggered scale-up: [{pool-pri 0->5 (max: 6)}]", "namespace": "arc-runners", "reason": "TriggeredScaleUp", "type": "Normal", "uid": "ev-su-pri"},
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:20Z", "involved_kind": "ConfigMap", "involved_name": "cluster-autoscaler-status", "last_timestamp": "2026-11-02T18:00:20Z", "message": "Scale-up: setting group pool-pri size to 5 instead of 0 (max: 6)", "namespace": "kube-system", "reason": "ScaledUpGroup", "type": "Normal", "uid": "ev-su-pri-1"},
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:20Z", "involved_kind": "ConfigMap", "involved_name": "cluster-autoscaler-status", "last_timestamp": "2026-11-02T18:00:20Z", "message": "Scale-up: group pool-pri size set to 5 instead of 0 (max: 6)", "namespace": "kube-system", "reason": "ScaledUpGroup", "type": "Normal", "uid": "ev-su-pri-2"},
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:27Z", "involved_kind": "ConfigMap", "involved_name": "cluster-autoscaler-status", "last_timestamp": "2026-11-02T18:00:27Z", "message": "Scale-up: setting group pool-fb size to 1 instead of 0 (max: 2)", "namespace": "kube-system", "reason": "ScaledUpGroup", "type": "Normal", "uid": "ev-su-fb-1"},
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:27Z", "involved_kind": "ConfigMap", "involved_name": "cluster-autoscaler-status", "last_timestamp": "2026-11-02T18:00:27Z", "message": "Scale-up: group pool-fb size set to 1 instead of 0 (max: 2)", "namespace": "kube-system", "reason": "ScaledUpGroup", "type": "Normal", "uid": "ev-su-fb-2"}
+ ],
  "expander_readback": {
    "expanders": [
      "priority",

@@ -53,8 +53,9 @@ read's interval (requested_at before the first attempt, observed_at after the
 successful response, retries included) and every runner pod it listed, with
 that read's node (null while unscheduled), pool, phase, terminating flag and
 the job fields of its EphemeralRunner read in the same interval (Ruling 44:
-probe, non-probe or idle); pool_collections records each node-pool read
-(count, min, max, registered nodes per runner pool) with its own interval.
+a job of the probe run, of another run, or none); pool_collections records
+each node-pool read (count, min, max, registered nodes per runner pool) with its
+own interval, as diagnostics.
 The verdict judges placement during the hold from these observations, never
 from a pod's final node.
 
@@ -516,9 +517,10 @@ def snapshot(state, final=False):
     # The pod read's own interval, retries and backoff included: the placement
     # it returns was observed somewhere in [requested_at, observed_at], which
     # the verdict requires to lie wholly inside the hold (PR #41 review 2).
-    # The interval also covers the EphemeralRunner read, whose job fields tell
-    # probe, non-probe (another repository's job on the shared fleet) and idle
-    # runners apart for this same collection (Ruling 44).
+    # The interval also covers the EphemeralRunner read, whose job fields show
+    # for this same collection whether a runner holds a job of another run,
+    # which means the fleet was shared and the phase must be re-run
+    # (Ruling 44 revised).
     requested_at = iso(now())
     pods = run_json(["kubectl", "get", "pods", "-n", NAMESPACE, "-l", SCALE_SET_SELECTOR, "-o", "json"]).get("items") or []
     runners = run_json(["kubectl", "get", "ephemeralrunners.actions.github.com", "-n", NAMESPACE, "-o", "json"]).get("items") or []
@@ -580,9 +582,9 @@ def snapshot(state, final=False):
     for item in nodes:
         registered[node_pool_of(item)] = registered.get(node_pool_of(item), 0) + 1
     summary = pool_summary(pools, registered)
-    # The autoscaler's per-pool targets (count) over time: the verdict uses
-    # them to check that the fallback was only ever scaled up while the
-    # primary was at its maximum (Ruling 44).
+    # The autoscaler's per-pool targets (count) over time, kept as
+    # diagnostics: periodic reads cannot order scale-up decisions, which the
+    # verdict judges from the autoscaler's scale-up events (Ruling 44 revised).
     state.setdefault("pool_collections", []).append(
         {"requested_at": pools_requested_at, "observed_at": pools_observed_at,
          "pools": {name: {key: entry[key] for key in ("count", "min", "max", "nodes")}

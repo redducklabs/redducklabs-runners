@@ -269,16 +269,23 @@ sizes: 16 jobs (18 pods) overflow into the fallback and fail `A-primary-only`.
 Idle runners can stay on burst nodes after a batch; Rebalance Runners retires
 them (hourly, or dispatch it as below).
 
-Shared fleet (Ruling 44): the probe may run while other repositories' CI uses
-the fleet. The evidence run reads each runner's EphemeralRunner job fields with
-every collection, so a non-probe job raises that collection's target by one
-(the verdict note lists probe, non-probe with repositories, and idle pods per
-pool). In Phase A the extra burst pods may use the fallback: at most
-⌈excess / 2⌉ fallback nodes for `excess = target − 16` pods, only once the
-primary is at 6 of 6. Phase B has no spare slot: a non-probe job leaves a
-runner pod Pending and fails `B-placement`; re-run Phase B while the fleet is
-quiet (check `kubectl get ephemeralrunners -n arc-runners` shows only the two
-idle runners before dispatching it).
+Exclusive fleet (Ruling 44): phases A and B need the fleet to themselves. If
+another repository's CI holds a runner during the hold, `A-shared-fleet` /
+`B-shared-fleet` fail with "re-run this phase while no other repository's CI
+uses the fleet". Before dispatching A or B, check that no runner holds a job
+(read-only; prints nothing when the fleet is quiet):
+
+```bash
+kubectl -n arc-runners get ephemeralrunners -o json \
+  | jq -r '.items[] | select(.status.jobId or .status.jobRequestId or .status.jobRepositoryName
+      or .status.jobWorkflowRef or .status.workflowRunId)
+      | "\(.metadata.name) \(.status.jobRepositoryName) run \(.status.workflowRunId)"'
+```
+
+Dispatch at a quiet time and re-run the phase if a job arrived anyway.
+`A-priority` / `B-priority` read the cluster-autoscaler's `TriggeredScaleUp`
+and `ScaledUpGroup` events: in A every scale-up must name only the primary
+node pool ID, in B only the fallback's.
 
 Pickup thresholds for phases A, B and E: warm pickup p95 ≤ 90 s, cold pickup
 p95 ≤ 8 minutes (a job is cold when its runner's node was created after the job
@@ -394,8 +401,8 @@ anchor runs; a rejected anchor run still cancels the verified probe.
 
 | Phase | Setup | Probe | Evidence dispatch | Pass criteria |
 |---|---|---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=14` (16 runner pods), `network_targets` | `phase=A`, probe | 14 distinct concurrent runners; during the hold, of every runner pod of the scale set (probe and idle), exactly 4 on baseline and 12 on the primary pool, none elsewhere, and no fallback node (a non-probe job on the shared fleet allows its excess on the fallback, Ruling 44); `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
-| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=6` (8 runner pods) | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 6 distinct concurrent runners; during the hold, of every runner pod of the scale set, exactly 4 on baseline and 4 on exactly two new fallback nodes, none on the primary and none unscheduled; a passing pool-state check (compatibility, headroom) covering both fallback nodes, the first live measurement of `s-8vcpu-16gb-intel` allocatable; primary back at 0/6; pickup thresholds |
+| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=14` (16 runner pods), `network_targets` | `phase=A`, probe | 14 distinct concurrent runners; during the hold, of every runner pod of the scale set (probe and idle), exactly 4 on baseline and 12 on the primary pool, none elsewhere, and no fallback node; no other run's job on the fleet during the hold (`A-shared-fleet`); every cluster-autoscaler scale-up event names only the primary (`A-priority`); `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
+| B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=6` (8 runner pods) | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 6 distinct concurrent runners; during the hold, of every runner pod of the scale set, exactly 4 on baseline and 4 on exactly two new fallback nodes, none on the primary and none unscheduled; no other run's job on the fleet during the hold (`B-shared-fleet`); every cluster-autoscaler scale-up event names only the fallback (`B-priority`); a passing pool-state check (compatibility, headroom) covering both fallback nodes, the first live measurement of `s-8vcpu-16gb-intel` allocatable; primary back at 0/6; pickup thresholds |
 | C. Idle retirement and return to zero | after A, pools at 0 nodes | none | dispatch Scale Runners `acceptance-phase-c`, then `phase=C`, `phase_c_run_id` | every cycle 4 baseline + 4 burst at minRunners=8 with nothing retired; a burst survivor retired (or three cycles recorded `fixture-only`, which passes with a tracked follow-up); burst pools at zero nodes within 60 minutes; `jobs_killed=0` (fleet jobs, on `redducklabs-runners-*` runners, cancelled or failed with `completed_at` inside the Phase C run, in every attempt of every workflow run created up to 65 days before it, measured by the evidence workflow); ARC `burst` |
 | D. Drain under continuing load | after C | `continuous` | start the probe, wait until about 12 entries run, dispatch Deploy `drain`, then `phase=D`, probe, `drain_run_id` | drain run is this repository's Deploy `drain` at `$SHA`, success; ≥ 8 entries in progress when its "Drain runners" step started; ≥ 1 in progress throughout until it completed; entries still queued or running when it completed; every entry succeeded; every scheduled runner pod created after the drain READBACK is on baseline (pods never seen scheduled are reported, not failed); no `TriggeredScaleUp` for a runner pod after it; burst pools at zero nodes; ARC `drain` |
 | E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` (10 runner pods) | `phase=E`, probe, `rollback_run_id`, `baseline_run_id`; **after the probe completes, dispatch Rebalance Runners** (the evidence run waits up to 30 minutes for two warm runners on baseline) | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline, observed in the evidence workflow's final collection (`latest_collection_at`): Running, Ready, not terminating and idle; smoke run passes; prints `READY_FOR_MIGRATION=true` |
@@ -641,7 +648,8 @@ commit that contains both fixes, once both burst pools are back at 0 nodes
 (dispatch Rebalance Runners to retire idle runners still holding burst nodes).
 
 2026-10-29, at main `8529ed0`: Phase A attempt 2: probe run 40830762762
-succeeded; evidence run 40830774010 failed only `A-primary-only` because a
-`redducklabs/therapy-link` job shared the fleet (17 runner pods, one fallback
-node from a scale-up with the primary at 6). Pickup and the network probe
-passed. Re-run Phase A at the reviewed commit that contains the Ruling 44 fix.
+succeeded; evidence run 40830774010 failed only `A-primary-only`: a
+`redducklabs/therapy-link` job shared the fleet (17 runner pods) and the
+autoscaler added one fallback node. Pickup and the network probe passed.
+Re-run Phase A on a quiet fleet at the reviewed commit that contains the
+Ruling 44 fix.

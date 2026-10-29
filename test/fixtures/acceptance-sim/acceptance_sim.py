@@ -22,9 +22,7 @@ clock time on (see live()).
 
 ARC model (Ruling 43): ARC 0.14.2 targets minRunners + assigned jobs
 (cmd/ghalistener/scaler/scaler.go:237), so a batch probe of N jobs runs
-MIN_RUNNERS + N runner pods, plus one per non-probe job on the shared fleet
-(Ruling 44: a fixture pod whose collections carry job fields is served with
-an EphemeralRunner holding them). init refuses (exit 97) a batch scenario whose
+MIN_RUNNERS + N runner pods. init refuses (exit 97) a batch scenario whose
 fixture pod_collections have no collection inside the hold (every entry in
 progress) or whose latest in-hold collection does not list MIN_RUNNERS + N
 runner pods. The pods are served per collection: each kubectl call returns
@@ -32,6 +30,12 @@ the scenario pods after the "changes" due by the clock, so a scenario can keep
 a pod Pending (spec.nodeName null) through the hold and schedule it later,
 replace an idle pod ("add" then "remove"), or start collecting after the hold
 (an overridden "clock").
+
+EphemeralRunners and node pools are served per collection time (Ruling 44
+revised): each fixture pod collection's runners, with exactly its job fields,
+from that collection's requested_at; each fixture pool collection's counts from
+its requested_at (see timelines()). A runner that holds another run's job adds
+one runner to the ARC model above.
 
 Job logs carry terminal escape sequences as live logs do: the network-probe
 result line and the drain READBACK line are colored around and inside their
@@ -107,15 +111,41 @@ def arc_model_errors(ev):
     if not held:
         return f"acceptance-sim: the fixture has no pod collection inside the hold {iso(start)}..{iso(end)}"
     latest = max(held, key=lambda collection: epoch(collection["observed_at"]))
-    # Ruling 44: another repository's job on the shared fleet adds a runner.
-    non_probe = sum(1 for pod in latest["pods"]
-                    if (pod.get("job") or {}).get("workflowRunId") not in (None, "", run.get("id")))
-    if len(latest["pods"]) != MIN_RUNNERS + len(batch) + non_probe:
-        return (f"acceptance-sim: {len(batch)} batch jobs and {non_probe} non-probe jobs need "
-                f"{MIN_RUNNERS + len(batch) + non_probe} runner pods during the hold "
-                f"(ARC 0.14.2 targets minRunners + jobs), the fixture's collection observed at {latest['observed_at']} has "
-                f"{len(latest['pods'])}")
+    # A runner holding another run's job (a shared fleet) is one more runner.
+    foreign = sum(1 for pod in latest["pods"]
+                  if pod.get("job") and str(pod["job"].get("workflowRunId")) != str(run.get("id")))
+    if len(latest["pods"]) != MIN_RUNNERS + len(batch) + foreign:
+        extra = f" and {foreign} other runs' jobs" if foreign else ""
+        return (f"acceptance-sim: {len(batch)} batch jobs{extra} need {MIN_RUNNERS + len(batch) + foreign} runner pods "
+                f"during the hold (ARC 0.14.2 targets minRunners + jobs), the fixture's collection observed at "
+                f"{latest['observed_at']} has {len(latest['pods'])}")
     return None
+
+
+def timelines(ev):
+    """Per-collection EphemeralRunner and node-pool states, replayed by clock.
+
+    Each fixture pod collection becomes the EphemeralRunner list served from
+    its requested_at on: one EphemeralRunner per listed pod, with exactly that
+    collection's job fields (none when it has none), so a job can start and end
+    between collections. Each fixture pool collection becomes the node-pool
+    counts served from its requested_at on. Nothing is merged across
+    collections."""
+    runners = [{"at": collection["requested_at"],
+                "items": [{"metadata": {"name": pod["runner_name"]}, "status": dict(pod.get("job") or {}, phase="Running")}
+                          for pod in collection.get("pods") or []]}
+               for collection in ev.get("pod_collections") or []]
+    pools = [{"at": read["requested_at"], "pools": read["pools"]} for read in ev.get("pool_collections") or []]
+    return (sorted(runners, key=lambda entry: epoch(entry["at"])), sorted(pools, key=lambda entry: epoch(entry["at"])))
+
+
+def at_clock(timeline, clock):
+    """The timeline entry in effect at clock (the latest one not after it)."""
+    current = None
+    for entry in timeline:
+        if epoch(entry["at"]) <= clock:
+            current = entry
+    return current
 
 
 def init(directory, evidence_path, overrides):
@@ -216,20 +246,17 @@ def init(directory, evidence_path, overrides):
                      "spec": {"nodeName": warm["node"]},
                      "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}})
         runners.append({"metadata": {"name": warm["runner_name"]}, "status": {"phase": "Running"}})
-    # A pod whose fixture collections record a job (another repository's job
-    # on the shared fleet, Ruling 44) gets an EphemeralRunner with those job
-    # fields in its status, as ARC 0.14.2 records them.
-    jobs = {}
-    for collection in ev.get("pod_collections") or []:
-        for item in collection.get("pods") or []:
-            if item.get("job"):
-                jobs[item["runner_name"]] = item["job"]
-    for name, job in sorted(jobs.items()):
-        runners.append({"metadata": {"name": name}, "status": dict(job, phase="Running")})
     scenario["pods"], scenario["ephemeral_runners"] = pods, runners
+    scenario["runner_timeline"], scenario["pool_timeline"] = timelines(ev)
+    # cluster-autoscaler events carry source.component cluster-autoscaler,
+    # which is how the collector keeps ScaledUpGroup events on its status
+    # ConfigMap in kube-system.
+    autoscaler_reasons = ("TriggeredScaleUp", "NotTriggerScaleUp", "ScaledUpGroup", "ScaleDown")
     scenario["events"] = [{"metadata": {"uid": event["uid"], "namespace": event["namespace"]},
                            "reason": event["reason"], "type": event["type"], "message": event["message"],
                            "involvedObject": {"kind": event["involved_kind"], "name": event["involved_name"]},
+                           "source": {"component": "cluster-autoscaler" if event["reason"] in autoscaler_reasons
+                                      else "kubelet"},
                            "firstTimestamp": event["first_timestamp"], "lastTimestamp": event["last_timestamp"], "count": 1}
                           for event in ev.get("events") or []]
     expander = ev.get("expander_readback") or {}
@@ -528,9 +555,11 @@ def kubectl(sim, args):
     if line == "get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners -o json":
         return out({"items": live(sim, "pods")})
     if line == "get ephemeralrunners.actions.github.com -n arc-runners -o json":
-        return out({"items": live(sim, "ephemeral_runners")})
+        entry = at_clock(scenario.get("runner_timeline") or [], sim.clock)
+        return out({"items": ((entry or {}).get("items") or []) + live(sim, "ephemeral_runners")})
     if line == "get events -A -o json":
-        return out({"items": scenario["events"]})
+        # scenario "extra_events" (an override) adds events to the fixture's.
+        return out({"items": scenario["events"] + (scenario.get("extra_events") or [])})
     if line == "get configmap cluster-autoscaler-priority-expander -n kube-system -o json":
         return out(scenario["configmap"])
     if line == "get nodes -o json":
@@ -552,7 +581,13 @@ def doctl(sim, args):
         return out([sim.scenario["cluster"]])
     if line == "kubernetes cluster node-pool list cluster-1 -o json":
         switch = sim.scenario.get("pools_switch_at") or 0
-        return out(encode_pool_list(sim.scenario["pools_after"] if sim.clock >= switch else sim.scenario["pools_before"]))
+        pools = json.loads(json.dumps(sim.scenario["pools_after"] if sim.clock >= switch else sim.scenario["pools_before"]))
+        entry = at_clock(sim.scenario.get("pool_timeline") or [], sim.clock)
+        for item in pools if entry else []:
+            read = entry["pools"].get(item["name"]) or {}
+            item.update(count=read.get("count", item["count"]), min_nodes=read.get("min", item["min_nodes"]),
+                        max_nodes=read.get("max", item["max_nodes"]))
+        return out(encode_pool_list(pools))
     return None
 
 

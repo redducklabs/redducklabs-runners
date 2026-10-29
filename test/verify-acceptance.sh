@@ -121,13 +121,18 @@ for name, criterion in (("A-idle-pending-through-hold", "A-primary-only"), ("A-c
                         ("B-pending-then-scheduled-after-hold", "B-placement"),
                         ("B-collection-crosses-hold-end", "B-placement")):
     assert expected[name]["criteria"] == [criterion], name
-# Ruling 44: a shared fleet (another repository's job during the probe).
-assert expected["A-pass-shared-fleet"]["pass"] is True
-for name, criterion in (("A-shared-fleet-fallback-scaled-first", "A-primary-only"),
-                        ("A-shared-fleet-fallback-node-early", "A-primary-only"),
-                        ("A-shared-fleet-excess-fallback-nodes", "A-primary-only"),
-                        ("A-shared-fleet-unaccounted-pod", "A-primary-only"),
-                        ("B-shared-fleet-non-probe-pending", "B-placement")):
+# Ruling 44 revised: an exclusive fleet, and priority from scale-up events.
+assert expected["A-pass-probe-job-fields"]["pass"] is True
+assert expected["A-shared-fleet-live-shape"]["criteria"][0] == "A-shared-fleet"
+for name, criterion in (("A-shared-fleet-duplicate-job", "A-shared-fleet"),
+                        ("A-shared-fleet-foreign-job-fields", "A-shared-fleet"),
+                        ("A-shared-fleet-transient-job", "A-shared-fleet"),
+                        ("A-priority-fallback-group-unregistered", "A-priority"),
+                        ("A-priority-no-scale-up-events", "A-priority"),
+                        ("A-priority-unparseable-event", "A-priority"),
+                        ("B-shared-fleet-foreign-job", "B-shared-fleet"),
+                        ("B-priority-primary-scale-up", "B-priority"),
+                        ("B-priority-no-scale-up-events", "B-priority")):
     assert expected[name]["criteria"] == [criterion], name
 PY
     then
@@ -353,7 +358,7 @@ assert_evidence_workflow_runs() {
     if jq -e '([.probe.run.jobs[] | select(.name | test("^batch "))] | length) == 14
               and ([.probe.run.jobs[].runner_name] as $busy | [.pods[] | select(.runner_name as $n | ($busy | index($n)) == null)] | length) == 2
               and all(.pods[]; .last_seen != null and .pool != null)
-              and any(.verdict.notes[]; test("by pool .{2}github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12.*minRunners 2 . 14 probe jobs . 0 non-probe jobs = 16"))' \
+              and any(.verdict.notes[]; test("by pool .{2}github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12. .*minRunners 2 . 14 jobs"))' \
         "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
         pass "phase A record: 14 jobs, 16 runner pods (2 idle) with pool and last_seen; placement counted every pod in the hold"
     else
@@ -485,36 +490,52 @@ CASES
     dir=$(mktemp -d "${WORK_DIR}/sim.XXXXXX")
     python3 -B "$SIM" "$dir" init "${WORK_DIR}/B-seven-pods.json" '{}' 2> "${WORK_DIR}/sim-init.err"
     rc=$?
-    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs and 0 non-probe jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err" \
+    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err" \
         && [ ! -e "${dir}/scenario.json" ]; then
         pass "simulator refuses a batch scenario without minRunners + jobs runner pods"
     else
         fail "simulator accepted 7 runner pods for 6 jobs (exit ${rc}): $(head -c 200 "${WORK_DIR}/sim-init.err")"
     fi
 
-    # Ruling 44: another repository's job shares the fleet during the probe
-    # (live Phase A attempt 2). The collector reads each runner's job fields
-    # with its collection and the node-pool targets; the phase passes with one
-    # fallback node for the one pod of demand beyond primary capacity.
-    dir=$(sim_dir A-pass-shared-fleet)
+    # Ruling 44 revised. A clean run whose runners carry the probe run's job
+    # fields passes; EphemeralRunner job fields and node-pool counts are
+    # replayed per collection time (the pool reads change at 18:21).
+    dir=$(sim_dir A-pass-probe-job-fields)
     run_evidence "$dir" "$(probe_inputs A)"
-    expect_evidence "phase A passes on a shared fleet with one non-probe job and one fallback node" $? 0 - \
+    expect_evidence "phase A passes with the probe run's job fields on its runners" $? 0 - \
         "✅ Phase A passed acceptance" '^kubectl get ephemeralrunners' "${READ_ONLY_VIOLATION}|^gh run cancel" "$dir"
-    if jq -e 'all(.pod_collections[]; [.pods[] | select(.runner_name == "ar17")][0].job.jobRepositoryName == "redducklabs/therapy-link")
-              and any(.pod_collections[]; .pods[] | select(.runner_name == "ar1") | .ephemeral_runner == false and .job == {})
-              and (.pool_collections | length) > 0
-              and all(.pool_collections[]; .requested_at != null and .observed_at != null and .pools["github-runners-burst-intel-16g"].count == 1)
-              and any(.verdict.notes[]; test("non-probe jobs 1 .redducklabs/therapy-link.*= 17"))' \
+    if jq -e 'any(.pod_collections[]; .pods[] | select(.runner_name == "ar1") | .job.workflowRunId == 777 and .ephemeral_runner == true)
+              and ([.pool_collections[] | select(.requested_at < "2026-11-02T18:21:00Z") | .pools["github-runners-burst-amd-16g"].count] | length > 0 and all(. == 6))
+              and ([.pool_collections[] | select(.requested_at >= "2026-11-02T18:21:00Z") | .pools["github-runners-burst-amd-16g"].count] | length > 0 and all(. == 4))
+              and any(.verdict.notes[]; test("scale-up events in the phase window by node group"))' \
         "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
-        pass "phase A record: per-collection job fields, node-pool targets and the shared-fleet target of 17"
+        pass "phase A record: job fields per collection, node-pool reads replayed by time (6, then 4 from 18:21), scale-up events noted"
     else
-        fail "phase A record: shared fleet $(jq -c '[.verdict.notes, .pool_collections[0]]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+        fail "phase A record: $(jq -c '[.pool_collections[] | {requested_at, c: .pools["github-runners-burst-amd-16g"].count}]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
     fi
-    # Without the job fields the seventeenth pod is unaccounted for.
-    dir=$(sim_dir A-pass-shared-fleet '{"ephemeral_runners": []}')
+    # Another repository's job starts and ends inside the hold on an idle runner.
+    dir=$(sim_dir A-shared-fleet-transient-job)
     run_evidence "$dir" "$(probe_inputs A)"
-    expect_evidence "phase A fails when a runner pod is not accounted for by a probe or non-probe job" $? 1 - \
-        "A-primary-only: collection at" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    expect_evidence "phase A fails A-shared-fleet when another repository's job runs during the hold" $? 1 - \
+        "re-run this phase while no other repository's CI uses the fleet" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    if jq -e '[.pod_collections[] | [.pods[] | select(.runner_name == "ar16")][0].job.jobRepositoryName // "none"]
+              | (index("redducklabs/therapy-link") != null) and (.[0] == "none") and (.[-1] == "none")' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: the transient job appears only in the collections it ran in"
+    else
+        fail "phase A record: transient job $(jq -c '[.pod_collections[] | {requested_at, j: ([.pods[] | select(.runner_name == "ar16")][0].job)}]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
+    # Live Phase A attempt 2: a therapy-link job shared the fleet.
+    dir=$(sim_dir A-shared-fleet-live-shape)
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A attempt-2 shape fails A-shared-fleet with the re-run instruction" $? 1 - \
+        "A-shared-fleet: runner pods held jobs of other runs during the hold (redducklabs/therapy-link run 555001)" \
+        '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    # A fallback scale-up decision fails A even though its node never registers.
+    dir=$(sim_dir A-priority-fallback-group-unregistered)
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails A-priority on a fallback scale-up event without a fallback node" $? 1 - \
+        "A-priority: cluster-autoscaler scale-up events in the phase window name" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
 
     # Placement is judged from the collections inside the hold (PR #41 review).
     # Idle pods Pending through the hold and scheduled afterwards fail although
@@ -701,7 +722,7 @@ PY
     # Health events: only runner pods/nodes inside the phase window count;
     # the others stay in the record as diagnostics.
     local oom_event='{"metadata": {"uid": "ev-oom", "namespace": "default"}, "reason": "OOMKilling", "type": "Warning", "message": "Memory cgroup out of memory", "involvedObject": {"kind": "Node", "name": "%s"}, "firstTimestamp": "%s", "lastTimestamp": "%s", "count": 1}'
-    dir=$(sim_dir A-pass "{\"events\": [$(printf "$oom_event" worker-pool-x1y2z 2026-11-02T18:10:00Z 2026-11-02T18:10:00Z)]}")
+    dir=$(sim_dir A-pass "{\"extra_events\": [$(printf "$oom_event" worker-pool-x1y2z 2026-11-02T18:10:00Z 2026-11-02T18:10:00Z)]}")
     run_evidence "$dir" "$(probe_inputs A)"
     expect_evidence "phase A passes with a worker-node OOM event (diagnostic only)" $? 0 - "✅ Phase A passed acceptance" - - "$dir"
     if jq -e '[.events[] | select(.uid == "ev-oom" and .involved_name == "worker-pool-x1y2z")] | length == 1' "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1 \
@@ -710,10 +731,10 @@ PY
     else
         fail "phase A record: worker-node OOM event $(jq -c '{events, notes: .verdict.notes}' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 300)"
     fi
-    dir=$(sim_dir A-pass "{\"events\": [$(printf "$oom_event" baseline-a 2026-11-02T17:10:00Z 2026-11-02T17:12:00Z)]}")
+    dir=$(sim_dir A-pass "{\"extra_events\": [$(printf "$oom_event" baseline-a 2026-11-02T17:10:00Z 2026-11-02T17:12:00Z)]}")
     run_evidence "$dir" "$(probe_inputs A)"
     expect_evidence "phase A passes with a runner-node OOM event that ended before the probe run" $? 0 - "✅ Phase A passed acceptance" - - "$dir"
-    dir=$(sim_dir A-pass "{\"events\": [$(printf "$oom_event" p2 2026-11-02T18:10:00Z 2026-11-02T18:10:00Z)]}")
+    dir=$(sim_dir A-pass "{\"extra_events\": [$(printf "$oom_event" p2 2026-11-02T18:10:00Z 2026-11-02T18:10:00Z)]}")
     run_evidence "$dir" "$(probe_inputs A)"
     expect_evidence "phase A fails runner-health with a runner-node OOM event inside the phase" $? 1 - "runner-health: OOMKilling event on Node p2" \
         '^gh run cancel 777' - "$dir"
