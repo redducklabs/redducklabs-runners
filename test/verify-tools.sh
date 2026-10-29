@@ -61,10 +61,18 @@ test_tool "curl" "curl --version | head -1"
 test_tool "jq" "jq --version"
 test_tool "bc" "bc --version | head -1"
 test_tool "zstd" "zstd --version"
-# Single quotes on purpose: the variables must expand inside the runner pod.
+# Tool cache (burst and drain contracts; density pods have no RUNNER_TOOL_CACHE
+# and keep <work>/_tool). Single quotes on purpose: the variables must expand
+# inside the runner pod.
 # shellcheck disable=SC2016
-test_tool "Writable tool cache" \
+test_tool "Writable tool cache (runner)" \
     'test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache && test "$AGENT_TOOLSDIRECTORY" = /opt/hostedtoolcache && touch /opt/hostedtoolcache/.write-probe && rm /opt/hostedtoolcache/.write-probe && echo /opt/hostedtoolcache'
+# Same bind a container job gets (-v <tool dir>:/__t, resolved by dockerd in
+# the dind sidecar), as the non-root job user 1001:121. Fails if dind does not
+# mount the shared tool-cache volume at the same path.
+# shellcheck disable=SC2016
+test_tool "Writable tool cache (non-root container job via dind)" \
+    'docker run --rm --user 1001:121 -v "$RUNNER_TOOL_CACHE:/__t" busybox:1.37 sh -c "touch /__t/.job-probe && rm /__t/.job-probe && echo /__t writable"'
 
 # Test Python packages
 echo -e "${BLUE}Testing Python packages:${NC}"

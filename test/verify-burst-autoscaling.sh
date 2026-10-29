@@ -339,6 +339,133 @@ PY
         fail "Deploy admission check does not require the registry mirror dind arg"
     fi
 
+    # Shared actions/setup-* tool cache (burst family only). Container jobs
+    # bind-mount the runner's tool directory through the DinD daemon, so the
+    # same volume must back RUNNER_TOOL_CACHE in the runner and the same path
+    # in dind; otherwise dockerd creates a root-owned directory of its own that
+    # a non-root (--user 1001:121) job container cannot write.
+    local tc_fns="by = lambda d, n: [c for c in d['template']['spec']['initContainers'] + d['template']['spec']['containers'] if c['name'] == n][0]; "
+    mutate "$burst" "$tmp" "${tc_fns}by(doc, 'dind')['volumeMounts'] = [m for m in by(doc, 'dind')['volumeMounts'] if m['name'] != 'tool-cache']"
+    expect_reject "burst without the dind tool-cache mount (container jobs get a root-owned tool dir)" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "${tc_fns}by(doc, 'dind')['volumeMounts'][-1]['mountPath'] = '/opt/toolcache'"
+    expect_reject "burst with the dind tool-cache mount at a different path" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "${tc_fns}by(doc, 'runner')['volumeMounts'] = [m for m in by(doc, 'runner')['volumeMounts'] if m['name'] != 'tool-cache']"
+    expect_reject "burst without the runner tool-cache mount" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "${tc_fns}by(doc, 'runner')['env'] = [e for e in by(doc, 'runner')['env'] if e['name'] != 'RUNNER_TOOL_CACHE']"
+    expect_reject "burst without RUNNER_TOOL_CACHE" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "${tc_fns}by(doc, 'runner')['env'] = [e for e in by(doc, 'runner')['env'] if e['name'] != 'AGENT_TOOLSDIRECTORY']"
+    expect_reject "burst without AGENT_TOOLSDIRECTORY" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "${tc_fns}by(doc, 'runner')['env'][-1]['value'] = '/home/runner/_work/_tool'"
+    expect_reject "burst with AGENT_TOOLSDIRECTORY off the shared tool cache" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "doc['template']['spec']['volumes'] = [v for v in doc['template']['spec']['volumes'] if v['name'] != 'tool-cache']"
+    expect_reject "burst without the tool-cache volume" burst 2 20 private "$tmp"
+    mutate "$burst" "$tmp" "doc['template']['spec']['volumes'][-1]['emptyDir'] = {'medium': 'Memory'}"
+    expect_reject "burst with a memory-backed tool cache (counts against the pod memory budget)" burst 2 20 private "$tmp"
+    mutate "$drain" "$tmp" "doc['template']['spec']['volumes'] = [v for v in doc['template']['spec']['volumes'] if v['name'] != 'tool-cache']"
+    expect_reject "drain without the tool-cache volume" drain 2 4 private "$tmp"
+    mutate "${WORK_DIR}/acceptance-8.yaml" "$tmp" "${tc_fns}by(doc, 'dind')['volumeMounts'] = [m for m in by(doc, 'dind')['volumeMounts'] if m['name'] != 'tool-cache']"
+    expect_reject "burst-acceptance 8/20 without the dind tool-cache mount" burst-acceptance 8 20 private "$tmp"
+    mutate "$density" "$tmp" "${tc_fns}by(doc, 'runner')['env'] += [{'name': 'RUNNER_TOOL_CACHE', 'value': '/opt/hostedtoolcache'}]"
+    expect_reject "density with RUNNER_TOOL_CACHE" density 2 4 private "$tmp"
+    mutate "$legacy" "$tmp" "doc['template']['spec']['volumes'] += [{'name': 'tool-cache', 'emptyDir': {}}]"
+    expect_reject "legacy-isolated with the tool-cache volume" legacy-isolated 2 8 default "$tmp"
+
+    # Non-root container-job tool-cache probe, on the values and on the
+    # rendered/live fixtures: the runner's tool directory must be backed by a
+    # plain emptyDir (kubelet mode 0777, writable by uid 1001 without a root
+    # init container or fsGroup) mounted at that same path in dind, which is
+    # where dockerd resolves the `-v <tool dir>:/__t` bind of a container job.
+    # Density must keep the runner default <work>/_tool on the shared work
+    # volume (no tool-cache env or volume), which dind also mounts.
+    if python - "$burst" "$drain" "${REPO_ROOT}/deploy/dind-values.yaml" \
+        "${FIXTURES}/pool-state/arc-burst/helm-values.json" \
+        "${FIXTURES}/pool-state/arc-burst/asrs.json" \
+        "${FIXTURES}/pool-state/arc-drain/asrs.json" \
+        "${FIXTURES}/pool-state/arc-burst-acceptance-8/asrs.json" \
+        "${FIXTURES}/pool-state/arc-burst/helm-manifest.yaml" \
+        -- "$density" "${FIXTURES}/pool-state/arc-density/asrs.json" <<'PY'
+import json
+import sys
+
+import yaml
+
+
+def spec_of(path):
+    with open(path, encoding="utf-8") as stream:
+        if path.endswith(".json"):
+            doc = json.load(stream)
+            if "items" in doc:
+                return doc["items"][0]["spec"]["template"]["spec"]
+            return doc["template"]["spec"]
+        if path.endswith("helm-manifest.yaml"):
+            docs = [d for d in yaml.safe_load_all(stream) if isinstance(d, dict)]
+            asrs = [d for d in docs if d.get("kind") == "AutoscalingRunnerSet"][0]
+            return asrs["spec"]["template"]["spec"]
+        return yaml.safe_load(stream)["template"]["spec"]
+
+
+def container(spec, name):
+    return [c for c in spec["initContainers"] + spec["containers"] if c["name"] == name][0]
+
+
+def mounts(c):
+    return {m["mountPath"]: m["name"] for m in c.get("volumeMounts", [])}
+
+
+split = sys.argv.index("--")
+for path in sys.argv[1:split]:
+    spec = spec_of(path)
+    runner, dind = container(spec, "runner"), container(spec, "dind")
+    env = {e["name"]: e.get("value") for e in runner["env"]}
+    tool_dir = env.get("RUNNER_TOOL_CACHE")
+    if tool_dir != "/opt/hostedtoolcache" or env.get("AGENT_TOOLSDIRECTORY") != tool_dir:
+        raise SystemExit(f"{path}: tool cache env is {env}")
+    volume = mounts(runner).get(tool_dir)
+    if volume is None or mounts(dind).get(tool_dir) != volume:
+        raise SystemExit(f"{path}: {tool_dir} is not the same volume in runner and dind")
+    source = [v for v in spec["volumes"] if v["name"] == volume]
+    if source != [{"emptyDir": {}, "name": volume}]:
+        raise SystemExit(f"{path}: tool-cache volume is {source}, not a plain emptyDir")
+    if "securityContext" in spec and "fsGroup" in spec["securityContext"]:
+        raise SystemExit(f"{path}: tool cache must not rely on a pod fsGroup")
+for path in sys.argv[split + 1:]:
+    spec = spec_of(path)
+    runner, dind = container(spec, "runner"), container(spec, "dind")
+    names = {e["name"] for e in runner["env"]}
+    if names & {"RUNNER_TOOL_CACHE", "RUNNER_TOOLSDIRECTORY", "AGENT_TOOLSDIRECTORY"}:
+        raise SystemExit(f"{path}: density must not set a tool cache env")
+    if any(v["name"] == "tool-cache" for v in spec["volumes"]):
+        raise SystemExit(f"{path}: density must not carry the tool-cache volume")
+    work = "/home/runner/_work"
+    if mounts(runner).get(work) != "work" or mounts(dind).get(work) != "work":
+        raise SystemExit(f"{path}: density <work>/_tool is not shared with dind")
+PY
+    then
+        pass "non-root container-job tool-cache probe: burst/drain share one plain emptyDir at RUNNER_TOOL_CACHE with dind; density keeps <work>/_tool on the shared work volume"
+    else
+        fail "non-root container-job tool-cache probe failed"
+    fi
+
+    if python - "${REPO_ROOT}/.github/workflows/deploy-runners.yml" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+for needle in (
+    '("RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"),',
+    '("AGENT_TOOLSDIRECTORY", "/opt/hostedtoolcache"),',
+    'expected_volumes = {"work", "dind-sock", "dind-externals", "tool-cache"}',
+):
+    if text.count(needle) != 1:
+        raise SystemExit(f"Deploy admission check lacks {needle}")
+if text.count('("tool-cache", "/opt/hostedtoolcache"),') != 2:
+    raise SystemExit("Deploy admission check must require the tool-cache mount in runner and dind")
+PY
+    then
+        pass "Deploy admission check requires the shared tool cache in runner and dind"
+    else
+        fail "Deploy admission check does not require the shared tool cache"
+    fi
+
     # Ruling 26: the stopped state family, as Emergency Stop leaves each base
     # template (helm upgrade --reuse-values --set minRunners=0 --set maxRunners=0).
     local stopped="${FIXTURES}/pool-state/arc-burst-stopped/helm-values.json"

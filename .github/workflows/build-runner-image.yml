@@ -129,14 +129,13 @@ jobs:
             bc --version | head -1; zstd --version
             python3 -c "import pytest_mock"
             echo ALL_TOOLS_OK'
-          # Writable tool cache for actions/setup-* (see the Dockerfile).
+          # The tool cache is a pod volume (deploy/dind-values.yaml), never
+          # image ENV: an image-level RUNNER_TOOL_CACHE would also apply to the
+          # density rollback pods, which lack the volume DinD needs.
           docker run --rm "$IMG" bash -c '
             set -e
-            test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache
-            test "$AGENT_TOOLSDIRECTORY" = /opt/hostedtoolcache
-            test "$(id -u)" = 1001
-            touch /opt/hostedtoolcache/.write-probe && rm /opt/hostedtoolcache/.write-probe
-            echo TOOL_CACHE_OK'
+            test -z "${RUNNER_TOOL_CACHE:-}${RUNNER_TOOLSDIRECTORY:-}${AGENT_TOOLSDIRECTORY:-}"
+            echo NO_IMAGE_TOOL_CACHE_ENV_OK'
           docker run --rm "$IMG" bash -c '
             set -e
             terraform version >/dev/null
@@ -432,12 +431,9 @@ jobs:
             gh --version | head -1; psql --version; redis-cli --version
             bc --version | head -1; zstd --version
             python3 -c "import pytest_mock"'
+          # Tool cache is a pod volume, never image ENV (see the PR smoke test).
           docker run --rm "$IMG" bash -c '
-            set -e
-            test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache
-            test "$AGENT_TOOLSDIRECTORY" = /opt/hostedtoolcache
-            test "$(id -u)" = 1001
-            touch /opt/hostedtoolcache/.write-probe && rm /opt/hostedtoolcache/.write-probe'
+            test -z "${RUNNER_TOOL_CACHE:-}${RUNNER_TOOLSDIRECTORY:-}${AGENT_TOOLSDIRECTORY:-}"'
           docker run --rm "$IMG" bash -c '
             set -e
             terraform version >/dev/null
