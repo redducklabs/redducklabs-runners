@@ -24,7 +24,10 @@ rollout Ruling 40 (DOKS creates the priority-expander ConfigMap only after
 the expander update; see "Priority-expander ConfigMap creation (Ruling 40)");
 2026-10-29, acceptance Ruling 43 (ARC adds `minRunners` to the job count, so
 the acceptance batch sizes and placement criteria count every runner pod; see
-"Runner count during a probe (Ruling 43)").
+"Runner count during a probe (Ruling 43)"); 2026-10-29, acceptance Ruling 44
+(placement needs an exclusive fleet, and the priority order is proven from the
+autoscaler's scale-up events; see "Exclusive fleet and scale-up priority
+(Ruling 44)").
 
 ## Problem
 
@@ -791,8 +794,8 @@ during it.
 
 | Phase | Setup | Pass criteria |
 |---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no fallback node (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
-| B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=6 (8 runner pods) | 6 distinct runners concurrent; during the hold, of every runner pod of the scale set, 4 on baseline and 4 on exactly two fallback nodes created from zero, none on the primary and none unscheduled; fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
+| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no fallback node; no other run's job on the fleet during the hold (`A-shared-fleet`); every autoscaler scale-up event names only the primary (`A-priority`) (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
+| B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=6 (8 runner pods) | 6 distinct runners concurrent; during the hold, of every runner pod of the scale set, 4 on baseline and 4 on exactly two fallback nodes created from zero, none on the primary and none unscheduled; no other run's job on the fleet during the hold (`B-shared-fleet`); every cluster-autoscaler scale-up event names only the fallback (`B-priority`); fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
 | C. Idle retirement and return to zero | after A; Scale Runners `acceptance-phase-c` sets `minRunners=8` (4 idle runners must land on burst nodes because baseline holds 4); retirement runs with zero free baseline slots; then `minRunners` returns to 4 and then 2 | retirement deletes nothing while baseline is full; once ARC removes surplus runners, any idle runner left on a burst node is retired and replaced on baseline; both burst pools reach 0 nodes within 60 minutes; no job killed |
 | D. Drain under continuing load | a probe that keeps 12 jobs in flight, submitting a new job as each finishes, while Deploy `drain` runs | in-flight jobs on burst nodes complete; every runner pod created after `drain` is on baseline; no Pending runner pod triggers scale-up; burst pools reach zero nodes |
 | E. Restore and ready-for-migration | after D: Node Pool Sizing `remove-burst`, Deploy `rollback`, then rollout steps 3–4 again; after the smoke run, Rebalance Runners retires idle runners left on burst nodes | `density` readback after rollback; then `burst` readback, three pools with expected IDs and bounds, expander readback, trust-boundary readback, two warm runners on baseline; an N=8 smoke run (10 runner pods) passes |
@@ -843,6 +846,40 @@ and the drain retires idle burst runners. Phase E's 8-job smoke run runs 10
 runners; its two idle runners can stay on burst nodes after the run, so the
 operator dispatches Rebalance Runners once the smoke run completes and the
 evidence run waits up to 30 minutes for two warm runners on baseline.
+
+### Exclusive fleet and scale-up priority (Ruling 44)
+
+Live Phase A attempt 2 (probe run `redducklabs/aurolegal.ai` 40830762762,
+evidence run 40830774010) ran while a `redducklabs/therapy-link` job held a
+runner: ARC ran 2 + 14 + 1 = 17 runners, 13 on burst nodes, and the autoscaler
+added one fallback node beyond the primary's six. That run cannot show the
+priority order, so the placement counts require an exclusive fleet rather than
+a tolerance for other work (Ruling 44 revised after PR #42 review 1):
+
+- Each collection keeps, beside its pod read, its complete EphemeralRunner
+  read with its own `requested_at`/`observed_at`: every runner's name, uid
+  and job fields, whether or not its pod was in the pod read (PR #42 review
+  2). If a runner read wholly inside the hold shows a job field that does not
+  belong to the probe run (repository `redducklabs/aurolegal.ai` and the
+  probe's `workflowRunId`), or one job on two runners, or no runner read lies
+  inside the hold, `A-shared-fleet` / `B-shared-fleet` fail with "re-run this
+  phase while no other repository's CI uses the fleet". The pod targets stay exact: A 16 = 4 baseline + 12 primary,
+  no fallback node; B 8 = 4 baseline + 4 fallback, no primary.
+- `A-priority` / `B-priority`: every cluster-autoscaler `TriggeredScaleUp`
+  (`pod triggered scale-up: [{<group> <from>-><to> (max: <max>)} ...]`) and
+  `ScaledUpGroup` (`Scale-up: setting group <group> size to <n> instead of <m>
+  (max: <max>)`, `Scale-up: group <group> size set to ...`) event in the phase
+  window must name only the primary (A) or the fallback (B) node group, by
+  node pool ID (the DigitalOcean provider's node group ID), and at least one
+  must name it; a message that does not parse fails. These are the
+  autoscaler's own decisions (cluster-autoscaler 1.36:
+  `processors/status/eventing_scale_up_processor.go`,
+  `core/scaleup/orchestrator/executor.go`), so a fallback decision fails A even
+  if its node never registers. In attempt 2 the fallback decision appeared only
+  as a `ScaledUpGroup` event, not as a pod's `TriggeredScaleUp`, which is why
+  both reasons are judged.
+- The node-pool reads (`pool_collections`) are kept as diagnostics; periodic
+  reads cannot order decisions made between them.
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
 uses that to make the fallback the only eligible burst group. There is no

@@ -74,6 +74,23 @@ collection shows it scheduled. Requiring the exact placement in every in-hold
 collection would fail such runs without any placement having been wrong.
 The concurrency criteria use the probe's job count (14 and 6).
 
+Exclusive fleet (Ruling 44 revised): the placement counts above hold only when
+the probe is the fleet's only workload. A-shared-fleet / B-shared-fleet fail
+when an EphemeralRunner read wholly inside the hold (each collection keeps its
+complete runner list, with its own interval, apart from the pod read) shows a
+runner whose job fields do not belong to the probe run (repository
+redducklabs/aurolegal.ai and the probe's workflowRunId), whether or not that
+runner has a pod in the pod read, or one job on two runners, or when no runner
+read lies inside the hold; the phase is then re-run while no other
+repository's CI uses the fleet.
+
+Priority (A-priority, B-priority): the order is proven from the
+cluster-autoscaler's own decisions, not from periodic snapshots. Every
+TriggeredScaleUp and ScaledUpGroup event in the phase window must name only
+the primary node group (A) or the fallback node group (B), by node pool ID,
+and at least one must name it; a message that does not parse fails. The
+node-pool reads (pool_collections) are diagnostics only.
+
 Warm floor (phase E, criterion E-warm): exactly two warm_after runners, on
 baseline, each observed_at == latest_collection_at (the collector's final
 collection, not historical snapshots) and recorded Running, Ready,
@@ -333,6 +350,149 @@ def hold_placement(phase, evidence, jobs, failures, notes):
     return placement
 
 
+def held_runner_reads(evidence, jobs):
+    """The EphemeralRunner reads (one per pod collection) whose own interval
+    lies wholly inside the hold (none without a hold)."""
+    window = hold_window(jobs)
+    if window is None:
+        return []
+    start, end = window
+    reads = []
+    for collection in evidence.get("pod_collections") or []:
+        read = collection.get("ephemeral_runners")
+        if not isinstance(read, dict):
+            continue
+        requested = ts(read.get("requested_at"), "EphemeralRunner read requested_at")
+        observed = ts(read.get("observed_at"), "EphemeralRunner read observed_at")
+        if observed < requested:
+            raise EvidenceError(f"EphemeralRunner read observed_at {read.get('observed_at')} precedes its requested_at")
+        if start <= requested and observed <= end:
+            reads.append(read)
+    return reads
+
+
+def check_exclusive_fleet(phase, evidence, jobs, failures):
+    """{phase}-shared-fleet: no other run's job on the fleet during the hold (Ruling 44 revised).
+
+    Judged from every EphemeralRunner read wholly inside the hold, each the
+    complete runner list of its collection (PR #42 review 2): a runner counts
+    whether or not its pod was in that collection's earlier pod read. Any job
+    field that does not belong to the probe run (repository
+    redducklabs/aurolegal.ai and the probe's workflowRunId), or one job (jobId
+    or jobRequestId) on two runners of one read, means the fleet was shared or
+    the assignment evidence is inconsistent; placement cannot then show the
+    priority order, so the phase must be re-run on an exclusive fleet. No
+    runner read inside the hold fails too: exclusivity was not observed."""
+    rerun = "re-run this phase while no other repository's CI uses the fleet"
+    if hold_window(jobs) is None:
+        return
+    reads = held_runner_reads(evidence, jobs)
+    if not reads:
+        failures.append(f"{phase}-shared-fleet: no EphemeralRunner read lies wholly inside the hold; "
+                        f"exclusive use of the fleet was not observed; {rerun}")
+        return
+    probe_id = str(((evidence.get("probe") or {}).get("run") or {}).get("id"))
+    foreign, duplicates = set(), set()
+    for read in reads:
+        assigned = {}
+        for runner in read.get("items") or []:
+            job = runner.get("job") or {}
+            if not job:
+                continue
+            if job.get("jobRepositoryName") != PROBE_REPOSITORY or str(job.get("workflowRunId")) != probe_id:
+                foreign.add(f"{job.get('jobRepositoryName') or 'unknown repository'} run "
+                            f"{job.get('workflowRunId') or 'unknown'}")
+            for key in ("jobId", "jobRequestId"):
+                if job.get(key) in (None, ""):
+                    continue
+                first = assigned.setdefault((key, str(job[key])), runner.get("name"))
+                if first != runner.get("name"):
+                    duplicates.add(f"{key} {job[key]} on {first} and {runner.get('name')}")
+    if foreign:
+        failures.append(f"{phase}-shared-fleet: runners held jobs of other runs during the hold "
+                        f"({', '.join(sorted(foreign))}); {rerun}")
+    if duplicates:
+        failures.append(f"{phase}-shared-fleet: one job was assigned to several runners in one read during the "
+                        f"hold ({', '.join(sorted(duplicates))}); {rerun}")
+
+
+SCALE_UP_REASONS = ("TriggeredScaleUp", "ScaledUpGroup")
+# cluster-autoscaler 1.36 (kubernetes/autoscaler cluster-autoscaler-1.36.1):
+# processors/status/eventing_scale_up_processor.go emits TriggeredScaleUp
+# "pod triggered scale-up: %v" over []ScaleUpInfo, each printed
+# "{%v %v->%v (max: %v)}" (processors/nodegroupset/nodegroup_set_processor.go);
+# core/scaleup/orchestrator/executor.go emits ScaledUpGroup "Scale-up: setting
+# group %s size to %d instead of %d (max: %d)" and "Scale-up: group %s size set
+# to %d instead of %d (max: %d)". On DOKS the group ID is the node pool ID.
+SCALE_UP_INFO = re.compile(r"\{(\S+) (\d+)->(\d+) \(max: (\d+)\)\}")
+SCALED_UP_GROUP = re.compile(r"^Scale-up: (?:setting group (\S+) size to|group (\S+) size set to) "
+                             r"(\d+) instead of (\d+) \(max: (\d+)\)$")
+
+
+def scale_up_groups(event):
+    """Node group IDs a scale-up event names; None when its message does not parse."""
+    message = str(event.get("message") or "")
+    if event.get("reason") == "TriggeredScaleUp":
+        prefix = "pod triggered scale-up: ["
+        if not message.startswith(prefix) or not message.endswith("]"):
+            return None
+        inner = message[len(prefix):-1]
+        groups = [match[0] for match in SCALE_UP_INFO.findall(inner)]
+        return groups if groups and not SCALE_UP_INFO.sub("", inner).strip() else None
+    match = SCALED_UP_GROUP.match(message)
+    return [match.group(1) or match.group(2)] if match else None
+
+
+def event_in_window(event, window):
+    start, end = window
+    first, last = event.get("first_timestamp"), event.get("last_timestamp") or event.get("first_timestamp")
+    if start is not None and last and ts(last, "event last_timestamp") < start:
+        return False
+    if end is not None and first and ts(first, "event first_timestamp") > end:
+        return False
+    return True
+
+
+def check_scale_up_priority(phase, evidence, failures, notes):
+    """{phase}-priority: the autoscaler's scale-up decisions name only the phase's pool.
+
+    Every TriggeredScaleUp (on a pod) and ScaledUpGroup (cluster-autoscaler
+    status) event in the phase window must name only the primary (A) or the
+    fallback (B) node group, and at least one must name it. A fallback
+    decision fails A even if its node never registers. Unparseable messages
+    fail closed. On an exclusive fleet A needs exactly 6 primary nodes and B
+    exactly 2 fallback nodes, so any other group in a scale-up is wrong."""
+    label = f"{phase}-priority"
+    wanted = PRIMARY if phase == "A" else FALLBACK
+    pools = evidence.get("pools_after") or evidence.get("pools_before") or {}
+    names = {(pools.get(name) or {}).get("id"): name for name in RUNNER_POOLS if (pools.get(name) or {}).get("id")}
+    wanted_id = (pools.get(wanted) or {}).get("id")
+    if not wanted_id:
+        failures.append(f"{label}: the {wanted} node pool ID is unknown; scale-up events cannot be matched")
+        return
+    window = phase_window(evidence)
+    named = {}
+    for event in evidence.get("events") or []:
+        if event.get("reason") not in SCALE_UP_REASONS or not event_in_window(event, window):
+            continue
+        groups = scale_up_groups(event)
+        if groups is None:
+            failures.append(f"{label}: cannot parse the {event.get('reason')} event message "
+                            f"{str(event.get('message'))[:160]!r}")
+            continue
+        for group in groups:
+            named[group] = named.get(group, 0) + 1
+    others = {names.get(group, f"unknown group {group}"): count for group, count in named.items() if group != wanted_id}
+    if others:
+        failures.append(f"{label}: cluster-autoscaler scale-up events in the phase window name {others}; "
+                        f"only {wanted} ({wanted_id}) may scale up")
+    if wanted_id not in named:
+        failures.append(f"{label}: no cluster-autoscaler scale-up event in the phase window names {wanted} "
+                        f"({wanted_id}); the scale-up order is not proven")
+    notes.append(f"Phase {phase}: scale-up events in the phase window by node group "
+                 f"{ {names.get(group, group): count for group, count in named.items()} }")
+
+
 def burst_nodes_before_run(evidence):
     """Burst nodes that already existed when the probe run was created."""
     created = ts(((evidence.get("probe") or {}).get("run") or {}).get("created_at"), "probe run created_at")
@@ -454,6 +614,8 @@ def phase_a(evidence, failures, report, notes):
     if (placement is not None and (placement.get(PRIMARY, 0) != expected[PRIMARY] or outside)) or fallback_nodes:
         failures.append(f"A-primary-only: runner pods in the latest collection inside the hold {placement}, expected {expected[PRIMARY]} on "
                         f"{PRIMARY} and none elsewhere; fallback nodes {fallback_nodes}")
+    check_exclusive_fleet("A", evidence, jobs, failures)
+    check_scale_up_priority("A", evidence, failures, notes)
     check_compatibility("A", evidence, PRIMARY, failures)
     check_pickup("A", evidence, jobs, failures, report)
     # A-network (runner network isolation): check_network_probe.
@@ -479,6 +641,8 @@ def phase_b(evidence, failures, report, notes):
     primary = [node.get("name") for node in evidence.get("nodes") or [] if node.get("pool") == PRIMARY]
     if len(fallback) != 2 or primary:
         failures.append(f"B-fallback-nodes: {len(fallback)} fallback nodes and primary nodes {primary}; expected exactly two fallback nodes and no primary node")
+    check_exclusive_fleet("B", evidence, jobs, failures)
+    check_scale_up_priority("B", evidence, failures, notes)
     check_compatibility("B", evidence, FALLBACK, failures)
     for name, expected_max in ((PRIMARY, 6), (FALLBACK, 2)):
         after = pool(evidence, "pools_after", name)

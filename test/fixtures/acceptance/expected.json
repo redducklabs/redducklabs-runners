@@ -9,7 +9,8 @@
  "A-16-jobs-fallback-overflow": {
   "criteria": [
    "A-primary-only",
-   "probe-identity"
+   "probe-identity",
+   "A-priority"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -31,7 +32,8 @@
  },
  "A-collections-after-hold": {
   "criteria": [
-   "A-primary-only"
+   "A-primary-only",
+   "A-shared-fleet"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -66,7 +68,8 @@
  },
  "A-fallback-node": {
   "criteria": [
-   "A-primary-only"
+   "A-primary-only",
+   "A-priority"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -177,6 +180,11 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-probe-job-fields": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-warm-on-baseline": {
   "criteria": [],
   "pass": true,
@@ -187,9 +195,74 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-priority-fallback-group-unregistered": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-no-scale-up-events": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-unparseable-event": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-runner-node-oom": {
   "criteria": [
    "runner-health"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-duplicate-job": {
+  "criteria": [
+   "A-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-foreign-job-fields": {
+  "criteria": [
+   "A-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-live-shape": {
+  "criteria": [
+   "A-shared-fleet",
+   "A-primary-only",
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-no-runner-read": {
+  "criteria": [
+   "A-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-runner-without-pod": {
+  "criteria": [
+   "A-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-transient-job": {
+  "criteria": [
+   "A-shared-fleet"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -259,7 +332,8 @@
   "criteria": [
    "B-placement",
    "B-fallback-nodes",
-   "B-compatibility"
+   "B-compatibility",
+   "B-priority"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -271,9 +345,37 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "B-priority-no-scale-up-events": {
+  "criteria": [
+   "B-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-priority-primary-scale-up": {
+  "criteria": [
+   "B-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "B-setup-primary-open": {
   "criteria": [
    "B-setup"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-shared-fleet-foreign-job": {
+  "criteria": [
+   "B-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-shared-fleet-runner-without-pod": {
+  "criteria": [
+   "B-shared-fleet"
   ],
   "pass": false,
   "ready_for_migration": false

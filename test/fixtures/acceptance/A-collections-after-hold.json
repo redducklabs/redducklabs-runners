@@ -1,6 +1,10 @@
 {
  "arc_contract_after": "burst",
- "events": [],
+ "events": [
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:20Z", "involved_kind": "Pod", "involved_name": "ar5", "last_timestamp": "2026-11-02T18:00:20Z", "message": "pod triggered scale-up: [{pool-pri 0->6 (max: 6)}]", "namespace": "arc-runners", "reason": "TriggeredScaleUp", "type": "Normal", "uid": "ev-su-pri"},
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:20Z", "involved_kind": "ConfigMap", "involved_name": "cluster-autoscaler-status", "last_timestamp": "2026-11-02T18:00:20Z", "message": "Scale-up: setting group pool-pri size to 6 instead of 0 (max: 6)", "namespace": "kube-system", "reason": "ScaledUpGroup", "type": "Normal", "uid": "ev-su-pri-1"},
+   {"count": 1, "first_timestamp": "2026-11-02T18:00:20Z", "involved_kind": "ConfigMap", "involved_name": "cluster-autoscaler-status", "last_timestamp": "2026-11-02T18:00:20Z", "message": "Scale-up: group pool-pri size set to 6 instead of 0 (max: 6)", "namespace": "kube-system", "reason": "ScaledUpGroup", "type": "Normal", "uid": "ev-su-pri-2"}
+ ],
  "expander_readback": {
    "expanders": [
      "priority",
@@ -60,8 +64,8 @@
  "phase": "A",
  "phase_c": null,
  "pod_collections": [
-   {"observed_at": "2026-11-02T18:21:05Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}], "requested_at": "2026-11-02T18:21:00Z"},
-   {"observed_at": "2026-11-02T18:24:05Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}], "requested_at": "2026-11-02T18:24:00Z"}
+   {"ephemeral_runners": {"items": [{"job": {}, "name": "ar15", "phase": "Running", "terminating": false, "uid": "er-uid-ar15"}, {"job": {}, "name": "ar16", "phase": "Running", "terminating": false, "uid": "er-uid-ar16"}], "observed_at": "2026-11-02T18:21:06Z", "requested_at": "2026-11-02T18:21:05Z"}, "observed_at": "2026-11-02T18:21:05Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}], "requested_at": "2026-11-02T18:21:00Z"},
+   {"ephemeral_runners": {"items": [{"job": {}, "name": "ar15", "phase": "Running", "terminating": false, "uid": "er-uid-ar15"}, {"job": {}, "name": "ar16", "phase": "Running", "terminating": false, "uid": "er-uid-ar16"}], "observed_at": "2026-11-02T18:24:06Z", "requested_at": "2026-11-02T18:24:05Z"}, "observed_at": "2026-11-02T18:24:05Z", "pods": [{"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar15", "terminating": false, "uid": "uid-ar15"}, {"node": "p6", "phase": "Running", "pool": "github-runners-burst-amd-16g", "runner_name": "ar16", "terminating": false, "uid": "uid-ar16"}], "requested_at": "2026-11-02T18:24:00Z"}
  ],
  "pods": [
    {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "first_seen": "2026-11-02T18:00:20Z", "last_seen": "2026-11-02T18:19:20Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "ar1", "uid": "uid-ar1"},
