@@ -60,6 +60,11 @@ test_tool "Git" "git --version"
 test_tool "curl" "curl --version | head -1"
 test_tool "jq" "jq --version"
 test_tool "bc" "bc --version | head -1"
+test_tool "zstd" "zstd --version"
+# Single quotes on purpose: the variables must expand inside the runner pod.
+# shellcheck disable=SC2016
+test_tool "Writable tool cache" \
+    'test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache && test "$AGENT_TOOLSDIRECTORY" = /opt/hostedtoolcache && touch /opt/hostedtoolcache/.write-probe && rm /opt/hostedtoolcache/.write-probe && echo /opt/hostedtoolcache'
 
 # Test Python packages
 echo -e "${BLUE}Testing Python packages:${NC}"

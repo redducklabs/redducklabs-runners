@@ -126,9 +126,17 @@ jobs:
             docker --version; docker buildx version; docker compose version
             gh --version | head -1; aws --version; trivy --version
             kubeconform -v; kubesec version; psql --version; redis-cli --version
-            bc --version | head -1
+            bc --version | head -1; zstd --version
             python3 -c "import pytest_mock"
             echo ALL_TOOLS_OK'
+          # Writable tool cache for actions/setup-* (see the Dockerfile).
+          docker run --rm "$IMG" bash -c '
+            set -e
+            test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache
+            test "$AGENT_TOOLSDIRECTORY" = /opt/hostedtoolcache
+            test "$(id -u)" = 1001
+            touch /opt/hostedtoolcache/.write-probe && rm /opt/hostedtoolcache/.write-probe
+            echo TOOL_CACHE_OK'
           docker run --rm "$IMG" bash -c '
             set -e
             terraform version >/dev/null
@@ -422,8 +430,14 @@ jobs:
             kubeconform -v; kubesec version
             docker --version; docker buildx version; docker compose version
             gh --version | head -1; psql --version; redis-cli --version
-            bc --version | head -1
+            bc --version | head -1; zstd --version
             python3 -c "import pytest_mock"'
+          docker run --rm "$IMG" bash -c '
+            set -e
+            test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache
+            test "$AGENT_TOOLSDIRECTORY" = /opt/hostedtoolcache
+            test "$(id -u)" = 1001
+            touch /opt/hostedtoolcache/.write-probe && rm /opt/hostedtoolcache/.write-probe'
           docker run --rm "$IMG" bash -c '
             set -e
             terraform version >/dev/null
