@@ -235,6 +235,30 @@ concurrent jobs on a few node IPs would exhaust the limit.
 - Density and legacy-isolated contracts do not carry the flag, so recorded
   revisions of earlier releases remain valid rollback targets.
 
+### Shared actions/setup-* tool cache
+
+The burst, burst-acceptance and drain contracts mount one `tool-cache`
+emptyDir at `/opt/hostedtoolcache` in both the runner and the DinD sidecar, and
+set `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` to that path on the runner.
+
+- Both mounts are required. Container jobs bind-mount the runner's tool
+  directory (`-v <tool dir>:/__t`), and dockerd resolves bind sources in its
+  own filesystem. Without the dind mount, dockerd creates a separate root-owned
+  directory that a non-root job container (`--user 1001:121`) cannot write.
+- Ownership: the kubelet creates a plain emptyDir mode 0777, as it does for
+  `work`, which already holds the job workspace. uid 1001 writes it with no
+  root init container, no pod `fsGroup` (which would also re-own the dind
+  socket volume and add a group to the privileged sidecar), and no
+  securityContext change. Anything in the pod can write it, which is the same
+  exposure as `work`. Its lifetime is one ephemeral job pod.
+- The volume is disk-backed (no `medium: Memory`) so toolchains do not count
+  against the shared pod memory limit. Like `work`, it has no `sizeLimit`.
+- The image sets no tool-cache env. Density and legacy-isolated do not carry
+  the volume or env, so those pods keep the runner default `<work>/_tool` on
+  the shared `work` volume, and recorded revisions remain valid rollback
+  targets. The contract validator and the Deploy admission check pin all of
+  this exactly.
+
 ### Container Network Security
 
 - Containers run in isolated network namespaces

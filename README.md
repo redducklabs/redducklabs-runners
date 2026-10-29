@@ -121,12 +121,17 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - Git, curl, wget, jq, zip, unzip, zstd, bc, libmagic1 (`zstd` lets
   `actions/cache` use zstd, the compression GitHub-hosted runners use, instead
   of falling back to gzip)
-- Writable tool cache at `/opt/hostedtoolcache`, owned by the runner user, with
-  `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` set to it, so
+- Writable tool cache at `/opt/hostedtoolcache` (burst and drain contracts), so
   `actions/setup-python`, `setup-node`, `setup-go` and other `setup-*` actions
   can install toolchains. setup-python's Linux builds only load from that exact
-  path. The cache starts empty in every ephemeral pod: a `setup-*` step still
-  downloads its toolchain once per job
+  path. It is a pod volume, not part of the image: `deploy/dind-values.yaml`
+  mounts one `tool-cache` emptyDir at that path in both the runner and the dind
+  sidecar, and sets `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` on the runner.
+  The dind mount is required because container jobs bind-mount the tool
+  directory through dockerd. The density rollback values do not carry it, so
+  those pods keep the runner default `_work/_tool`. The cache starts empty in
+  every ephemeral pod: a `setup-*` step still downloads its toolchain once per
+  job
 - WeasyPrint native libs (libpango, libpangoft2, libharfbuzz, libfontconfig,
   libcairo2, libffi8) so consumer CI jobs that `import weasyprint` (PDF
   rendering) can load them via ctypes

@@ -26,12 +26,15 @@
   kubesec x/crypto ≥ v0.35.0. Trivy's full HIGH/CRITICAL scan is **report-only**
   (upstream-binary and dind base-image fixed CVEs cannot be remediated here).
 - **Go runtime:** a clean Go 1.27.0 stays in the final image for CI workflows.
-- **Tool cache:** `/opt/hostedtoolcache` is created empty, owned by the runner
-  user (mode 0755), with `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` pointing
-  at it. It is baked into the image instead of mounted as a pod volume, so the
-  runner values contracts (burst, drain, density) are unchanged. Jobs write into
-  it without sudo; the runner stays non-root. `zstd` is installed from the
-  Ubuntu archive for `actions/cache`.
+- **Tool cache:** not baked into the image, and the image sets no
+  `RUNNER_TOOL_CACHE` / `AGENT_TOOLSDIRECTORY` (the build smoke test asserts
+  this). Container jobs bind-mount the runner's tool directory through the DinD
+  daemon, which resolves the bind source in its own filesystem and never sees
+  this image's layers. The cache is therefore a `tool-cache` emptyDir mounted at
+  `/opt/hostedtoolcache` in both the runner and dind
+  (`deploy/dind-values.yaml`, burst and drain contracts). The kubelet creates it
+  mode 0777, like `work`, so uid 1001 writes it with no root init container or
+  fsGroup. `zstd` is installed from the Ubuntu archive for `actions/cache`.
 
 Measured toolchains (2026-08-19 version refresh): kubectl go1.26.5, doctl
 go1.25.0, kubeconform go1.27.0, kubesec go1.27.0 (x/crypto v0.55.0), trivy
