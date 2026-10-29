@@ -55,6 +55,11 @@ githubConfigSecret:
   policy (`GET /repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos`),
   which needs repository administration read on every member. Without it the
   read fails and the operation fails closed before any runner-group change.
+- **CI Usage Report** lists the organization's repositories and reads Actions
+  runs and jobs (GET only) of every non-archived repository, which needs the
+  `repo` scope for the private ones. It runs on GitHub-hosted `ubuntu-latest`
+  with `contents: read`, writes only its job summary and artifact (repository
+  names, job counts and minutes; no logs or secrets), and mutates nothing.
 - **Runner Acceptance Evidence** reads `redducklabs/aurolegal.ai` Actions runs,
   jobs and tags, and cancels the acceptance probe run it has verified. It never
   cancels a run it has not verified (repository, workflow path, `headSha`,

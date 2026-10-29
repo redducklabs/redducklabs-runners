@@ -1,0 +1,97 @@
+name: CI Usage Report
+
+# Weekly GitHub Actions job usage across the organization's repositories:
+# fleet vs GitHub-hosted job-minutes per repository, estimated hosted cost at
+# GitHub's published prices, and the fleet concurrency and queue-wait profile
+# used to tune ARC maxRunners (burst ceiling) and minRunners (warm floor).
+# See scripts/ci-usage-report.sh and docs/runbooks/node-pool-sizing.md,
+# "Tuning the burst ceiling and warm floor".
+#
+# Read-only: the report issues only `gh api` GETs. It runs on GitHub-hosted
+# ubuntu-latest, touches no cluster or DigitalOcean account and holds no fleet
+# lock. RUNNER_TOKEN is used because GITHUB_TOKEN can read only this
+# repository; reading Actions runs and jobs of the organization's private
+# repositories needs the PAT's `repo` scope.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Window length in days, ending now (1-31)'
+        required: false
+        default: '7'
+        type: string
+  schedule:
+    # Mondays at 08:00 UTC: the previous seven days.
+    - cron: '0 8 * * 1'
+
+concurrency:
+  group: ci-usage-report
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: CI usage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate inputs
+        id: validate
+        env:
+          INPUT_DAYS: ${{ inputs.days }}
+        run: |
+          DAYS="${INPUT_DAYS:-7}"
+          if ! [[ "${DAYS}" =~ ^[0-9]{1,2}$ ]] || [ "${DAYS}" -lt 1 ] || [ "${DAYS}" -gt 31 ]; then
+            echo "::error::days must be an integer from 1 to 31"
+            exit 1
+          fi
+          echo "days=${DAYS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build usage report
+        id: report
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          DAYS: ${{ steps.validate.outputs.days }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::RUNNER_TOKEN is not configured; the report cannot read the organization's private repositories"
+            exit 1
+          fi
+          mkdir -p ci-usage-report
+          set +e
+          ./scripts/ci-usage-report.sh --days "${DAYS}" --json ci-usage-report/ci-usage-report.json \
+            > ci-usage-report/ci-usage-report.md
+          rc=$?
+          set -e
+          if [ "${rc}" -eq 1 ]; then
+            echo "::warning::CI usage report is incomplete; see the job summary"
+          fi
+          exit "${rc}"
+
+      - name: Write job summary
+        if: always() && steps.validate.outcome == 'success'
+        run: |
+          if [ -s ci-usage-report/ci-usage-report.md ]; then
+            cat ci-usage-report/ci-usage-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "CI usage report produced no output; see the Build usage report step log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always() && steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-usage-report
+          path: ci-usage-report/
+          if-no-files-found: ignore
+          retention-days: 90

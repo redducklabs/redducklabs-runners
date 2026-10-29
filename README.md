@@ -338,6 +338,7 @@ available for investigation and explicitly requested operations.
 | **Rebalance Runners** | Retires idle runners stranded on burst nodes | Hourly + manual |
 | **Runner Acceptance Evidence** | Read-only acceptance controller for phases A-E; cancels only its verified probe | Manual (`workflow_dispatch`) |
 | **Deploy Cluster Addons** | Deploy metrics-server (`kubectl top`) | Manual (`workflow_dispatch`) |
+| **CI Usage Report** | Read-only weekly job usage across the organization: fleet vs hosted job-minutes, estimated hosted cost, fleet concurrency and queue wait | Weekly (Mondays 08:00 UTC) + manual |
 | **Runner Status** | Read-only pool-state admission, per-pool node counts and bounds, expander readback, runner health, registration, memory headroom, OOM kills | Manual + Daily at 9 AM UTC |
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
 | **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
@@ -508,6 +509,47 @@ month-to-date usage, labeled `ACCOUNT-WIDE`. Missing or unparseable invoice data
 or no runner-size line, prints `cost data unavailable` and never a zero. Runner
 Status reports current node counts per pool, not node-hours.
 
+### CI Usage and Fleet Concurrency
+Job usage is measured from the GitHub Actions jobs API. The **CI Usage Report**
+workflow runs it weekly (Mondays 08:00 UTC, the previous seven days, or
+`days` 1-31 when dispatched) and writes the Markdown to the job summary and the
+Markdown plus JSON to the `ci-usage-report` artifact. Locally, with `gh`
+authenticated for the organization (read-only):
+
+```bash
+./scripts/ci-usage-report.sh                       # last 7 days
+./scripts/ci-usage-report.sh --days 14 --json usage.json
+./scripts/ci-usage-report.sh --end 2026-10-26T00:00:00Z
+```
+
+For every non-archived repository of `redducklabs` it lists the workflow runs
+created in the window (and `3` days before it, for re-runs), bisecting any
+created range above the API's 1000-result search cap, reads the jobs of every
+attempt (`filter=all`), and counts each job that started in the window:
+
+- **Fleet vs hosted job-minutes per repository.** A job is a fleet job when its
+  runner name starts with `redducklabs-runners-`, GitHub-hosted when it ran in
+  the `GitHub Actions` runner group, and "other self-hosted" otherwise. Skipped
+  jobs and jobs cancelled before pickup carry no minutes.
+- **Estimated hosted cost.** Each hosted job is rounded up to a whole minute and
+  priced at GitHub's published list price for its runner label (source URL and
+  retrieval date are recorded in `scripts/lib/ci_usage_report.py`; update both
+  together). Standard runners in public repositories are free and excluded;
+  included plan usage is not subtracted. A hosted job whose labels name no
+  standard runner (a custom larger-runner label) is shown as unpriced minutes,
+  never as $0.
+- **Fleet concurrency profile.** From the fleet jobs' `started_at`-`completed_at`
+  intervals, time-weighted over the whole window: p50, p95 and max concurrent
+  fleet jobs, minutes at >= 4 (what the two baseline nodes hold), >= 16 and >= 20
+  (`maxRunners`), and fleet queue wait (`started_at - created_at`) p50/p95/max.
+  See the runbook's "Tuning the burst ceiling and warm floor".
+
+The token needs Actions read on the organization's private repositories; the
+workflow uses `RUNNER_TOKEN` for that (`GITHUB_TOKEN` reads only this
+repository). A repository that cannot be read is listed and the report is
+marked `INCOMPLETE` (exit 1, numbers are lower bounds); a failed repository
+listing prints `usage data unavailable` and no tables.
+
 ### Verify GitHub Registration
 ```bash
 curl -H "Authorization: token $GITHUB_TOKEN" \
@@ -589,6 +631,7 @@ redducklabs-runners/
 │   └── dind-values.template.yaml
 ├── scripts/                   # Local operational helpers
 │   ├── scale-runners.sh       # Status-only helper
+│   ├── ci-usage-report.sh     # Read-only Actions job usage and fleet concurrency
 │   ├── runner-admin.sh        # Legacy interactive helper
 │   ├── emergency-stop.sh      # Legacy local helper
 │   └── README.md
