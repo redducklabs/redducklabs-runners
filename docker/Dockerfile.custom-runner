@@ -156,6 +156,11 @@ ENV CGO_ENABLED=1
 
 # Update and install runtime dependencies only (no build tools).
 #
+# zstd: actions/cache (@actions/cache getCompressionMethod) probes for a zstd
+# binary and falls back to gzip when it is absent. The compression method is
+# part of the cache version, so without zstd a fleet job cannot restore caches
+# saved by GitHub-hosted runners (which ship zstd) for the same key.
+#
 # WeasyPrint native libraries (libpango-* / libharfbuzz / libfontconfig /
 # libcairo2 / libffi8): consumer CI jobs that `import weasyprint` (e.g.
 # aurolegal.ai's backend pytest suite) load these shared objects via ctypes at
@@ -176,7 +181,7 @@ RUN apt-get update && \
     ca-certificates gnupg lsb-release \
     software-properties-common \
     apt-transport-https \
-    jq zip unzip tar gzip \
+    jq zip unzip tar gzip zstd \
     sudo \
     libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
     libfontconfig1 libcairo2 libffi8 && \
@@ -403,6 +408,15 @@ RUN apt-get clean && \
     # Ensure Go workspace is clean for runner user
     mkdir -p /home/runner/go/{bin,src,pkg} && \
     chown -R runner:runner /home/runner/go
+
+# The actions/setup-* tool cache (/opt/hostedtoolcache, RUNNER_TOOL_CACHE and
+# AGENT_TOOLSDIRECTORY) is deliberately NOT baked into this image. Container
+# jobs bind-mount the tool directory through the DinD sidecar, whose
+# filesystem never sees this image's layers, so the directory must be a pod
+# volume shared by the runner and dind containers. It is declared in
+# deploy/dind-values.yaml (burst and drain contracts). Pods without it, such
+# as the density rollback target, keep the runner default <work>/_tool on the
+# shared work volume.
 
 # Clean kubectl config to ensure no inherited contexts
 RUN rm -rf /root/.kube /home/runner/.kube

@@ -123,6 +123,8 @@ template:
         mountPath: /var/run
       - name: dind-externals
         mountPath: /home/runner/externals
+      - name: tool-cache
+        mountPath: /opt/hostedtoolcache
 
     # Container configuration
     containers:
@@ -143,6 +145,11 @@ template:
         value: unix:///var/run/docker.sock
       - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
         value: "120"
+      # actions/setup-* tool cache on the shared tool-cache volume below.
+      - name: RUNNER_TOOL_CACHE
+        value: /opt/hostedtoolcache
+      - name: AGENT_TOOLSDIRECTORY
+        value: /opt/hostedtoolcache
 
       # Resource controls belong on template.spec.resources above, shared with
       # the dind sidecar.
@@ -152,12 +159,19 @@ template:
         mountPath: /home/runner/_work
       - name: dind-sock
         mountPath: /var/run
+      - name: tool-cache
+        mountPath: /opt/hostedtoolcache
 
     # Owned by you in default container mode (the chart creates these in dind mode).
+    # tool-cache must be mounted at the same path in the runner and dind:
+    # container jobs bind-mount the tool directory, and dockerd resolves bind
+    # sources in its own filesystem. The kubelet creates an emptyDir mode 0777.
     volumes:
     - name: work
       emptyDir: {}
     - name: dind-sock
       emptyDir: {}
     - name: dind-externals
+      emptyDir: {}
+    - name: tool-cache
       emptyDir: {}

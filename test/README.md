@@ -20,6 +20,44 @@ Comprehensive verification of all tools installed in the runner image.
 - Development tools (Git, Docker CLI, GitHub CLI)
 - Database clients (PostgreSQL, Redis)
 - Python packages (black, flake8, mypy, ruff, pytest, requests, boto3, yaml)
+- zstd, and the shared tool cache (burst/drain pods): writable in the runner,
+  and writable from a non-root container started through dind
+  (`docker run --user 1001:121 -v "$RUNNER_TOOL_CACHE:/__t" busybox:1.37 ...`).
+  The second check starts a throwaway container in the inspected pod's dind
+  daemon. Run it only when a live check is explicitly wanted.
+
+#### Post-merge live check: non-root container-job tool cache
+
+After the tool-cache change is deployed (burst contract), run a job like this
+from a private repository whose workflows already use the fleet. It checks the
+tool cache from both a runner step and a non-root job container, and it
+exercises an uncached `setup-node`:
+
+```yaml
+jobs:
+  tool-cache-probe:
+    runs-on: redducklabs-runners
+    steps:
+      - run: test "$RUNNER_TOOL_CACHE" = /opt/hostedtoolcache && touch "$RUNNER_TOOL_CACHE/probe"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -c "import ssl, sys; print(sys.prefix)"
+  container-tool-cache-probe:
+    runs-on: redducklabs-runners
+    container:
+      image: node:22-bookworm
+      options: --user 1001:121
+    steps:
+      - run: touch "$RUNNER_TOOL_CACHE/probe" && ls -ld "$RUNNER_TOOL_CACHE"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+      - run: node --version
+```
+
+Expected: both jobs pass. `sys.prefix` is under `/opt/hostedtoolcache/Python/`.
+In the container job, `RUNNER_TOOL_CACHE` is `/__t` and is writable by uid 1001.
 
 ### `verify-security-fixes.sh`
 Security-focused verification to ensure known CVEs have been remediated.

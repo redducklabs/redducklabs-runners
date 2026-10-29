@@ -144,6 +144,8 @@ template:
         mountPath: /var/run
       - name: dind-externals
         mountPath: /home/runner/externals
+      - name: tool-cache
+        mountPath: /opt/hostedtoolcache
 
     # Container configuration
     containers:
@@ -164,6 +166,13 @@ template:
         value: unix:///var/run/docker.sock
       - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
         value: "120"
+      # actions/setup-* tool cache on the shared tool-cache volume below.
+      # actions/runner reads RUNNER_TOOL_CACHE first; the actions/python-versions
+      # installer prefers AGENT_TOOLSDIRECTORY, so both name the same path.
+      - name: RUNNER_TOOL_CACHE
+        value: /opt/hostedtoolcache
+      - name: AGENT_TOOLSDIRECTORY
+        value: /opt/hostedtoolcache
 
       # The pod-level budget above is intentionally shared by the runner and
       # dind sidecar. Do not add container-level resources here: they override
@@ -189,15 +198,26 @@ template:
         mountPath: /home/runner/_work
       - name: dind-sock
         mountPath: /var/run
+      - name: tool-cache
+        mountPath: /opt/hostedtoolcache
 
     # Owned by us in default container mode (the chart created these in dind
     # mode). `work` is the runner's job workspace; dind-sock carries the Docker
     # socket between the sidecar and the runner; dind-externals carries the
-    # runner externals copied by the init container.
+    # runner externals copied by the init container. tool-cache is the
+    # actions/setup-* tool cache at /opt/hostedtoolcache, the prefix the
+    # actions/python-versions Linux builds are compiled for. It is mounted at
+    # the same path in the runner AND dind, because container jobs bind-mount
+    # the tool directory and dockerd resolves bind sources in its own
+    # filesystem. A plain emptyDir is created mode 0777 by the kubelet, the
+    # same as `work`, so uid 1001 can write it both directly and from a
+    # non-root job container, with no root init container or pod fsGroup.
     volumes:
     - name: work
       emptyDir: {}
     - name: dind-sock
       emptyDir: {}
     - name: dind-externals
+      emptyDir: {}
+    - name: tool-cache
       emptyDir: {}
