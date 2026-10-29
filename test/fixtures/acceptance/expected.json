@@ -32,7 +32,8 @@
  },
  "A-collections-after-hold": {
   "criteria": [
-   "A-primary-only"
+   "A-primary-only",
+   "A-shared-fleet"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -245,6 +246,20 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "A-shared-fleet-no-runner-read": {
+  "criteria": [
+   "A-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-shared-fleet-runner-without-pod": {
+  "criteria": [
+   "A-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-shared-fleet-transient-job": {
   "criteria": [
    "A-shared-fleet"
@@ -352,6 +367,13 @@
   "ready_for_migration": false
  },
  "B-shared-fleet-foreign-job": {
+  "criteria": [
+   "B-shared-fleet"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-shared-fleet-runner-without-pod": {
   "criteria": [
    "B-shared-fleet"
   ],

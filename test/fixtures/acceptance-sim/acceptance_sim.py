@@ -125,16 +125,27 @@ def arc_model_errors(ev):
 def timelines(ev):
     """Per-collection EphemeralRunner and node-pool states, replayed by clock.
 
-    Each fixture pod collection becomes the EphemeralRunner list served from
-    its requested_at on: one EphemeralRunner per listed pod, with exactly that
-    collection's job fields (none when it has none), so a job can start and end
-    between collections. Each fixture pool collection becomes the node-pool
+    Each fixture pod collection's runner read (ephemeral_runners: its complete
+    runner list, runners without a pod included) becomes the EphemeralRunner
+    list served from that read's requested_at on, with exactly its job fields,
+    so a job can start and end between collections; a collection without one
+    serves one EphemeralRunner per listed pod. Each fixture pool collection becomes the node-pool
     counts served from its requested_at on. Nothing is merged across
     collections."""
-    runners = [{"at": collection["requested_at"],
-                "items": [{"metadata": {"name": pod["runner_name"]}, "status": dict(pod.get("job") or {}, phase="Running")}
-                          for pod in collection.get("pods") or []]}
-               for collection in ev.get("pod_collections") or []]
+    runners = []
+    for collection in ev.get("pod_collections") or []:
+        read = collection.get("ephemeral_runners")
+        if isinstance(read, dict):
+            # The fixture's complete runner read: every runner, pod or not.
+            items = [{"metadata": {"name": runner["name"], "uid": runner.get("uid")},
+                      "status": dict(runner.get("job") or {}, phase=runner.get("phase") or "Running")}
+                     for runner in read.get("items") or []]
+            runners.append({"at": read["requested_at"], "items": items})
+        else:
+            runners.append({"at": collection["requested_at"],
+                            "items": [{"metadata": {"name": pod["runner_name"]},
+                                       "status": dict(pod.get("job") or {}, phase="Running")}
+                                      for pod in collection.get("pods") or []]})
     pools = [{"at": read["requested_at"], "pools": read["pools"]} for read in ev.get("pool_collections") or []]
     return (sorted(runners, key=lambda entry: epoch(entry["at"])), sorted(pools, key=lambda entry: epoch(entry["at"])))
 

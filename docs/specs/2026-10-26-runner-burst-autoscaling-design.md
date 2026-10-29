@@ -856,12 +856,14 @@ added one fallback node beyond the primary's six. That run cannot show the
 priority order, so the placement counts require an exclusive fleet rather than
 a tolerance for other work (Ruling 44 revised after PR #42 review 1):
 
-- Each collection records, with its pod read, the job fields of every
-  EphemeralRunner. If a collection inside the hold shows a job field that does
-  not belong to the probe run (repository `redducklabs/aurolegal.ai` and the
-  probe's `workflowRunId`), or one job on two runners, `A-shared-fleet` /
-  `B-shared-fleet` fail with "re-run this phase while no other repository's CI
-  uses the fleet". The pod targets stay exact: A 16 = 4 baseline + 12 primary,
+- Each collection keeps, beside its pod read, its complete EphemeralRunner
+  read with its own `requested_at`/`observed_at`: every runner's name, uid
+  and job fields, whether or not its pod was in the pod read (PR #42 review
+  2). If a runner read wholly inside the hold shows a job field that does not
+  belong to the probe run (repository `redducklabs/aurolegal.ai` and the
+  probe's `workflowRunId`), or one job on two runners, or no runner read lies
+  inside the hold, `A-shared-fleet` / `B-shared-fleet` fail with "re-run this
+  phase while no other repository's CI uses the fleet". The pod targets stay exact: A 16 = 4 baseline + 12 primary,
   no fallback node; B 8 = 4 baseline + 4 fallback, no primary.
 - `A-priority` / `B-priority`: every cluster-autoscaler `TriggeredScaleUp`
   (`pod triggered scale-up: [{<group> <from>-><to> (max: <max>)} ...]`) and

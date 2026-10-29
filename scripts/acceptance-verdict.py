@@ -76,10 +76,13 @@ The concurrency criteria use the probe's job count (14 and 6).
 
 Exclusive fleet (Ruling 44 revised): the placement counts above hold only when
 the probe is the fleet's only workload. A-shared-fleet / B-shared-fleet fail
-when a collection inside the hold shows a runner whose EphemeralRunner job
-fields do not belong to the probe run (repository redducklabs/aurolegal.ai and
-the probe's workflowRunId), or one job on two runners; the phase is then
-re-run while no other repository's CI uses the fleet.
+when an EphemeralRunner read wholly inside the hold (each collection keeps its
+complete runner list, with its own interval, apart from the pod read) shows a
+runner whose job fields do not belong to the probe run (repository
+redducklabs/aurolegal.ai and the probe's workflowRunId), whether or not that
+runner has a pod in the pod read, or one job on two runners, or when no runner
+read lies inside the hold; the phase is then re-run while no other
+repository's CI uses the fleet.
 
 Priority (A-priority, B-priority): the order is proven from the
 cluster-autoscaler's own decisions, not from periodic snapshots. Every
@@ -347,37 +350,53 @@ def hold_placement(phase, evidence, jobs, failures, notes):
     return placement
 
 
-def held_collections(evidence, jobs):
-    """The pod collections wholly inside the hold (none without a hold)."""
+def held_runner_reads(evidence, jobs):
+    """The EphemeralRunner reads (one per pod collection) whose own interval
+    lies wholly inside the hold (none without a hold)."""
     window = hold_window(jobs)
     if window is None:
         return []
     start, end = window
-    held = []
+    reads = []
     for collection in evidence.get("pod_collections") or []:
-        requested = ts(collection.get("requested_at"), "pod collection requested_at")
-        observed = ts(collection.get("observed_at"), "pod collection observed_at")
+        read = collection.get("ephemeral_runners")
+        if not isinstance(read, dict):
+            continue
+        requested = ts(read.get("requested_at"), "EphemeralRunner read requested_at")
+        observed = ts(read.get("observed_at"), "EphemeralRunner read observed_at")
+        if observed < requested:
+            raise EvidenceError(f"EphemeralRunner read observed_at {read.get('observed_at')} precedes its requested_at")
         if start <= requested and observed <= end:
-            held.append(collection)
-    return held
+            reads.append(read)
+    return reads
 
 
 def check_exclusive_fleet(phase, evidence, jobs, failures):
     """{phase}-shared-fleet: no other run's job on the fleet during the hold (Ruling 44 revised).
 
-    Every runner pod of a collection inside the hold carries the job fields of
-    its EphemeralRunner read in the same interval. Any job field that does not
-    belong to the probe run (repository redducklabs/aurolegal.ai and the
-    probe's workflowRunId), or one job (jobId or jobRequestId) assigned to two
-    runner pods in one collection, means the fleet was shared or the
-    assignment evidence is inconsistent; placement cannot then show the
-    priority order, so the phase must be re-run on an exclusive fleet."""
+    Judged from every EphemeralRunner read wholly inside the hold, each the
+    complete runner list of its collection (PR #42 review 2): a runner counts
+    whether or not its pod was in that collection's earlier pod read. Any job
+    field that does not belong to the probe run (repository
+    redducklabs/aurolegal.ai and the probe's workflowRunId), or one job (jobId
+    or jobRequestId) on two runners of one read, means the fleet was shared or
+    the assignment evidence is inconsistent; placement cannot then show the
+    priority order, so the phase must be re-run on an exclusive fleet. No
+    runner read inside the hold fails too: exclusivity was not observed."""
+    rerun = "re-run this phase while no other repository's CI uses the fleet"
+    if hold_window(jobs) is None:
+        return
+    reads = held_runner_reads(evidence, jobs)
+    if not reads:
+        failures.append(f"{phase}-shared-fleet: no EphemeralRunner read lies wholly inside the hold; "
+                        f"exclusive use of the fleet was not observed; {rerun}")
+        return
     probe_id = str(((evidence.get("probe") or {}).get("run") or {}).get("id"))
     foreign, duplicates = set(), set()
-    for collection in held_collections(evidence, jobs):
+    for read in reads:
         assigned = {}
-        for pod in collection.get("pods") or []:
-            job = pod.get("job") or {}
+        for runner in read.get("items") or []:
+            job = runner.get("job") or {}
             if not job:
                 continue
             if job.get("jobRepositoryName") != PROBE_REPOSITORY or str(job.get("workflowRunId")) != probe_id:
@@ -386,15 +405,14 @@ def check_exclusive_fleet(phase, evidence, jobs, failures):
             for key in ("jobId", "jobRequestId"):
                 if job.get(key) in (None, ""):
                     continue
-                first = assigned.setdefault((key, str(job[key])), pod.get("runner_name"))
-                if first != pod.get("runner_name"):
-                    duplicates.add(f"{key} {job[key]} on {first} and {pod.get('runner_name')}")
-    rerun = "re-run this phase while no other repository's CI uses the fleet"
+                first = assigned.setdefault((key, str(job[key])), runner.get("name"))
+                if first != runner.get("name"):
+                    duplicates.add(f"{key} {job[key]} on {first} and {runner.get('name')}")
     if foreign:
-        failures.append(f"{phase}-shared-fleet: runner pods held jobs of other runs during the hold "
+        failures.append(f"{phase}-shared-fleet: runners held jobs of other runs during the hold "
                         f"({', '.join(sorted(foreign))}); {rerun}")
     if duplicates:
-        failures.append(f"{phase}-shared-fleet: one job was assigned to several runner pods in a collection during the "
+        failures.append(f"{phase}-shared-fleet: one job was assigned to several runners in one read during the "
                         f"hold ({', '.join(sorted(duplicates))}); {rerun}")
 
 

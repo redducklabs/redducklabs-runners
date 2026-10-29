@@ -52,7 +52,10 @@ runners (Ruling 43). Each collection also appends to pod_collections the pod
 read's interval (requested_at before the first attempt, observed_at after the
 successful response, retries included) and every runner pod it listed, with
 that read's node (null while unscheduled), pool, phase, terminating flag and
-the job fields of its EphemeralRunner read in the same interval (Ruling 44:
+the job fields of its EphemeralRunner from the runner read that follows; each
+entry also keeps that whole runner read (ephemeral_runners: its own
+requested_at/observed_at and every EphemeralRunner's name, uid, phase,
+terminating flag and job fields, with or without a pod; Ruling 44:
 a job of the probe run, of another run, or none); pool_collections records
 each node-pool read (count, min, max, registered nodes per runner pool) with its
 own interval, as diagnostics.
@@ -517,14 +520,17 @@ def snapshot(state, final=False):
     # The pod read's own interval, retries and backoff included: the placement
     # it returns was observed somewhere in [requested_at, observed_at], which
     # the verdict requires to lie wholly inside the hold (PR #41 review 2).
-    # The interval also covers the EphemeralRunner read, whose job fields show
-    # for this same collection whether a runner holds a job of another run,
-    # which means the fleet was shared and the phase must be re-run
-    # (Ruling 44 revised).
     requested_at = iso(now())
     pods = run_json(["kubectl", "get", "pods", "-n", NAMESPACE, "-l", SCALE_SET_SELECTOR, "-o", "json"]).get("items") or []
-    runners = run_json(["kubectl", "get", "ephemeralrunners.actions.github.com", "-n", NAMESPACE, "-o", "json"]).get("items") or []
     observed_at = iso(now())
+    # The EphemeralRunner read that follows has its own interval and is kept
+    # whole (every runner, with or without a pod in the read above): its job
+    # fields show whether the fleet was shared, which the verdict judges from
+    # this list alone, independently of pod placement (Ruling 44 revised,
+    # PR #42 review 2).
+    runners_requested_at = iso(now())
+    runners = run_json(["kubectl", "get", "ephemeralrunners.actions.github.com", "-n", NAMESPACE, "-o", "json"]).get("items") or []
+    runners_observed_at = iso(now())
     # Placement as this collection saw it (Ruling 43): the per-UID snapshot
     # below keeps only the latest node, so the verdict judges placement during
     # the hold from these timestamped observations, unscheduled pods included.
@@ -540,9 +546,15 @@ def snapshot(state, final=False):
                          "terminating": bool(meta.get("deletionTimestamp")),
                          "ephemeral_runner": meta.get("name") in runner_jobs,
                          "job": runner_jobs.get(meta.get("name")) or {}})
+    assignments = [{"name": (item.get("metadata") or {}).get("name"), "uid": (item.get("metadata") or {}).get("uid"),
+                    "phase": (item.get("status") or {}).get("phase"),
+                    "terminating": bool((item.get("metadata") or {}).get("deletionTimestamp")),
+                    "job": runner_job(item)} for item in runners]
     state.setdefault("pod_collections", []).append(
         {"requested_at": requested_at, "observed_at": observed_at,
-         "pods": sorted(observed, key=lambda pod: str(pod["runner_name"]))})
+         "pods": sorted(observed, key=lambda pod: str(pod["runner_name"])),
+         "ephemeral_runners": {"requested_at": runners_requested_at, "observed_at": runners_observed_at,
+                               "items": sorted(assignments, key=lambda runner: str(runner["name"]))}})
     for item in pods:
         meta = item.get("metadata") or {}
         entry = shots["pods"].setdefault(meta.get("uid"), {"first_seen": stamp})

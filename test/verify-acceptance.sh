@@ -116,7 +116,9 @@ assert expected["A-16-jobs-fallback-overflow"]["criteria"][0] == "A-primary-only
 assert expected["B-pending-pods"]["criteria"] == ["B-placement"]
 # PR #41 review: placement is judged from collections inside the hold.
 assert expected["A-pass-idle-pending-early"]["pass"] is True
-for name, criterion in (("A-idle-pending-through-hold", "A-primary-only"), ("A-collections-after-hold", "A-primary-only"),
+# No collection inside the hold: neither placement nor exclusivity was observed.
+assert expected["A-collections-after-hold"]["criteria"] == ["A-primary-only", "A-shared-fleet"]
+for name, criterion in (("A-idle-pending-through-hold", "A-primary-only"),
                         ("A-idle-turnover", "A-primary-only"),
                         ("B-pending-then-scheduled-after-hold", "B-placement"),
                         ("B-collection-crosses-hold-end", "B-placement")):
@@ -127,6 +129,9 @@ assert expected["A-shared-fleet-live-shape"]["criteria"][0] == "A-shared-fleet"
 for name, criterion in (("A-shared-fleet-duplicate-job", "A-shared-fleet"),
                         ("A-shared-fleet-foreign-job-fields", "A-shared-fleet"),
                         ("A-shared-fleet-transient-job", "A-shared-fleet"),
+                        ("A-shared-fleet-runner-without-pod", "A-shared-fleet"),
+                        ("A-shared-fleet-no-runner-read", "A-shared-fleet"),
+                        ("B-shared-fleet-runner-without-pod", "B-shared-fleet"),
                         ("A-priority-fallback-group-unregistered", "A-priority"),
                         ("A-priority-no-scale-up-events", "A-priority"),
                         ("A-priority-unparseable-event", "A-priority"),
@@ -529,8 +534,26 @@ CASES
     dir=$(sim_dir A-shared-fleet-live-shape)
     run_evidence "$dir" "$(probe_inputs A)"
     expect_evidence "phase A attempt-2 shape fails A-shared-fleet with the re-run instruction" $? 1 - \
-        "A-shared-fleet: runner pods held jobs of other runs during the hold (redducklabs/therapy-link run 555001)" \
+        "A-shared-fleet: runners held jobs of other runs during the hold (redducklabs/therapy-link run 555001)" \
         '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    # A foreign assignment on an EphemeralRunner whose pod is not in the pod
+    # read (PR #42 review 2): the complete runner read is kept and judged.
+    local lone_runner
+    lone_runner='{"ephemeral_runners": [{"metadata": {"name": "redducklabs-runners-x7k2p-runner-tl001", "uid": "er-uid-tl001"}, '
+    lone_runner+='"status": {"phase": "Running", "jobId": "9e1c7a52", "jobRepositoryName": "redducklabs/therapy-link", "workflowRunId": 555001}}]}'
+    dir=$(sim_dir A-pass-probe-job-fields "$lone_runner")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails A-shared-fleet on a foreign EphemeralRunner without a pod" $? 1 - \
+        "A-shared-fleet: runners held jobs of other runs during the hold (redducklabs/therapy-link run 555001)" \
+        '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    if jq -e 'any(.pod_collections[]; (.ephemeral_runners.items | any(.name == "redducklabs-runners-x7k2p-runner-tl001" and .job.workflowRunId == 555001))
+                  and (.pods | all(.runner_name != "redducklabs-runners-x7k2p-runner-tl001")))
+              and all(.pod_collections[]; .ephemeral_runners.requested_at >= .observed_at)' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: the complete runner read (with its own interval after the pod read) keeps the runner without a pod"
+    else
+        fail "phase A record: runner read $(jq -c '.pod_collections[0].ephemeral_runners' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
     # A fallback scale-up decision fails A even though its node never registers.
     dir=$(sim_dir A-priority-fallback-group-unregistered)
     run_evidence "$dir" "$(probe_inputs A)"

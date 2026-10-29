@@ -270,7 +270,8 @@ Idle runners can stay on burst nodes after a batch; Rebalance Runners retires
 them (hourly, or dispatch it as below).
 
 Exclusive fleet (Ruling 44): phases A and B need the fleet to themselves. If
-another repository's CI holds a runner during the hold, `A-shared-fleet` /
+another repository's CI holds a runner during the hold (any EphemeralRunner
+in the evidence run's runner reads, with or without a pod), `A-shared-fleet` /
 `B-shared-fleet` fail with "re-run this phase while no other repository's CI
 uses the fleet". Before dispatching A or B, check that no runner holds a job
 (read-only; prints nothing when the fleet is quiet):
