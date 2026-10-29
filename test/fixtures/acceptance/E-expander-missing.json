@@ -8,19 +8,22 @@
    {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-a", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
    {"created_at": "2026-10-01T00:00:00Z", "kubelet_version": "v1.36.2", "name": "baseline-b", "pool": "github-runners-pool-16g", "ready_at": "2026-10-01T00:00:00Z"},
    {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "p1", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"},
-   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "p2", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"}
+   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "p2", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"},
+   {"created_at": "2026-11-02T18:01:00Z", "kubelet_version": "v1.36.2", "name": "p3", "pool": "github-runners-burst-amd-16g", "ready_at": "2026-11-02T18:01:00Z"}
  ],
  "phase": "E",
  "phase_c": null,
  "pods": [
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "er1", "uid": "uid-er1"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "er2", "uid": "uid-er2"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "er3", "uid": "uid-er3"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "er4", "uid": "uid-er4"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "p1", "pool": "github-runners-burst-amd-16g", "runner_name": "er5", "uid": "uid-er5"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "p1", "pool": "github-runners-burst-amd-16g", "runner_name": "er6", "uid": "uid-er6"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "p2", "pool": "github-runners-burst-amd-16g", "runner_name": "er7", "uid": "uid-er7"},
-   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "node": "p2", "pool": "github-runners-burst-amd-16g", "runner_name": "er8", "uid": "uid-er8"}
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "first_seen": "2026-11-02T18:00:20Z", "last_seen": "2026-11-02T18:19:20Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "er1", "uid": "uid-er1"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "first_seen": "2026-11-02T18:00:20Z", "last_seen": "2026-11-02T18:19:20Z", "node": "baseline-a", "pool": "github-runners-pool-16g", "runner_name": "er2", "uid": "uid-er2"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "first_seen": "2026-11-02T18:00:20Z", "last_seen": "2026-11-02T18:19:20Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "er3", "uid": "uid-er3"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:00:10Z", "first_seen": "2026-11-02T18:00:20Z", "last_seen": "2026-11-02T18:19:20Z", "node": "baseline-b", "pool": "github-runners-pool-16g", "runner_name": "er4", "uid": "uid-er4"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "first_seen": "2026-11-02T18:04:40Z", "last_seen": "2026-11-02T18:19:20Z", "node": "p1", "pool": "github-runners-burst-amd-16g", "runner_name": "er5", "uid": "uid-er5"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "first_seen": "2026-11-02T18:04:40Z", "last_seen": "2026-11-02T18:19:20Z", "node": "p1", "pool": "github-runners-burst-amd-16g", "runner_name": "er6", "uid": "uid-er6"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "first_seen": "2026-11-02T18:04:40Z", "last_seen": "2026-11-02T18:19:20Z", "node": "p2", "pool": "github-runners-burst-amd-16g", "runner_name": "er7", "uid": "uid-er7"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "first_seen": "2026-11-02T18:04:40Z", "last_seen": "2026-11-02T18:19:20Z", "node": "p2", "pool": "github-runners-burst-amd-16g", "runner_name": "er8", "uid": "uid-er8"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "first_seen": "2026-11-02T18:04:40Z", "last_seen": "2026-11-02T18:25:20Z", "node": "p3", "pool": "github-runners-burst-amd-16g", "runner_name": "er9", "uid": "uid-er9"},
+   {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}, "created_at": "2026-11-02T18:04:40Z", "first_seen": "2026-11-02T18:04:40Z", "last_seen": "2026-11-02T18:25:20Z", "node": "p3", "pool": "github-runners-burst-amd-16g", "runner_name": "er10", "uid": "uid-er10"}
  ],
  "pool_state_checks": [],
  "pools_after": {

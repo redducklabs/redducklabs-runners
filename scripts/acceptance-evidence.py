@@ -45,6 +45,11 @@ Subcommands (all share one state file, rewritten after every step):
             queued or in progress and no EphemeralRunner is assigned to it.
             Exit 1 ("CLEANUP: failed") otherwise.
 
+Runner pods: every pod of the scale set (actions.github.com/scale-set-name=
+redducklabs-runners), probe runners and idle warm runners alike, with its node,
+pool, created_at, first_seen and last_seen; ARC 0.14.2 runs minRunners + jobs
+runners, and the verdict counts all of them during the hold (Ruling 43).
+
 Every read is tried up to three times with a short backoff; a persistent
 failure still fails the step. Runner pods are recorded with their full spec
 (literal env values redacted, valueFrom references kept) and their container
@@ -103,7 +108,10 @@ POLL_SECONDS = 60
 CLEANUP_POLL_SECONDS = 15
 CLEANUP_WAIT_SECONDS = 10 * 60
 RESTORE_WAIT_SECONDS = 30 * 60
-WARM_WAIT_SECONDS = 15 * 60
+# Phase E: after the smoke probe the operator dispatches Rebalance Runners to
+# retire idle runners left on burst nodes (a batch of N jobs runs minRunners + N
+# runners, Ruling 43), so the warm floor returns to baseline.
+WARM_WAIT_SECONDS = 30 * 60
 # jobs_killed: a run created this long before Phase C can still run jobs in
 # it (re-runs up to 30 days after the initial run, plus the 35-day run limit).
 RUN_LOOKBACK_DAYS = 65

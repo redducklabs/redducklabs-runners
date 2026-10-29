@@ -6,9 +6,18 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "A-16-jobs-fallback-overflow": {
+  "criteria": [
+   "A-primary-only",
+   "probe-identity"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-baseline-3": {
   "criteria": [
-   "A-baseline"
+   "A-baseline",
+   "A-primary-only"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -142,6 +151,11 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-warm-on-baseline": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-worker-node-oom-diagnostic": {
   "criteria": [],
   "pass": true,
@@ -192,6 +206,13 @@
  "B-pass": {
   "criteria": [],
   "pass": true,
+  "ready_for_migration": false
+ },
+ "B-pending-pods": {
+  "criteria": [
+   "B-placement"
+  ],
+  "pass": false,
   "ready_for_migration": false
  },
  "B-placement-on-primary": {

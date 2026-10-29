@@ -20,6 +20,13 @@ the filter (latest/all by run_attempt) parameter; an unsupported query
 parameter exits 97. Scenario "changes" alter pods and EphemeralRunners from a
 clock time on (see live()).
 
+ARC model (Ruling 43): ARC 0.14.2 targets minRunners + assigned jobs
+(cmd/ghalistener/scaler/scaler.go:237), so a batch probe of N jobs runs
+MIN_RUNNERS + N runner pods. init serves the fixture's pods and refuses
+(exit 97) a batch scenario whose runner pods observed during the hold (every
+entry in progress: created no later than its end, last seen no earlier than
+its start) are not MIN_RUNNERS + N.
+
 Faults: scenario "faults" maps a full call line ("kubectl get events -A -o
 json") to the number of times it fails (exit 1) before it answers normally.
 Runner pods carry a spec with one literal env value
@@ -41,6 +48,7 @@ from doctl_encoding import encode_pool_list  # noqa: E402  (doctl's live omitemp
 PROBE_REPO = "redducklabs/aurolegal.ai"
 FLEET_REPO = "redducklabs/redducklabs-runners"
 POOL_LABEL = "doks.digitalocean.com/node-pool"
+MIN_RUNNERS = 2
 
 
 def epoch(value):
@@ -70,9 +78,29 @@ def doctl_pools(pools):
              "count": entry["count"], "auto_scale": True} for name, entry in (pools or {}).items()]
 
 
+def arc_model_errors(ev):
+    """A batch probe of N jobs must hold MIN_RUNNERS + N runner pods (ARC 0.14.2)."""
+    run = ((ev.get("probe") or {}).get("run")) or {}
+    batch = [job for job in run.get("jobs") or [] if str(job.get("name", "")).startswith("batch ")]
+    if run.get("mode") != "batch" or not batch:
+        return None
+    start = max(epoch(job["started_at"]) for job in batch)
+    end = min(epoch(job["completed_at"]) for job in batch)
+    held = [pod["runner_name"] for pod in ev.get("pods") or []
+            if epoch(pod["created_at"]) <= end and epoch(pod.get("last_seen") or pod["created_at"]) >= start]
+    if start <= end and len(held) != MIN_RUNNERS + len(batch):
+        return (f"acceptance-sim: {len(batch)} batch jobs need {MIN_RUNNERS + len(batch)} runner pods during the hold "
+                f"(ARC 0.14.2 targets minRunners + jobs), the fixture has {len(held)}")
+    return None
+
+
 def init(directory, evidence_path, overrides):
     with open(evidence_path, encoding="utf-8") as stream:
         ev = json.load(stream)
+    error = arc_model_errors(ev)
+    if error:
+        print(error, file=sys.stderr)
+        return 97
     phase = ev["phase"]
     scenario = {"phase": phase, "runs": {}, "tags": {}, "artifacts": {}, "repo_runs": {}, "logs": {}}
     probe = ev.get("probe")
@@ -490,8 +518,7 @@ def main():
     directory, tool = sys.argv[1], sys.argv[2]
     args = sys.argv[3:]
     if tool == "init":
-        init(directory, args[0], json.loads(args[1]) if len(args) > 1 else {})
-        return 0
+        return init(directory, args[0], json.loads(args[1]) if len(args) > 1 else {}) or 0
     with open(os.path.join(directory, "calls.log"), "a", encoding="utf-8") as stream:
         stream.write(f"{tool} {' '.join(args)}\n")
     sim = Sim(directory)

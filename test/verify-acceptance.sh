@@ -109,6 +109,11 @@ assert not any("pickup" in criterion for name, case in expected.items() if name.
                for criterion in case["criteria"]), "Ruling 22: phase D has no pickup criterion"
 for criterion in ("C-arc", "D-arc", "E-arc", "runner-health", "A-network"):
     assert any(criterion in case["criteria"] for case in expected.values()), criterion
+# Ruling 43 regressions: idle warm runners on baseline still pass; the
+# 16-job overflow into fallback and Pending pods in Phase B fail.
+assert expected["A-pass-warm-on-baseline"]["pass"] is True
+assert expected["A-16-jobs-fallback-overflow"]["criteria"][0] == "A-primary-only"
+assert expected["B-pending-pods"]["criteria"] == ["B-placement"]
 PY
     then
         pass "fixtures: every file is expected, each phase has passing and violating cases, cold p95 of 9 minutes fails A/B/E, D has no pickup criterion, only E-pass is ready"
@@ -314,7 +319,7 @@ READ_ONLY_VIOLATION='^(kubectl (delete|apply|patch|edit|scale|label|annotate|cor
 
 assert_evidence_workflow_runs() {
     info "Running the evidence workflow end to end against the acceptance simulator..."
-    local dir
+    local dir rc
 
     dir=$(sim_dir A-pass)
     run_evidence "$dir" "$(probe_inputs A)"
@@ -325,6 +330,16 @@ assert_evidence_workflow_runs() {
         pass "phase A record: evidence, verdict and no cleanup in acceptance-A.json"
     else
         fail "phase A record: $(head -c 300 "${REPO_COPY}/acceptance-A.json" 2>/dev/null)"
+    fi
+    # Ruling 43: 14 jobs run 16 runner pods (minRunners 2 + 14); the record
+    # keeps the two idle runners, and the verdict counts every pod in the hold.
+    if jq -e '([.probe.run.jobs[] | select(.name | test("^batch "))] | length) == 14
+              and ([.probe.run.jobs[].runner_name] as $busy | [.pods[] | select(.runner_name as $n | ($busy | index($n)) == null)] | length) == 2
+              and all(.pods[]; .last_seen != null and .pool != null)
+              and any(.verdict.notes[]; test("by pool \{.github-runners-pool-16g.: 4, .github-runners-burst-amd-16g.: 12\}.*minRunners 2 \+ 14 jobs"))'         "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: 14 jobs, 16 runner pods (2 idle) with pool and last_seen; placement counted every pod in the hold"
+    else
+        fail "phase A record: hold placement $(jq -c '.verdict.notes' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
     fi
 
     # Phase A network probe: the job log result and the targets resolved in the cluster.
@@ -441,6 +456,21 @@ CASES
     dir=$(sim_dir B-pass)
     run_evidence "$dir" "$(probe_inputs B)"
     expect_evidence "phase B passes with primary restored after the probe" $? 0 - "✅ Phase B passed acceptance" - "$READ_ONLY_VIOLATION" "$dir"
+    # Two of the eight runner pods never schedule (Ruling 43 regression).
+    dir=$(sim_dir B-pending-pods)
+    run_evidence "$dir" "$(probe_inputs B)"
+    expect_evidence "phase B fails B-placement when runner pods stay Pending through the hold" $? 1 -         "B-placement: runner pods during the hold by pool" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+
+    # The simulator models ARC 0.14.2: a batch of N jobs holds minRunners + N pods.
+    jq 'del(.pods[-1])' "${FIXTURES}/B-pass.json" > "${WORK_DIR}/B-seven-pods.json"
+    dir=$(mktemp -d "${WORK_DIR}/sim.XXXXXX")
+    python3 -B "$SIM" "$dir" init "${WORK_DIR}/B-seven-pods.json" '{}' 2> "${WORK_DIR}/sim-init.err"
+    rc=$?
+    if [ "$rc" -eq 97 ] && grep -qF "6 batch jobs need 8 runner pods during the hold" "${WORK_DIR}/sim-init.err"         && [ ! -e "${dir}/scenario.json" ]; then
+        pass "simulator refuses a batch scenario without minRunners + jobs runner pods"
+    else
+        fail "simulator accepted 7 runner pods for 6 jobs (exit ${rc}): $(head -c 200 "${WORK_DIR}/sim-init.err")"
+    fi
 
     # Phase D: drain anchors from the Deploy drain run.
     dir=$(sim_dir D-pass '{}' drain)
