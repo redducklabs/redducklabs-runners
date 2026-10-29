@@ -1,0 +1,35 @@
+[
+ {
+  "total_count": 2,
+  "jobs": [
+   {
+    "id": 201,
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-10-17T10:00:00Z",
+    "started_at": "2026-10-17T10:00:05Z",
+    "completed_at": "2026-10-17T10:30:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-201",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 202,
+    "run_attempt": 2,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-20T10:15:00Z",
+    "started_at": "2026-10-20T10:15:00Z",
+    "completed_at": "2026-10-20T10:25:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-202",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   }
+  ]
+ }
+]
