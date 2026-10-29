@@ -48,7 +48,10 @@ Subcommands (all share one state file, rewritten after every step):
 Runner pods: every pod of the scale set (actions.github.com/scale-set-name=
 redducklabs-runners), probe runners and idle warm runners alike, with its node,
 pool, created_at, first_seen and last_seen; ARC 0.14.2 runs minRunners + jobs
-runners, and the verdict counts all of them during the hold (Ruling 43).
+runners (Ruling 43). Each collection also appends to pod_collections its time
+and every runner pod it listed, with that collection's node (null while
+unscheduled), pool, phase and terminating flag; the verdict judges placement
+during the hold from these observations, never from a pod's final node.
 
 Every read is tried up to three times with a short backoff; a persistent
 failure still fails the step. Runner pods are recorded with their full spec
@@ -170,11 +173,15 @@ def job_logs(repository, job_id):
 
     Job logs carry terminal escape sequences (colored run-step echoes), and
     gh refuses to print such a response without --allow-escape-sequences
-    (live Phase A evidence run 40797455827). The sequences are removed before
-    any line is parsed.
+    (live Phase A evidence run 40797455827). CSI sequences are removed before
+    any line is parsed; any other escape left in the text (OSC, a lone ESC)
+    fails the read rather than parsing a line normalization may have altered.
     """
-    text = run(["gh", "api", "--allow-escape-sequences", f"repos/{repository}/actions/jobs/{job_id}/logs"])
-    return ANSI_ESCAPE.sub("", text)
+    text = ANSI_ESCAPE.sub("", run(["gh", "api", "--allow-escape-sequences",
+                                    f"repos/{repository}/actions/jobs/{job_id}/logs"]))
+    if "\x1b" in text:
+        raise ReadError(f"job {job_id} log of {repository} contains an unsupported terminal escape sequence")
+    return text
 
 
 def run_json(argv):
@@ -496,6 +503,20 @@ def snapshot(state, final=False):
                      kubelet_version=((item.get("status") or {}).get("nodeInfo") or {}).get("kubeletVersion"),
                      last_seen=stamp)
     pods = run_json(["kubectl", "get", "pods", "-n", NAMESPACE, "-l", SCALE_SET_SELECTOR, "-o", "json"]).get("items") or []
+    # Placement as this collection saw it (Ruling 43): the per-UID snapshot
+    # below keeps only the latest node, so the verdict judges placement during
+    # the hold from these timestamped observations, unscheduled pods included.
+    pools = {(item.get("metadata") or {}).get("name"): node_pool_of(item) for item in nodes}
+    observed = []
+    for item in pods:
+        meta = item.get("metadata") or {}
+        node_name = (item.get("spec") or {}).get("nodeName") or None
+        observed.append({"uid": meta.get("uid"), "runner_name": meta.get("name"), "node": node_name,
+                         "pool": pools.get(node_name) if node_name else None,
+                         "phase": (item.get("status") or {}).get("phase"),
+                         "terminating": bool(meta.get("deletionTimestamp"))})
+    state.setdefault("pod_collections", []).append(
+        {"at": stamp, "pods": sorted(observed, key=lambda pod: str(pod["runner_name"]))})
     for item in pods:
         meta = item.get("metadata") or {}
         entry = shots["pods"].setdefault(meta.get("uid"), {"first_seen": stamp})
@@ -926,6 +947,7 @@ def cmd_finalize(args):
             "events": sorted(state["snapshots"]["events"].values(), key=lambda e: (e["first_timestamp"] or "", e["uid"] or "")),
             "pool_state_checks": state["pool_state_checks"],
             "latest_collection_at": state["latest_collection"]["at"],
+            "pod_collections": state.get("pod_collections") or [],
             "pools_before": state["pools_before"], "pools_after": state.get("pools_latest"),
             "arc_contract_after": arc_contract(state), "phase_c": None,
             "trust_readback": None, "expander_readback": expander_readback(state),

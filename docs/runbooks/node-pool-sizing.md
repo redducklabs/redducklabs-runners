@@ -260,7 +260,9 @@ jobs, so a batch of N jobs runs N + 2 runner pods, two of them idle. Phase A
 therefore runs 14 jobs (16 pods: 4 baseline + 12 on six primary nodes) and
 Phase B 6 jobs (8 pods: 4 baseline + 4 on two fallback nodes); the placement
 criteria count every runner pod of the scale set seen during the hold, probe
-and idle runners alike. The probe's barrier waits for `jobs` entries in
+and idle runners alike, from the evidence run's collections inside the hold
+(the latest must show the exact placement; none may list more pods or another
+pool), so the evidence run must be collecting before the hold ends. The probe's barrier waits for `jobs` entries in
 progress, so the two idle runners do not affect it. Do not raise the batch
 sizes: 16 jobs (18 pods) overflow into the fallback and fail `A-primary-only`.
 Idle runners can stay on burst nodes after a batch; Rebalance Runners retires

@@ -29,6 +29,13 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "A-collections-after-hold": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-compatibility-missing": {
   "criteria": [
    "A-compatibility"
@@ -58,6 +65,20 @@
   "ready_for_migration": false
  },
  "A-fallback-node": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-idle-pending-through-hold": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-idle-turnover": {
   "criteria": [
    "A-primary-only"
   ],
@@ -146,6 +167,11 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-idle-pending-early": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-pre-phase-runner-node-oom": {
   "criteria": [],
   "pass": true,
@@ -209,6 +235,13 @@
   "ready_for_migration": false
  },
  "B-pending-pods": {
+  "criteria": [
+   "B-placement"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-pending-then-scheduled-after-hold": {
   "criteria": [
    "B-placement"
   ],

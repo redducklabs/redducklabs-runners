@@ -22,10 +22,18 @@ clock time on (see live()).
 
 ARC model (Ruling 43): ARC 0.14.2 targets minRunners + assigned jobs
 (cmd/ghalistener/scaler/scaler.go:237), so a batch probe of N jobs runs
-MIN_RUNNERS + N runner pods. init serves the fixture's pods and refuses
-(exit 97) a batch scenario whose runner pods observed during the hold (every
-entry in progress: created no later than its end, last seen no earlier than
-its start) are not MIN_RUNNERS + N.
+MIN_RUNNERS + N runner pods. init refuses (exit 97) a batch scenario whose
+fixture pod_collections have no collection inside the hold (every entry in
+progress) or whose latest in-hold collection does not list MIN_RUNNERS + N
+runner pods. The pods are served per collection: each kubectl call returns
+the scenario pods after the "changes" due by the clock, so a scenario can keep
+a pod Pending (spec.nodeName null) through the hold and schedule it later,
+replace an idle pod ("add" then "remove"), or start collecting after the hold
+(an overridden "clock").
+
+Job logs carry terminal escape sequences as live logs do: the network-probe
+result line and the drain READBACK line are colored around and inside their
+markers and payload, so the collector parses them only after stripping.
 
 Faults: scenario "faults" maps a full call line ("kubectl get events -A -o
 json") to the number of times it fails (exit 1) before it answers normally.
@@ -86,11 +94,16 @@ def arc_model_errors(ev):
         return None
     start = max(epoch(job["started_at"]) for job in batch)
     end = min(epoch(job["completed_at"]) for job in batch)
-    held = [pod["runner_name"] for pod in ev.get("pods") or []
-            if epoch(pod["created_at"]) <= end and epoch(pod.get("last_seen") or pod["created_at"]) >= start]
-    if start <= end and len(held) != MIN_RUNNERS + len(batch):
+    if start > end:
+        return None
+    held = [collection for collection in ev.get("pod_collections") or [] if start <= epoch(collection["at"]) <= end]
+    if not held:
+        return f"acceptance-sim: the fixture has no pod collection inside the hold {iso(start)}..{iso(end)}"
+    latest = max(held, key=lambda collection: epoch(collection["at"]))
+    if len(latest["pods"]) != MIN_RUNNERS + len(batch):
         return (f"acceptance-sim: {len(batch)} batch jobs need {MIN_RUNNERS + len(batch)} runner pods during the hold "
-                f"(ARC 0.14.2 targets minRunners + jobs), the fixture has {len(held)}")
+                f"(ARC 0.14.2 targets minRunners + jobs), the fixture's collection at {latest['at']} has "
+                f"{len(latest['pods'])}")
     return None
 
 
@@ -126,8 +139,10 @@ def init(directory, evidence_path, overrides):
         # The drain ends with both burst pools at zero nodes.
         scenario["nodes_removed_at"] = {node["name"]: epoch(drain["completed"]) for node in ev.get("nodes") or []
                                         if node["pool"] != "github-runners-pool-16g"}
+        # Colored like live logs: the READBACK marker is split by escapes and
+        # the whole line, timestamp included, sits inside a color.
         scenario["logs"]["4441"] = (f"{drain['started'][:-1]}.1000000Z PLAN: helm upgrade redducklabs-runners from burst:2/20 to drain 2/4\n"
-                                    f"{drain['effective'][:-1]}.2000000Z READBACK: ARC is drain 2/4\n")
+                                    f"\x1b[0m{drain['effective'][:-1]}.2000000Z \x1b[1;32mREAD\x1b[0;32mBACK:\x1b[0m ARC is drain 2/4\x1b[0m\n")
     if ev.get("phase_c_run"):
         info = ev["phase_c_run"]
         api = run_api(555, FLEET_REPO, info["workflow_path"], info["head_sha"], "main", info["started"])
@@ -219,7 +234,10 @@ def init(directory, evidence_path, overrides):
             # is colored), which gh refuses to print without
             # --allow-escape-sequences.
             f"{started}.1000000Z \x1b[36;1mprintf 'NETWORK_PROBE_%s %s\\n' RESULT \"${{REPORT}}\"\x1b[0m\n"
-            f"{started}.2000000Z NETWORK_PROBE_RESULT {json.dumps(report)}\n")
+            # The marker and the JSON payload are colored too, one escape
+            # inside the marker and one inside the payload.
+            f"{started}.2000000Z \x1b[32mNETWORK_PROBE\x1b[1m_RESULT\x1b[0m "
+            f"\x1b[33m{{\x1b[0m{json.dumps(report)[1:]}\x1b[0m\n")
         targets, checks = network["targets"], network["target_checks"]
         nodes = {}
         for key in ("worker_node", "runner_node", "runner_node_public"):
@@ -457,10 +475,13 @@ def live(sim, kind):
     """scenario[kind] after the scenario "changes" due by the clock: each
     {"at": ISO, "kind": "pods"|"ephemeral_runners", "name": metadata.name,
     "remove": true} drops the object (name "*": every object), {"merge": {...}}
-    deep-merges into it."""
+    deep-merges into it, and {"add": {...}} (no name) appends a new object."""
     items = json.loads(json.dumps(sim.scenario[kind]))
     for change in sim.scenario.get("changes") or []:
         if change["kind"] != kind or sim.clock < epoch(change["at"]):
+            continue
+        if change.get("add"):
+            items.append(json.loads(json.dumps(change["add"])))
             continue
         if change.get("remove"):
             items = [item for item in items if change["name"] not in ("*", item["metadata"]["name"])]

@@ -819,8 +819,17 @@ jobs (8 runner pods = 4 baseline + 4 fallback on two nodes, primary closed).
 Placement counts every runner pod of the scale set observed during the hold
 (the interval in which every batch entry was in progress), probe runners and
 idle warm runners alike, because which runners stay idle is chosen by GitHub's
-job assignment, not by the fleet. Concurrency criteria use the probe's job
-count (14 and 6). The probe's barrier waits for `jobs` entries in progress on
+job assignment, not by the fleet. It is judged only from the evidence run's
+timestamped collections inside the hold, each recording every runner pod with
+the node that collection saw (none while Pending), never from a pod's final
+node (PR #41 review): at least one collection must lie inside the hold; the
+latest in-hold collection must show exactly the required placement, so a pod
+still Pending at the end of the hold, or scheduled only after it, fails; and
+no in-hold collection may list more runner pods than the target or a pod on
+another pool, so idle-pod turnover or a detour fails. An earlier in-hold
+collection may show an idle pod Pending, because the hold starts when the last
+job starts, which can precede the node that pod waits for. Concurrency
+criteria use the probe's job count (14 and 6). The probe's barrier waits for `jobs` entries in progress on
 distinct runners, and `jobs` batch entries exist, so it is reached with the new
 counts; the two extra runners are idle and outside it. Phase D is unaffected:
 before the drain, 12 entries in flight run 14 runners (within 20 and the 16

@@ -114,6 +114,12 @@ for criterion in ("C-arc", "D-arc", "E-arc", "runner-health", "A-network"):
 assert expected["A-pass-warm-on-baseline"]["pass"] is True
 assert expected["A-16-jobs-fallback-overflow"]["criteria"][0] == "A-primary-only"
 assert expected["B-pending-pods"]["criteria"] == ["B-placement"]
+# PR #41 review: placement is judged from collections inside the hold.
+assert expected["A-pass-idle-pending-early"]["pass"] is True
+for name, criterion in (("A-idle-pending-through-hold", "A-primary-only"), ("A-collections-after-hold", "A-primary-only"),
+                        ("A-idle-turnover", "A-primary-only"),
+                        ("B-pending-then-scheduled-after-hold", "B-placement")):
+    assert expected[name]["criteria"] == [criterion], name
 PY
     then
         pass "fixtures: every file is expected, each phase has passing and violating cases, cold p95 of 9 minutes fails A/B/E, D has no pickup criterion, only E-pass is ready"
@@ -463,10 +469,10 @@ CASES
     dir=$(sim_dir B-pending-pods)
     run_evidence "$dir" "$(probe_inputs B)"
     expect_evidence "phase B fails B-placement when runner pods stay Pending through the hold" $? 1 - \
-        "B-placement: runner pods during the hold by pool" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+        "B-placement: runner pods in the latest collection inside the hold by pool" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
 
     # The simulator models ARC 0.14.2: a batch of N jobs holds minRunners + N pods.
-    jq 'del(.pods[-1])' "${FIXTURES}/B-pass.json" > "${WORK_DIR}/B-seven-pods.json"
+    jq 'del(.pod_collections[].pods[-1])' "${FIXTURES}/B-pass.json" > "${WORK_DIR}/B-seven-pods.json"
     dir=$(mktemp -d "${WORK_DIR}/sim.XXXXXX")
     python3 -B "$SIM" "$dir" init "${WORK_DIR}/B-seven-pods.json" '{}' 2> "${WORK_DIR}/sim-init.err"
     rc=$?
@@ -477,12 +483,53 @@ CASES
         fail "simulator accepted 7 runner pods for 6 jobs (exit ${rc}): $(head -c 200 "${WORK_DIR}/sim-init.err")"
     fi
 
+    # Placement is judged from the collections inside the hold (PR #41 review).
+    # Idle pods Pending through the hold and scheduled afterwards fail although
+    # their final node is a primary node.
+    local pending_after
+    pending_after='{"changes": ['
+    pending_after+='{"at": "2026-11-02T18:00:00Z", "kind": "pods", "name": "ar15", "merge": {"spec": {"nodeName": null}}},'
+    pending_after+='{"at": "2026-11-02T18:00:00Z", "kind": "pods", "name": "ar16", "merge": {"spec": {"nodeName": null}}},'
+    pending_after+='{"at": "2026-11-02T18:21:00Z", "kind": "pods", "name": "ar15", "merge": {"spec": {"nodeName": "p6"}}},'
+    pending_after+='{"at": "2026-11-02T18:21:00Z", "kind": "pods", "name": "ar16", "merge": {"spec": {"nodeName": "p6"}}}]}'
+    dir=$(sim_dir A-pass "$pending_after")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails when idle pods stay Pending through the hold and schedule afterwards" $? 1 - \
+        "A-primary-only: runner pods in the latest collection inside the hold" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    if jq -e '[.pods[] | select(.runner_name == "ar15" or .runner_name == "ar16") | .node] == ["p6", "p6"]
+              and any(.pod_collections[]; any(.pods[]; .runner_name == "ar15" and .node == null))
+              and any(.pod_collections[]; any(.pods[]; .runner_name == "ar15" and .node == "p6"))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: pod_collections keep the Pending observations although the final node is p6"
+    else
+        fail "phase A record: pod_collections $(jq -c '[.pod_collections[] | {at, n: (.pods | length)}]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 300)"
+    fi
+    # The collector starts after the hold ended (clock 2026-11-02T18:21:00Z).
+    dir=$(sim_dir A-pass '{"clock": 1793643660}')
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails when no collection lies inside the hold" $? 1 - \
+        "A-primary-only: no runner-pod collection inside the hold" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    # Idle-pod turnover: a Pending replacement appears before the idle pod
+    # it replaces is gone, so collections inside the hold list 17 pods.
+    local turnover
+    turnover='{"changes": ['
+    turnover+='{"at": "2026-11-02T18:11:00Z", "kind": "pods", "add": {"metadata": {"name": "ar17", "uid": "uid-ar17", "creationTimestamp": "2026-11-02T18:11:00Z", "annotations": {}}, "spec": {"nodeName": null, "containers": []}, "status": {"phase": "Pending"}}},'
+    turnover+='{"at": "2026-11-02T18:14:00Z", "kind": "pods", "name": "ar16", "remove": true},'
+    turnover+='{"at": "2026-11-02T18:14:00Z", "kind": "pods", "name": "ar17", "merge": {"spec": {"nodeName": "p6"}, "status": {"phase": "Running"}}}]}'
+    dir=$(sim_dir A-pass "$turnover")
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A fails on idle-pod turnover inside the hold" $? 1 - \
+        "inside the hold saw runner pods" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+
     # Phase D: drain anchors from the Deploy drain run.
     dir=$(sim_dir D-pass '{}' drain)
     run_evidence "$dir" "$(probe_inputs D ',"drain_run_id":"444"')"
     expect_evidence "phase D passes with the drain overlapping continuous load" $? 0 - "✅ Phase D passed acceptance" \
         '^gh run view 444 -R redducklabs/redducklabs-runners --json jobs' "$READ_ONLY_VIOLATION" "$dir"
-    if jq -e '.probe.drain.operation_job == "Drain Burst Runners" and .probe.drain.effective != null and .verdict.pickup.in_flight_at_drain_started >= 8' \
+    # The READBACK line is colored (inside the marker and around the
+    # timestamp); its time is parsed after stripping.
+    if jq -e --arg effective "$(jq -r '.probe.drain.effective' "${FIXTURES}/D-pass.json")" \
+        '.probe.drain.operation_job == "Drain Burst Runners" and .probe.drain.effective == $effective and .verdict.pickup.in_flight_at_drain_started >= 8' \
         "${REPO_COPY}/acceptance-D.json" > /dev/null 2>&1; then
         pass "phase D record: drain step anchors and READBACK time captured"
     else
@@ -662,8 +709,74 @@ CASES
     expect_evidence "phase E rejects a baseline run without a passing Phase A record" $? 1 - "does not hold a passing Phase A record" - - "$dir"
 }
 
+# ---------------------------------------------------------------------------
+# Job log normalization (Ruling 42)
+# ---------------------------------------------------------------------------
+
+assert_job_log_normalization() {
+    info "Checking job log escape normalization..."
+    if (cd "$REPO_ROOT" && python3 -B - scripts/acceptance-evidence.py) <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("acceptance_evidence", sys.argv[1])
+evidence = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(evidence)
+ESC = "\x1b"
+payload = {"pass": True, "targets": {}, "results": []}
+colored = (f"2026-11-02T18:20:20.2000000Z {ESC}[32mNETWORK_PROBE{ESC}[1m_RESULT{ESC}[0m "
+           f"{ESC}[33m{{{ESC}[0m{json.dumps(payload)[1:]}{ESC}[0m\n"
+           f"{ESC}[0m2026-11-02T18:31:00.2000000Z {ESC}[1;32mREAD{ESC}[0;32mBACK:{ESC}[0m ARC is drain 2/4{ESC}[0m\n")
+
+
+def parse(text):
+    """The collector's two parsers over a log text."""
+    result, effective = None, None
+    for line in text.splitlines():
+        index = line.find(evidence.NETWORK_PROBE_MARKER)
+        if index >= 0:
+            result = json.loads(line[index + len(evidence.NETWORK_PROBE_MARKER):].strip())
+        if evidence.DRAIN_READBACK in line:
+            effective = evidence.trim_ts(line.split(" ", 1)[0])
+    return result, effective
+
+
+def logs_of(text):
+    evidence.run = lambda argv: text
+    return evidence.job_logs("redducklabs/aurolegal.ai", 1)
+
+
+# Stripped, both records parse; unstripped (stripping removed), neither does.
+assert parse(logs_of(colored)) == (payload, "2026-11-02T18:31:00Z"), parse(logs_of(colored))
+assert parse(colored) == (None, None), parse(colored)
+# Escapes the CSI normalization does not cover fail the read (fail closed).
+for bad in (f"x {ESC}]8;;https://example.invalid{ESC}\\link{ESC}]8;;{ESC}\\ y\n",
+            f"x {ESC}]0;title\a NETWORK_PROBE_RESULT {{}}\n", f"x {ESC} y\n", f"x {ESC}[\n"):
+    try:
+        logs_of(bad)
+    except evidence.ReadError as error:
+        assert "unsupported terminal escape sequence" in str(error), error
+    else:
+        raise AssertionError(f"accepted {bad!r}")
+PY
+    then
+        pass "job logs: CSI escapes inside markers, payload and timestamp are stripped before parsing (unstripped text does not parse); OSC, lone and truncated escapes fail the read"
+    else
+        fail "job log normalization"
+    fi
+
+    # End to end: an OSC sequence in the network-probe log fails the evidence step.
+    local dir
+    dir=$(sim_dir A-pass '{"logs.9100": "2026-11-02T18:20:20.2000000Z \u001b]0;title\u0007NETWORK_PROBE_RESULT {\"pass\": true}\n"}')
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A evidence fails on an unsupported escape in a job log" $? 1 - \
+        "contains an unsupported terminal escape sequence" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+}
+
 assert_verdict_fixtures
 assert_evidence_workflow_static
+assert_job_log_normalization
 assert_evidence_workflow_runs
 
 echo ""
