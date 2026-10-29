@@ -118,7 +118,15 @@ docker push registry.digitalocean.com/redducklabs/github-runner:latest
 - Node.js 22.23.2 with npm, pnpm 11.5.0 (via corepack)
 - uv 0.12.5 (Python package/installer manager)
 - Go 1.27.0 runtime (for CI workflows that build Go)
-- Git, curl, wget, jq, zip, unzip, bc, libmagic1
+- Git, curl, wget, jq, zip, unzip, zstd, bc, libmagic1 (`zstd` lets
+  `actions/cache` use zstd, the compression GitHub-hosted runners use, instead
+  of falling back to gzip)
+- Writable tool cache at `/opt/hostedtoolcache`, owned by the runner user, with
+  `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` set to it, so
+  `actions/setup-python`, `setup-node`, `setup-go` and other `setup-*` actions
+  can install toolchains. setup-python's Linux builds only load from that exact
+  path. The cache starts empty in every ephemeral pod: a `setup-*` step still
+  downloads its toolchain once per job
 - WeasyPrint native libs (libpango, libpangoft2, libharfbuzz, libfontconfig,
   libcairo2, libffi8) so consumer CI jobs that `import weasyprint` (PDF
   rendering) can load them via ctypes
@@ -207,7 +215,7 @@ exact-version sources (Node via nodejs.org tarball + SHA256; Terraform via apt
 exact pin). Docker
 CLI/Compose-plugin and GitHub CLI **float** (key-verified; Docker CLI has a smoke
 floor of 28.3.3). Ubuntu-archive packages (`postgresql-client`, `redis-tools`,
-`bc`, `libmagic1`, `gettext-base`, `libpq-dev`, the WeasyPrint native libs
+`bc`, `zstd`, `libmagic1`, `gettext-base`, `libpq-dev`, the WeasyPrint native libs
 `libpango-1.0-0`/`libpangoft2-1.0-0`/`libharfbuzz0b`/`libfontconfig1`/`libcairo2`/`libffi8`,
 the Playwright Chromium libs resolved by `playwright@${PLAYWRIGHT_VERSION}
 install-deps chromium`, base runtime deps) float as distro-managed. The
