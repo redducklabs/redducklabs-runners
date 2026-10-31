@@ -29,7 +29,9 @@ the acceptance batch sizes and placement criteria count every runner pod; see
 autoscaler's scale-up events; see "Exclusive fleet and scale-up priority
 (Ruling 44)"); 2026-10-31, acceptance Ruling 45 (A's priority is the order of
 the scale-up decisions, and fallback nodes without runner pods do not fail A;
-see "Scale-up order and fallback overshoot (Ruling 45)").
+see "Scale-up order and fallback overshoot (Ruling 45)"); 2026-10-31,
+acceptance Ruling 46 (the priority criteria judge only runner node groups; see
+"Runner node groups only (Ruling 46)").
 
 ## Problem
 
@@ -924,6 +926,34 @@ fallback node-hour.
   fallback, and now also fails on any aggregated event, because the groups of
   its earlier occurrences cannot be established (PR #45 review 1); repeated
   identical-message events without the prefix are judged by their message.
+
+### Runner node groups only (Ruling 46)
+
+PR #45 review 2 asked whether an aggregated event, which keeps only its latest
+message, could hide a scale-up of a third node group. Failing Phase A on every
+aggregated event would make it unpassable (attempt 3 has one), so the priority
+criteria judge only runner node groups, for a reason that bounds what an
+aggregated event can hide:
+
+- cluster-autoscaler scales a node group only when its node template can host
+  a pending pod. Runner pods select `node-type=github-runner` and tolerate only
+  `github-runner=true:NoSchedule`, so only runner pools are candidates for
+  runner demand.
+- The baseline runner pool is fixed at 2/2, its maximum, and cannot scale. The
+  worker pool cannot host runner pods.
+- A scale-up of a group whose ID resolves to a non-runner pool is unrelated
+  demand: the evidence now records every node pool of the cluster with its
+  labels and taints (`node_pools`), and such scale-ups are noted as
+  diagnostics. A visible event naming the baseline, another runner pool, or a
+  group ID that resolves to no known pool still fails closed.
+- An aggregated event is judged as in Ruling 45: its latest message's group
+  must be the primary or the fallback (or a non-runner pool), and it counts as
+  a possible fallback decision from its earliest in-window occurrence, which
+  must follow the primary-at-maximum proof. Its hidden earlier occurrences can
+  only have named the primary, the fallback or a non-runner pool, and the
+  ordering rule already covers the fallback case conservatively.
+- Phase B still fails on any aggregated event; non-runner scale-ups are noted
+  there as well.
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
 uses that to make the fallback the only eligible burst group. There is no

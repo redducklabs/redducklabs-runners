@@ -175,6 +175,11 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-combined-fallback-after-max": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-idle-pending-early": {
   "criteria": [],
   "pass": true,
@@ -200,9 +205,21 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-worker-pool-scale-up": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pod-on-fallback-early": {
   "criteria": [
    "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-baseline-scale-up": {
+  "criteria": [
+   "A-priority"
   ],
   "pass": false,
   "ready_for_migration": false
@@ -236,6 +253,13 @@
   "ready_for_migration": false
  },
  "A-priority-no-scale-up-events": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-unknown-group": {
   "criteria": [
    "A-priority"
   ],
@@ -348,6 +372,11 @@
   "ready_for_migration": false
  },
  "B-pass-repeated-event": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "B-pass-worker-pool-scale-up": {
   "criteria": [],
   "pass": true,
   "ready_for_migration": false

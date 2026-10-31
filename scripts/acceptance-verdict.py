@@ -85,11 +85,18 @@ read lies inside the hold; the phase is then re-run while no other
 repository's CI uses the fleet.
 
 Priority (A-priority, B-priority): the order is proven from the
-cluster-autoscaler's own decisions, not from periodic snapshots. Every
-TriggeredScaleUp and ScaledUpGroup event in the phase window must name only
-the primary node group (A) or the fallback node group (B), by node pool ID,
-and at least one must name it; a message that does not parse fails. The
-node-pool reads (pool_collections) are diagnostics only.
+cluster-autoscaler's own decisions, not from periodic snapshots: the
+TriggeredScaleUp and ScaledUpGroup events in the phase window, aggregated
+"(combined from similar events): " messages included; a message that does
+not parse fails. Only runner node groups are judged (Ruling 46): a group
+whose ID resolves to a non-runner pool (node_pools evidence) is unrelated
+demand and only noted, while the baseline, another runner pool or an
+unresolved group ID fails. Phase A (Ruling 45): at least one event names the
+primary, and every fallback decision, or aggregated event that may hide
+one, comes strictly after a primary decision to its maximum (6 of 6).
+Phase B: runner scale-ups name only the fallback, at least one does, and an
+aggregated event fails. See check_scale_up_priority. The node-pool reads
+(pool_collections) are diagnostics only.
 
 Warm floor (phase E, criterion E-warm): exactly two warm_after runners, on
 baseline, each observed_at == latest_collection_at (the collector's final
@@ -471,6 +478,25 @@ def event_in_window(event, window):
     return True
 
 
+def node_group_kinds(evidence):
+    """{node group ID: (pool name, kind)}; kind is primary, fallback, baseline,
+    runner (another runner-labeled pool) or non-runner (Ruling 46).
+
+    The three runner pools come from the pools evidence; every other pool of
+    the cluster from node_pools, marked runner when it carries the runner
+    label node-type=github-runner or the github-runner taint."""
+    pools = evidence.get("pools_after") or evidence.get("pools_before") or {}
+    kinds = {}
+    for item in evidence.get("node_pools") or []:
+        if item.get("id"):
+            kinds[item["id"]] = (item.get("name"), "runner" if item.get("runner") is not False else "non-runner")
+    for name, kind in ((PRIMARY, "primary"), (FALLBACK, "fallback"), (BASELINE, "baseline")):
+        pool_id = (pools.get(name) or {}).get("id")
+        if pool_id:
+            kinds[pool_id] = (name, kind)
+    return kinds
+
+
 def check_scale_up_priority(phase, evidence, failures, notes):
     """{phase}-priority: the autoscaler's scale-up decisions respect the priority order.
 
@@ -479,42 +505,55 @@ def check_scale_up_priority(phase, evidence, failures, notes):
     "(combined from similar events): " messages included; a message that does
     not parse fails closed.
 
-    Phase B: every event names only the fallback group (the primary is 0/0),
-    and at least one does; an aggregated (combined) event fails, because the
-    groups of its earlier occurrences cannot be established.
+    Only runner node groups are judged (Ruling 46). cluster-autoscaler scales
+    a node group only when its node template can host a pending pod; runner
+    pods select node-type=github-runner and tolerate only
+    github-runner=true:NoSchedule, so only runner pools are candidates for
+    runner demand. The baseline runner pool is fixed at 2/2 (its maximum) and
+    cannot scale, and the worker pool cannot host runner pods. A scale-up of a
+    group that resolves to a non-runner pool (node_pools evidence: no runner
+    label or taint) is therefore unrelated demand and only noted. A visible
+    event naming the baseline, another runner pool, or a group ID that
+    resolves to no known pool fails closed.
 
-    Phase A (Ruling 45): at least one event names the primary, no event names
-    any other group but the fallback, and every event that may stand for a
-    fallback decision comes strictly after a primary decision whose target
-    size is the primary maximum (6 of 6): the fallback was asked for only once
-    the primary was at its maximum. Times are event timestamps (firstTimestamp,
-    or eventTime when firstTimestamp is unset, as the collector records them),
-    chosen fail closed: a fallback decision counts at its earliest possible
-    in-window occurrence, max(first_timestamp, window start); a primary-at-max
-    decision counts at its earliest occurrence known to carry that message,
-    its first_timestamp when inside the window, otherwise its last_timestamp.
-    An aggregated (combined) event's message is only its latest one, so its
-    earlier occurrences may have been any decision: it may stand for a
-    fallback decision from its first timestamp on, and it proves primary at
-    maximum only at its last timestamp. Equal timestamps (one-second
-    resolution) do not order the decisions, so a tie fails. Attempt 3 (probe
-    run 40897316886) set the primary to 6 at 15:01:40 and the fallback to 1 at
-    15:02:44, after the primary had reached its maximum: the autoscaler
-    over-estimated demand while the primary nodes were still booting, which is
-    a cost, not a priority failure; A-primary-only still requires no runner
-    pod on the fallback."""
+    Phase B: every runner scale-up names only the fallback group (the primary
+    is 0/0), at least one does, and an aggregated (combined) event fails,
+    because the groups of its earlier occurrences cannot be established.
+
+    Phase A (Ruling 45): at least one event names the primary, and every
+    event that may stand for a fallback decision comes strictly after a
+    primary decision whose target size is the primary maximum (6 of 6): the
+    fallback was asked for only once the primary was at its maximum. Times
+    are event timestamps (firstTimestamp, or eventTime when firstTimestamp is
+    unset, as the collector records them), chosen fail closed: a fallback
+    decision counts at its earliest possible in-window occurrence,
+    max(first_timestamp, window start); a primary-at-max decision counts at
+    its earliest occurrence known to carry that message, its first_timestamp
+    when inside the window, otherwise its last_timestamp. An aggregated
+    (combined) event keeps only its latest message; by the argument above its
+    earlier occurrences can only have named the primary, the fallback or a
+    non-runner pool, so it is treated as a possible fallback decision from its
+    first timestamp on (the ordering rule then covers it) and proves the
+    primary at its maximum only at its last timestamp. Equal timestamps
+    (one-second resolution) do not order the decisions, so a tie fails.
+    Attempt 3 (probe run 40897316886) set the primary to 6 at 15:01:40 and the
+    fallback to 1 at 15:02:44, after the primary had reached its maximum: the
+    autoscaler over-estimated demand while the primary nodes were still
+    booting, which is a cost, not a priority failure; A-primary-only still
+    requires no runner pod on the fallback."""
     label = f"{phase}-priority"
     wanted = PRIMARY if phase == "A" else FALLBACK
-    pools = evidence.get("pools_after") or evidence.get("pools_before") or {}
-    names = {(pools.get(name) or {}).get("id"): name for name in RUNNER_POOLS if (pools.get(name) or {}).get("id")}
-    wanted_id = (pools.get(wanted) or {}).get("id")
-    fallback_id = (pools.get(FALLBACK) or {}).get("id")
+    kinds = node_group_kinds(evidence)
+    ids = {kind: group for group, (_, kind) in kinds.items() if kind in ("primary", "fallback")}
+    wanted_id = ids.get("primary" if phase == "A" else "fallback")
+    fallback_id = ids.get("fallback")
     if not wanted_id or (phase == "A" and not fallback_id):
         failures.append(f"{label}: the {wanted} or {FALLBACK} node pool ID is unknown; scale-up events cannot be matched")
         return
+    allowed_kinds = {"primary", "fallback"} if phase == "A" else {"fallback"}
     window = phase_window(evidence)
     start = window[0]
-    named, proofs, fallback_times = {}, [], []
+    named, proofs, fallback_times, unrelated, combined_events = {}, [], [], {}, []
     for event in evidence.get("events") or []:
         if event.get("reason") not in SCALE_UP_REASONS or not event_in_window(event, window):
             continue
@@ -524,9 +563,6 @@ def check_scale_up_priority(phase, evidence, failures, notes):
                             f"{str(event.get('message'))[:160]!r}")
             continue
         decisions, combined = parsed
-        first = ts(event.get("first_timestamp"), "event first_timestamp")
-        last = ts(event.get("last_timestamp") or event.get("first_timestamp"), "event last_timestamp")
-        earliest = max(first, start) if start is not None else first
         if combined and phase != "A":
             # Phase B: an aggregated event keeps only its latest message, so
             # the groups of its earlier occurrences cannot be established and
@@ -537,19 +573,30 @@ def check_scale_up_priority(phase, evidence, failures, notes):
                             f"({event.get('count')} occurrences from {event.get('first_timestamp')}) hides the node "
                             f"groups of its earlier scale-ups: {str(event.get('message'))[:120]!r}; "
                             f"re-run the phase")
+        first = ts(event.get("first_timestamp"), "event first_timestamp")
+        last = ts(event.get("last_timestamp") or event.get("first_timestamp"), "event last_timestamp")
+        earliest = max(first, start) if start is not None else first
+        if combined and phase == "A":
+            combined_events.append(f"{event.get('reason')} x{event.get('count')} from {event.get('first_timestamp')}")
+            fallback_times.append((earliest, f"aggregated {event.get('reason')} {str(event.get('message'))[:120]!r}"))
         for group, target, maximum in decisions:
-            named[group] = named.get(group, 0) + 1
-            if phase != "A":
+            name, kind = kinds.get(group, (None, "unknown"))
+            if kind == "non-runner":
+                unrelated[name or group] = unrelated.get(name or group, 0) + 1
                 continue
-            if group == wanted_id and target == maximum == PRIMARY_MAX_NODES:
+            named[group] = named.get(group, 0) + 1
+            if kind not in allowed_kinds:
+                continue
+            if phase == "A" and group == wanted_id and target == maximum == PRIMARY_MAX_NODES:
                 proofs.append(last if combined or (start is not None and first < start) else first)
-            if group == fallback_id or combined:
+            if phase == "A" and group == fallback_id and not combined:
                 fallback_times.append((earliest, f"{event.get('reason')} {str(event.get('message'))[:120]!r}"))
-    allowed = {wanted_id} | ({fallback_id} if phase == "A" else set())
-    others = {names.get(group, f"unknown group {group}"): count for group, count in named.items() if group not in allowed}
+    others = {(kinds.get(group, (None, None))[0] or f"unknown group {group}"): count
+              for group, count in named.items() if kinds.get(group, (None, "unknown"))[1] not in allowed_kinds}
     if others:
-        failures.append(f"{label}: cluster-autoscaler scale-up events in the phase window name {others}; "
-                        f"only {sorted(names.get(group, group) for group in allowed)} may scale up")
+        failures.append(f"{label}: cluster-autoscaler scale-up events in the phase window name {others}; only "
+                        f"{sorted(kinds[ids[kind]][0] for kind in allowed_kinds if kind in ids)} may scale up "
+                        f"among runner pools, and every group must resolve to a known node pool")
     if wanted_id not in named:
         failures.append(f"{label}: no cluster-autoscaler scale-up event in the phase window names {wanted} "
                         f"({wanted_id}); the scale-up order is not proven")
@@ -562,8 +609,16 @@ def check_scale_up_priority(phase, evidence, failures, notes):
                             f"{PRIMARY_MAX_NODES} ({iso_at(reached) if reached else 'never'}): {what}")
         notes.append(f"Phase A: primary set to its maximum at {iso_at(reached) if reached else 'never'}; "
                      f"{len(fallback_times)} fallback (or aggregated) scale-up events after it")
+        if combined_events:
+            notes.append(f"Phase A: aggregated scale-up events {combined_events} were judged as possible fallback "
+                         "decisions from their first timestamp; their hidden earlier occurrences can only name the "
+                         "primary, the fallback or a non-runner pool (the baseline is at its maximum and only "
+                         "runner pools can host runner pods), so each must follow the primary maximum")
+    if unrelated:
+        notes.append(f"Phase {phase}: scale-ups of non-runner node pools during the phase (unrelated demand, "
+                     f"diagnostic only): {unrelated}")
     notes.append(f"Phase {phase}: scale-up events in the phase window by node group "
-                 f"{ {names.get(group, group): count for group, count in named.items()} }")
+                 f"{ {(kinds.get(group, (None, None))[0] or group): count for group, count in named.items()} }")
 
 
 def burst_nodes_before_run(evidence):

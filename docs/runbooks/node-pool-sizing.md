@@ -290,6 +290,9 @@ messages included. In A (Ruling 45) every fallback scale-up must come strictly
 after a primary scale-up to 6 of 6; fallback nodes without runner pods are
 reported as a cost signal and do not fail A (a from-zero burst can add up to
 two extra fallback nodes for ten minutes or more while the primary nodes boot).
+Only runner node groups are judged (Ruling 46): a scale-up of a pool that
+cannot host runner pods (for example `worker-pool`) is noted as unrelated
+demand, while one naming the baseline or an unknown node group ID fails.
 In B every scale-up must name only the fallback, and an aggregated
 "(combined from similar events): " event fails `B-priority` (its earlier
 occurrences may have named the primary); re-run Phase B if it happens. The

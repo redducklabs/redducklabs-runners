@@ -93,7 +93,11 @@ def run_api(run_id, repo, path, head_sha, head_branch, created, conclusion="succ
 
 def doctl_pools(pools):
     return [{"id": entry["id"], "name": name, "min_nodes": entry["min"], "max_nodes": entry["max"],
-             "count": entry["count"], "auto_scale": True} for name, entry in (pools or {}).items()]
+             "count": entry["count"], "auto_scale": True,
+             # Runner pools carry the runner label and taint (Ruling 46).
+             "labels": {"node-type": "github-runner"},
+             "taints": [{"key": "github-runner", "value": "true", "effect": "NoSchedule"}]}
+            for name, entry in (pools or {}).items()]
 
 
 def arc_model_errors(ev):
@@ -277,6 +281,12 @@ def init(directory, evidence_path, overrides):
                          for key, values in (expander.get("priorities") or {}).items())
     scenario["configmap"] = {"metadata": {"labels": {"doks.digitalocean.com/managed": "true"} if expander.get("managed") else {}},
                              "data": {"priorities": priorities}}
+    # Other node pools of the cluster (node_pools evidence, Ruling 46): served
+    # with their labels and taints after the runner pools.
+    runner_names = set((ev.get("pools_before") or {}).keys())
+    scenario["extra_pools"] = [{"id": item["id"], "name": item["name"], "min_nodes": 1, "max_nodes": 3, "count": 2,
+                                "auto_scale": True, "labels": item.get("labels") or {}, "taints": item.get("taints") or []}
+                               for item in ev.get("node_pools") or [] if item.get("name") not in runner_names]
     scenario["pools_before"] = doctl_pools(ev.get("pools_before"))
     scenario["pools_after"] = doctl_pools(ev.get("pools_after"))
     scenario["pools_switch_at"] = complete_at or 0
@@ -598,7 +608,7 @@ def doctl(sim, args):
             read = entry["pools"].get(item["name"]) or {}
             item.update(count=read.get("count", item["count"]), min_nodes=read.get("min", item["min_nodes"]),
                         max_nodes=read.get("max", item["max_nodes"]))
-        return out(encode_pool_list(pools))
+        return out(encode_pool_list(pools + (sim.scenario.get("extra_pools") or [])))
     return None
 
 

@@ -150,6 +150,11 @@ for name, criterion in (("A-priority-fallback-before-primary-max", "A-priority")
 # messages without the prefix are judged by their message.
 assert expected["B-priority-combined-event"]["criteria"] == ["B-priority"]
 assert expected["B-pass-repeated-event"]["pass"] is True
+# Ruling 46: only runner node groups are judged.
+for name in ("A-pass-combined-fallback-after-max", "A-pass-worker-pool-scale-up", "B-pass-worker-pool-scale-up"):
+    assert expected[name]["pass"] is True, name
+for name in ("A-priority-unknown-group", "A-priority-baseline-scale-up"):
+    assert expected[name]["criteria"] == ["A-priority"], name
 PY
     then
         pass "fixtures: every file is expected, each phase has passing and violating cases, cold p95 of 9 minutes fails A/B/E, D has no pickup criterion, only E-pass is ready"
@@ -571,6 +576,33 @@ CASES
     expect_evidence "phase A fails A-priority on a fallback scale-up event without a fallback node" $? 1 - \
         "A-priority: a fallback scale-up (or an aggregated scale-up event that may hide one) at 2026-11-02T18:00:10Z is not strictly after" \
         '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    # Ruling 46: a worker-pool scale-up during the phase is unrelated demand;
+    # the collector records every node pool with its labels and taints.
+    dir=$(sim_dir A-pass-worker-pool-scale-up)
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A passes with a worker-pool scale-up noted as unrelated demand" $? 0 - \
+        "✅ Phase A passed acceptance" - "${READ_ONLY_VIOLATION}|^gh run cancel" "$dir"
+    if jq -e 'any(.node_pools[]; .name == "worker-pool" and .runner == false)
+              and any(.node_pools[]; .name == "github-runners-burst-amd-16g" and .runner == true)
+              and any(.verdict.notes[]; test("non-runner node pools during the phase .unrelated demand, diagnostic only.: .{2}worker-pool"))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: node pools with runner flags; the worker-pool scale-up is a diagnostic note"
+    else
+        fail "phase A record: node pools $(jq -c '[.node_pools, .verdict.notes]' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
+    # PR #45 review 2 reproduction: an aggregated fallback event with two
+    # occurrences, both after the primary maximum, passes with a note.
+    dir=$(sim_dir A-pass-combined-fallback-after-max)
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A passes an aggregated fallback event after the primary maximum" $? 0 - \
+        "✅ Phase A passed acceptance" - "${READ_ONLY_VIOLATION}|^gh run cancel" "$dir"
+    if jq -e 'any(.verdict.notes[]; test("aggregated scale-up events .*can only name the primary, the fallback or a non-runner pool"))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: the aggregated event's note explains why its hidden occurrences are bounded"
+    else
+        fail "phase A record: aggregated note $(jq -c '.verdict.notes' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
+
     # Ruling 45: live attempt 3. The fallback was raised only after the primary
     # was at 6 of 6 (the last raise is an aggregated event); its two nodes
     # register but no runner pod uses them, so Phase A passes.
