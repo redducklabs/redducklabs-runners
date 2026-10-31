@@ -139,6 +139,13 @@ for name, criterion in (("A-shared-fleet-duplicate-job", "A-shared-fleet"),
                         ("B-priority-primary-scale-up", "B-priority"),
                         ("B-priority-no-scale-up-events", "B-priority")):
     assert expected[name]["criteria"] == [criterion], name
+# Ruling 45: priority from the order of the autoscaler's scale-up decisions.
+assert expected["A-pass-attempt-3-shape"]["pass"] is True
+for name, criterion in (("A-priority-fallback-before-primary-max", "A-priority"),
+                        ("A-priority-fallback-same-second", "A-priority"),
+                        ("A-priority-combined-before-primary-max", "A-priority"),
+                        ("A-pod-on-fallback-early", "A-primary-only")):
+    assert expected[name]["criteria"] == [criterion], name
 PY
     then
         pass "fixtures: every file is expected, each phase has passing and violating cases, cold p95 of 9 minutes fails A/B/E, D has no pickup criterion, only E-pass is ready"
@@ -558,7 +565,23 @@ CASES
     dir=$(sim_dir A-priority-fallback-group-unregistered)
     run_evidence "$dir" "$(probe_inputs A)"
     expect_evidence "phase A fails A-priority on a fallback scale-up event without a fallback node" $? 1 - \
-        "A-priority: cluster-autoscaler scale-up events in the phase window name" '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+        "A-priority: a fallback scale-up (or an aggregated scale-up event that may hide one) at 2026-11-02T18:00:10Z is not strictly after" \
+        '^gh run cancel 777' "$READ_ONLY_VIOLATION" "$dir"
+    # Ruling 45: live attempt 3. The fallback was raised only after the primary
+    # was at 6 of 6 (the last raise is an aggregated event); its two nodes
+    # register but no runner pod uses them, so Phase A passes.
+    dir=$(sim_dir A-pass-attempt-3-shape)
+    run_evidence "$dir" "$(probe_inputs A)"
+    expect_evidence "phase A passes when the fallback scaled only after the primary reached its maximum (attempt 3)" $? 0 - \
+        "✅ Phase A passed acceptance" - "${READ_ONLY_VIOLATION}|^gh run cancel" "$dir"
+    if jq -e 'any(.events[]; .message | startswith("(combined from similar events): Scale-up: group pool-fb"))
+              and any(.verdict.notes[]; test("2 fallback nodes registered .cost signal."))
+              and any(.verdict.notes[]; test("primary set to its maximum at 2026-11-02T18:00:17Z; 5 fallback"))' \
+        "${REPO_COPY}/acceptance-A.json" > /dev/null 2>&1; then
+        pass "phase A record: aggregated fallback event parsed, fallback nodes noted as cost, primary maximum before every fallback decision"
+    else
+        fail "phase A record: attempt 3 $(jq -c '.verdict.notes' "${REPO_COPY}/acceptance-A.json" 2>/dev/null | head -c 400)"
+    fi
 
     # Placement is judged from the collections inside the hold (PR #41 review).
     # Idle pods Pending through the hold and scheduled afterwards fail although

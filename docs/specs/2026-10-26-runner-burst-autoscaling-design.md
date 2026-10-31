@@ -27,7 +27,9 @@ the acceptance batch sizes and placement criteria count every runner pod; see
 "Runner count during a probe (Ruling 43)"); 2026-10-29, acceptance Ruling 44
 (placement needs an exclusive fleet, and the priority order is proven from the
 autoscaler's scale-up events; see "Exclusive fleet and scale-up priority
-(Ruling 44)").
+(Ruling 44)"); 2026-10-31, acceptance Ruling 45 (A's priority is the order of
+the scale-up decisions, and fallback nodes without runner pods do not fail A;
+see "Scale-up order and fallback overshoot (Ruling 45)").
 
 ## Problem
 
@@ -794,7 +796,7 @@ during it.
 
 | Phase | Setup | Pass criteria |
 |---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no fallback node; no other run's job on the fleet during the hold (`A-shared-fleet`); every autoscaler scale-up event names only the primary (`A-priority`) (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
+| A. Primary burst from zero | burst pools at 0 nodes; priority expander configured; N=14 (16 runner pods) | 14 distinct runners concurrent; during the hold, of every runner pod of the scale set (probe and idle warm runners), 4 on baseline and 12 on the primary pool (six nodes), none on the fallback and no runner pod on the fallback in any in-hold collection (fallback nodes alone are a reported cost, Ruling 45); no other run's job on the fleet during the hold (`A-shared-fleet`); every fallback scale-up strictly after a primary scale-up to 6 of 6 (`A-priority`) (proves priority order); primary nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-amd`); warm and cold pickup within thresholds |
 | B. Fallback from zero | Node Pool Sizing `set-burst-maxima` sets primary 0/0, fallback 0/2, both at 0 nodes; N=6 (8 runner pods) | 6 distinct runners concurrent; during the hold, of every runner pod of the scale set, 4 on baseline and 4 on exactly two fallback nodes created from zero, none on the primary and none unscheduled; no other run's job on the fleet during the hold (`B-shared-fleet`); every cluster-autoscaler scale-up event names only the fallback (`B-priority`); fallback nodes pass node compatibility (the live allocatable measurement for `s-8vcpu-16gb-intel`); primary restored to 0/6 afterwards |
 | C. Idle retirement and return to zero | after A; Scale Runners `acceptance-phase-c` sets `minRunners=8` (4 idle runners must land on burst nodes because baseline holds 4); retirement runs with zero free baseline slots; then `minRunners` returns to 4 and then 2 | retirement deletes nothing while baseline is full; once ARC removes surplus runners, any idle runner left on a burst node is retired and replaced on baseline; both burst pools reach 0 nodes within 60 minutes; no job killed |
 | D. Drain under continuing load | a probe that keeps 12 jobs in flight, submitting a new job as each finishes, while Deploy `drain` runs | in-flight jobs on burst nodes complete; every runner pod created after `drain` is on baseline; no Pending runner pod triggers scale-up; burst pools reach zero nodes |
@@ -874,12 +876,50 @@ a tolerance for other work (Ruling 44 revised after PR #42 review 1):
   must name it; a message that does not parse fails. These are the
   autoscaler's own decisions (cluster-autoscaler 1.36:
   `processors/status/eventing_scale_up_processor.go`,
-  `core/scaleup/orchestrator/executor.go`), so a fallback decision fails A even
-  if its node never registers. In attempt 2 the fallback decision appeared only
+  `core/scaleup/orchestrator/executor.go`), so a fallback decision is judged
+  even if its node never registers. For Phase A, Ruling 45 replaced "only the
+  primary" with "every fallback decision strictly after the primary is at its
+  maximum" (see below). In attempt 2 the fallback decision appeared only
   as a `ScaledUpGroup` event, not as a pod's `TriggeredScaleUp`, which is why
   both reasons are judged.
 - The node-pool reads (`pool_collections`) are kept as diagnostics; periodic
   reads cannot order decisions made between them.
+
+### Scale-up order and fallback overshoot (Ruling 45)
+
+Live Phase A attempt 3 (probe run `redducklabs/aurolegal.ai` 40897316886,
+evidence run 40897337833) placed 4 runner pods on baseline and 12 on the
+primary, but failed `A-primary-only` and `A-priority` because two fallback
+nodes registered. Its events show the expander kept the order: the primary
+was set 0→2→3→6 between 15:01:36 and 15:01:41, its six nodes were created at
+15:02:22–24, and only at 15:02:44–48 was the fallback raised 0→1→2, after
+which `NotTriggerScaleUp` reported "max node group size reached". The
+autoscaler over-estimated demand from template allocatable while the primary
+nodes were still booting; the fallback nodes registered at 15:04:03 and no
+runner pod ever ran on them. That is a cost, not a priority failure: a
+from-zero burst can add up to two extra fallback nodes for roughly ten minutes
+or more until scale-down removes them (two fallback node-hours at most per
+such burst, $0.16667 each).
+
+- `A-priority` passes only if at least one scale-up event names the primary,
+  no event names a group other than the primary and the fallback, and every
+  fallback decision comes strictly after a primary decision whose target is
+  the primary maximum (6 of 6). Event times are the recorded timestamps
+  (`firstTimestamp`, or `eventTime` when unset), chosen fail closed: a fallback
+  decision counts at its earliest possible in-window occurrence, a
+  primary-at-maximum decision at its earliest occurrence known to carry that
+  message (its first timestamp inside the window, otherwise its last). Equal
+  timestamps (one-second resolution) do not order decisions, so a tie fails.
+- Aggregated events (client-go v0.36.2, which cluster-autoscaler 1.36.1
+  vendors: `tools/record/events_cache.go` prefixes "(combined from similar
+  events): ") are parsed after the prefix. Because an aggregated event keeps
+  only its latest message, it may stand for a fallback decision from its first
+  timestamp and proves the primary at maximum only at its last timestamp.
+- `A-primary-only` no longer fails on fallback nodes: no in-hold collection may
+  show a runner pod on the fallback, and the latest must show exactly 4
+  baseline and 12 primary. The verdict notes the number of fallback nodes as a
+  cost signal. `B-priority` is unchanged: every scale-up names only the
+  fallback.
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
 uses that to make the fallback the only eligible burst group. There is no
