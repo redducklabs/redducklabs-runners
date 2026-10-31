@@ -83,12 +83,45 @@ run except as described in "Emergency Stop".
 | Emergency Stop Runners (`confirm=STOP-RUNNERS`) | stop marker, fence enforcement proof (dry-run denial), then Helm `--reuse-values` to 0/0 | any release (runs immediately, own group) | a `stopped` state and marker readback and the recovery to use; red if the fence did not deny the probe |
 | Runner Acceptance Evidence (`phase`, run IDs, `expected_sha`) | read-only evidence | any | acceptance verdict; cancels only its verified probe |
 | Runner Status | read-only | any | pools, burst node count per pool, ARC state |
+| CI Usage Report | read-only (GitHub API only) | any | fleet vs hosted job-minutes, hosted cost estimate, fleet concurrency and queue wait |
 
 Node Pool Sizing runs without `apply` are dry runs that print the planned calls;
 run one first and read it. `scripts/runner-cost-report.sh --month YYYY-MM`
 reports runner node-hours and cost per cluster and node size from the invoice,
 with burst node-hours derived as runner node-hours minus two baseline nodes for
 the period (DigitalOcean does not itemize per pool).
+
+### Tuning the burst ceiling and warm floor
+
+The weekly **CI Usage Report** (`scripts/ci-usage-report.sh`, read-only, see
+the README's "CI Usage and Fleet Concurrency") measures demand on the fleet
+from the GitHub jobs API. Read it before proposing a bounds change:
+
+- **`maxRunners` (20) and the burst pool maxima.** Minutes at >= 20 concurrent
+  fleet jobs are time the fleet was at its ceiling; with a high fleet queue wait
+  p95 they mean jobs waited for a runner rather than a node. Minutes at >= 16
+  show how close demand runs to the ceiling. Max concurrency well below 20 over
+  several weeks is evidence for a lower ceiling (fewer burst nodes at the cost
+  cap); repeated time at 20 is evidence for a higher one, which also needs the
+  burst pool maxima and the 10-node cost cap revisited.
+- **`minRunners` (2, the warm floor).** Minutes at >= 4 are time at or above the
+  two baseline nodes' capacity (they hold exactly four jobs); demand beyond the
+  baseline starts at 5 concurrent jobs. These count jobs, not burst-node
+  residency or node-hours (the cost report measures those). A fleet queue wait p50 near the
+  cold-start time (a burst node boot) means most jobs found no warm runner; a
+  p50 of seconds means the warm floor absorbs typical demand. p50/p95
+  concurrency is time-weighted over the whole week, idle nights and weekends
+  included.
+- **Hosted cost.** The estimated hosted list-price cost and the hosted minutes
+  show what still runs GitHub-hosted (by design: secret-handling jobs, public
+  repositories, Windows/macOS) and what moving it would save. The workflow
+  publishes organization totals only (this repository is public); for the
+  per-repository breakdown run `scripts/ci-usage-report.sh --per-repo` in your
+  own terminal and do not paste its output into this repository's issues, PRs
+  or logs.
+
+Any bounds change is a reviewed commit to `deploy/dind-values.yaml` (and Node
+Pool Sizing `set-burst-maxima` for the pools) followed by Deploy, as above.
 
 ### Failure rules
 

@@ -1,0 +1,307 @@
+[
+ {
+  "total_count": 20,
+  "jobs": [
+   {
+    "id": 3000,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T00:00:00Z",
+    "started_at": "2026-10-25T00:00:00Z",
+    "completed_at": "2026-10-26T00:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3000",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3001,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-24T23:59:50Z",
+    "started_at": "2026-10-25T00:00:00Z",
+    "completed_at": "2026-10-26T00:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3001",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3002,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-24T23:59:40Z",
+    "started_at": "2026-10-25T00:00:00Z",
+    "completed_at": "2026-10-26T00:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3002",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3003,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-24T23:59:30Z",
+    "started_at": "2026-10-25T00:00:00Z",
+    "completed_at": "2026-10-26T00:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3003",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3004,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:59:20Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3004",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3005,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:59:10Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3005",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3006,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:59:00Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3006",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3007,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:58:50Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3007",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3008,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:58:40Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3008",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3009,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:58:30Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3009",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3010,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:58:20Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3010",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3011,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:58:10Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3011",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3012,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:58:00Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3012",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3013,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:57:50Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3013",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3014,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:57:40Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3014",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3015,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T05:57:30Z",
+    "started_at": "2026-10-25T06:00:00Z",
+    "completed_at": "2026-10-25T18:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3015",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3016,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T07:57:20Z",
+    "started_at": "2026-10-25T08:00:00Z",
+    "completed_at": "2026-10-25T09:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3016",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3017,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T07:57:10Z",
+    "started_at": "2026-10-25T08:00:00Z",
+    "completed_at": "2026-10-25T09:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3017",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3018,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T07:57:00Z",
+    "started_at": "2026-10-25T08:00:00Z",
+    "completed_at": "2026-10-25T09:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3018",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   },
+   {
+    "id": 3019,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-25T07:56:50Z",
+    "started_at": "2026-10-25T08:00:00Z",
+    "completed_at": "2026-10-25T09:00:00Z",
+    "runner_name": "redducklabs-runners-abcde-runner-3019",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   }
+  ]
+ }
+]

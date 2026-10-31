@@ -1,0 +1,14 @@
+[
+ [
+  {
+   "name": "zz-alpha-app",
+   "visibility": "private",
+   "archived": false
+  },
+  {
+   "name": "zz-epsilon-secret",
+   "visibility": "private",
+   "archived": false
+  }
+ ]
+]

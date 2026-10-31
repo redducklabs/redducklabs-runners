@@ -4140,6 +4140,360 @@ assert_doctl_zero_encoding() {
 }
 
 
+# run_usage <scenario> <now-epoch> <args...>: runs the CI usage report against
+# the gh fake with test/fixtures/usage/<scenario>; JSON goes to USAGE_JSON.
+# A fixture hook.py becomes the fake's stateful hook. SLEEP_CMD appends each
+# requested wait to <dir>/sleeps instead of sleeping. USAGE_ENV adds one
+# VAR=value assignment to the report's environment.
+USAGE_OUT="${WORK_DIR}/usage.out"
+USAGE_ERR="${WORK_DIR}/usage.err"
+USAGE_JSON="${WORK_DIR}/usage.json"
+USAGE_ENV="USAGE_UNUSED=1"
+# Repository names in test/fixtures/usage; none may reach aggregate output.
+USAGE_REPOS="zz-alpha-app zz-beta-site zz-gamma-tool zz-delta-old zz-epsilon-secret"
+run_usage() {
+    local scenario=$1 now=$2 dir
+    shift 2
+    dir=$(mktemp -d "${WORK_DIR}/usage.XXXXXX")
+    cp -r "${FIXTURES}/usage/${scenario}/." "${dir}/"
+    [ -f "${dir}/hook.py" ] && printf '%s' "${dir}/hook.py" > "${dir}/stateful"
+    USAGE_DIR=$dir
+    rm -f "$USAGE_JSON"
+    with_fakes "$dir" env -u GITHUB_ACTIONS "NOW_CMD=echo ${now}" "SLEEP_CMD=sh -c 'printf \"%s\\n\" \"\$0\" >> ${dir}/sleeps'" "$USAGE_ENV" \
+        bash "${REPO_ROOT}/scripts/ci-usage-report.sh" "$@" > "$USAGE_OUT" 2> "$USAGE_ERR"
+}
+
+# usage_json_check <label> <python assertions over `r`, the JSON report>
+usage_json_check() {
+    local label=$1 code=$2
+    if python3 - "$USAGE_JSON" "$code" <<'PY'
+import json
+import sys
+
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+exec(sys.argv[2])
+PY
+    then
+        pass "usage report ${label}"
+    else
+        fail "usage report ${label} ($(head -c 300 "$USAGE_ERR" | tr '\n' ' '))"
+    fi
+}
+
+# usage_names_hidden <label> <files...>: no fixture repository name in the files.
+usage_names_hidden() {
+    local label=$1 name
+    shift
+    for name in $USAGE_REPOS; do
+        if grep -q -- "$name" "$@" 2>/dev/null; then
+            fail "usage report ${label}: '${name}' appears in $(grep -l -- "$name" "$@" | xargs -n1 basename | tr '\n' ' ')"
+            return
+        fi
+    done
+    pass "usage report ${label}"
+}
+
+assert_ci_usage_report() {
+    info "Checking the CI usage report against synthetic Actions fixtures..."
+    local rc usage workflow="${REPO_ROOT}/.github/workflows/ci-usage-report.yml"
+    # 2026-10-26T00:00:00Z and one hour later.
+    local end_epoch=1792972800 later_epoch=1792976400
+
+    if [ "$(git -C "$REPO_ROOT" ls-files -s scripts/ci-usage-report.sh | cut -c1-6)" = 100755 ]; then
+        pass "scripts/ci-usage-report.sh is committed executable"
+    else
+        fail "scripts/ci-usage-report.sh is not committed with mode 100755"
+    fi
+
+    # main with --per-repo: run and job pagination, attempts, a re-run inside
+    # the window of a run created 10 days before it, a carry-in fleet job, a
+    # run updated before the window (jobs not read), an archived repository,
+    # the 1000-result split with an overlapping run, fleet/hosted/other/not-run
+    # classification, pricing, public free use and a running job.
+    run_usage main "$later_epoch" --end 2026-10-26T00:00:00Z --per-repo --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -s "$USAGE_JSON" ]; then
+        pass "usage report main scenario exits 0 and writes JSON"
+    else
+        fail "usage report main scenario exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' ' '))"
+        return
+    fi
+    usage_json_check "reports the 7-day window ending at --end and reads every non-archived repository" '
+assert r["window"]["start"] == "2026-10-19T00:00:00Z" and r["window"]["end"] == "2026-10-26T00:00:00Z", r["window"]
+assert r["window"]["rerun_lookback_days"] == 37
+assert r["complete"] and r["repositories_read"] == 3 and r["per_repository"], r
+assert [row["repository"] for row in r["repositories"]] == ["zz-alpha-app", "zz-beta-site", "zz-gamma-tool"]'
+    usage_json_check "counts fleet jobs of every attempt that started in the window, including a re-run of a 10-day-old run" '
+app = r["repositories"][0]
+assert app["fleet_jobs"] == 5 and abs(app["fleet_minutes"] - 79.5) < 1e-9, app
+assert app["not_run_jobs"] == 1, app'
+    usage_json_check "rounds each hosted job up to a whole minute and prices it by label" '
+app, site, tool = r["repositories"]
+assert app["hosted_jobs"] == 1 and app["hosted_billable_minutes"] == 2 and abs(app["hosted_cost_usd"] - 0.012) < 1e-9, app
+assert tool["hosted_jobs"] == 3 and tool["hosted_billable_minutes"] == 19, tool
+assert abs(tool["hosted_cost_usd"] - (10 * 0.010 + 4 * 0.062)) < 1e-9, tool
+s = r["hosted_by_sku"]
+assert set(s) == {"actions_linux", "actions_windows", "actions_macos"}, s
+assert s["actions_linux"]["billable_minutes"] == 32 and s["actions_linux"]["private_billable_minutes"] == 2, s'
+    usage_json_check "treats standard hosted minutes in a public repository as free" '
+site = r["repositories"][1]
+assert site["hosted_billable_minutes"] == 30 and site["public_free_billable_minutes"] == 30 and site["hosted_cost_usd"] == 0, site'
+    usage_json_check "reports a hosted job with no standard-runner label as unpriced, not as zero" '
+assert r["hosted_unpriced"] == {"jobs": 1, "minutes": 5}, r["hosted_unpriced"]
+assert r["repositories"][2]["hosted_unpriced_minutes"] == 5'
+    usage_json_check "classifies a non-fleet self-hosted runner as other" '
+tool = r["repositories"][2]
+assert tool["other_jobs"] == 1 and abs(tool["other_minutes"] - 20) < 1e-9, tool'
+    usage_json_check "counts a running fleet job up to the report time and clips it to the window" '
+tool = r["repositories"][2]
+assert tool["fleet_jobs"] == 1 and abs(tool["fleet_minutes"] - 70) < 1e-9 and r["running_jobs"] == 1, tool'
+    # Level 1: 10:00-10:10, 10:25-10:40 (back to back at 10:30), the re-run
+    # (19.5 min), the running job clipped to 10 min and the carry-in job
+    # clipped to its 30 in-window minutes; the job that ended before the
+    # window contributes nothing.
+    usage_json_check "computes concurrency on overlapping, back-to-back and carry-in fleet intervals clipped to the window" '
+c = r["fleet_concurrency"]
+assert c["window_seconds"] == 7 * 86400, c
+assert c["minutes_by_level"] == {"0": 10080 - 99.5, "1": 84.5, "2": 10, "3": 5}, c["minutes_by_level"]
+assert (c["p50"], c["p95"], c["max"]) == (0, 0, 3), c
+assert c["minutes_at_or_above"] == {"4": 0, "16": 0, "20": 0}, c'
+    usage_json_check "reports fleet queue wait percentiles (nearest rank) over jobs started in the window" '
+q = r["fleet_queue_wait"]
+assert q == {"jobs": 6, "p50_seconds": 30, "p95_seconds": 600, "max_seconds": 600}, q'
+    usage_json_check "records the pricing source and retrieval date" '
+p = r["pricing"]
+assert p["source"] == "https://docs.github.com/en/billing/reference/actions-runner-pricing" and p["retrieved"] == "2026-10-29", p
+assert p["usd_per_minute"]["actions_linux"] == 0.006'
+    if [ "$(grep -c 'zz-gamma-tool/actions/runs/10/jobs' "${USAGE_DIR}/gh.calls")" -eq 1 ] \
+        && grep -q 'zz-gamma-tool/actions/runs?created=2026-09-12T00:00:00Z..2026-10-04T00:00:00Z' "${USAGE_DIR}/gh.calls" \
+        && grep -q 'zz-gamma-tool/actions/runs?created=2026-10-04T00:00:00Z..2026-10-26T00:00:00Z' "${USAGE_DIR}/gh.calls"; then
+        pass "usage report bisects a created range over the 1000-result cap and reads an overlapping run once"
+    else
+        fail "usage report range split or deduplication is wrong ($(tr '\n' '|' < "${USAGE_DIR}/gh.calls" | head -c 600))"
+    fi
+    if grep -q 'zz-alpha-app/actions/runs?created=2026-09-12T00:00:00Z..2026-10-26T00:00:00Z' "${USAGE_DIR}/gh.calls"; then
+        pass "usage report discovers runs from 37 days before the window (35-day run lifetime plus queueing margin)"
+    else
+        fail "usage report run discovery does not start 37 days before the window"
+    fi
+    if ! grep -Eq 'runs/3/jobs|repos/redducklabs/zz-delta-old/' "${USAGE_DIR}/gh.calls"; then
+        pass "usage report skips completed runs updated before the window and archived repositories"
+    else
+        fail "usage report read a run updated before the window or an archived repository"
+    fi
+    if ! grep -qv '^api --paginate --slurp ' "${USAGE_DIR}/gh.calls"; then
+        pass "usage report issues only paginated gh api GETs"
+    else
+        fail "usage report issued an unexpected gh call ($(grep -v '^api --paginate --slurp ' "${USAGE_DIR}/gh.calls" | head -3 | tr '\n' '|'))"
+    fi
+    if grep -q '^| `zz-alpha-app` | private | 5 | 79.5 | 1 | 1.0 | 2 | \$0.01 | 0.0 |$' "$USAGE_OUT" \
+        && grep -q '^| `zz-beta-site` | public | 0 | 0.0 | 1 | 30.0 | 30 | \$0.00 (public: standard runners free) | 0.0 |$' "$USAGE_OUT" \
+        && grep -q '^| \*\*Total\*\* | | 6 | 149.5 | 5 | 49.5 | 51 | \$0.36 + 5 unpriced min | 20.0 |$' "$USAGE_OUT" \
+        && grep -q '^| max concurrent fleet jobs | 3 |$' "$USAGE_OUT" \
+        && grep -q '^| fleet queue wait p95 | 600 s (10.0 min) |$' "$USAGE_OUT" \
+        && ! grep -q 'INCOMPLETE' "$USAGE_OUT"; then
+        pass "usage report --per-repo Markdown carries the per-repository, cost and concurrency tables"
+    else
+        fail "usage report --per-repo Markdown is wrong ($(head -c 900 "$USAGE_OUT" | tr '\n' '|'))"
+    fi
+
+    # Visibility boundary: without --per-repo (what the workflow runs), no
+    # output, JSON or log line names a repository or attributes a number to one.
+    run_usage main "$later_epoch" --end 2026-10-26T00:00:00Z --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '^| Self-hosted fleet | 6 | 149.5 | n/a |$' "$USAGE_OUT" \
+        && grep -q '^| GitHub-hosted | 5 | 49.5 | 51 |$' "$USAGE_OUT" \
+        && grep -q '^| \*\*Total\*\* | | 5 | 51 | | \*\*\$0.36\*\* + 5 unpriced min |$' "$USAGE_OUT"; then
+        pass "usage report aggregate Markdown carries organization totals and the cost table"
+    else
+        fail "usage report aggregate Markdown is wrong: exit ${rc} ($(head -c 900 "$USAGE_OUT" | tr '\n' '|'))"
+    fi
+    usage_names_hidden "aggregate stdout, stderr and JSON name no repository" "$USAGE_OUT" "$USAGE_ERR" "$USAGE_JSON"
+    usage_json_check "aggregate JSON has no per-repository section" '
+assert "repositories" not in r and "unreadable_repositories" not in r and r["per_repository"] is False, sorted(r)
+assert r["totals"]["fleet_jobs"] == 6 and r["fleet_concurrency"]["max"] == 3'
+
+    # A run created before the old 32-day cutoff, re-run 29.5 days later; its
+    # fleet job runs 5 days and carries 12 hours into the window.
+    run_usage long-carry-in "$end_epoch" --end 2026-10-26T00:00:00Z --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        usage_json_check "counts a fleet job of a run created 34 days before the window in concurrency only, complete" '
+assert r["complete"], r
+c = r["fleet_concurrency"]
+assert c["minutes_by_level"] == {"0": 10080 - 720, "1": 720}, c["minutes_by_level"]
+assert c["max"] == 1, c
+assert r["totals"]["fleet_jobs"] == 0 and r["fleet_queue_wait"]["jobs"] == 0, (r["totals"], r["fleet_queue_wait"])'
+    else
+        fail "usage report long carry-in scenario exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' ' '))"
+    fi
+
+    # saturated: concurrency 4 all day, 16 for 11 hours and 20 for one hour.
+    run_usage saturated "$end_epoch" --days 1 --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        usage_json_check "computes time-weighted p50/p95/max and minutes at >= 4, >= 16 and >= 20" '
+c = r["fleet_concurrency"]
+assert c["minutes_by_level"] == {"4": 720, "16": 660, "20": 60}, c["minutes_by_level"]
+assert (c["p50"], c["p95"], c["max"]) == (4, 16, 20), c
+assert c["minutes_at_or_above"] == {"4": 1440, "16": 720, "20": 60}, c
+q = r["fleet_queue_wait"]
+assert q == {"jobs": 20, "p50_seconds": 90, "p95_seconds": 180, "max_seconds": 190}, q'
+    else
+        fail "usage report saturated scenario exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' ' '))"
+    fi
+
+    # empty window: measured zeros and no queue-wait percentiles.
+    run_usage empty "$end_epoch" --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '^| fleet queue wait p50 | n/a (no fleet jobs) |$' "$USAGE_OUT" \
+        && grep -q '^| max concurrent fleet jobs | 0 |$' "$USAGE_OUT"; then
+        usage_json_check "handles an empty window" '
+assert r["complete"] and r["totals"]["fleet_jobs"] == 0 and r["totals"]["hosted_jobs"] == 0, r["totals"]
+assert r["fleet_concurrency"]["minutes_by_level"] == {"0": 10080}, r["fleet_concurrency"]
+assert r["fleet_queue_wait"]["p50_seconds"] is None'
+    else
+        fail "usage report empty window exit ${rc} ($(head -c 400 "$USAGE_OUT" | tr '\n' '|'))"
+    fi
+
+    # An unreadable repository: retried, counted, INCOMPLETE, exit 1, unnamed.
+    run_usage unreadable "$end_epoch" --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 1 ] && grep -q '^\*\*INCOMPLETE:\*\* 1 repositories could not be read' "$USAGE_OUT" \
+        && [ "$(grep -c 'zz-epsilon-secret/actions/runs' "${USAGE_DIR}/gh.calls")" -eq 5 ] \
+        && grep -q '^UNREADABLE: repository 2/2: a gh call failed (exit 1)$' "$USAGE_ERR"; then
+        pass "usage report retries, then counts an unreadable repository INCOMPLETE and exits 1"
+    else
+        fail "usage report unreadable repository: exit ${rc} ($(head -c 400 "$USAGE_OUT" | tr '\n' '|') $(head -c 300 "$USAGE_ERR" | tr '\n' '|'))"
+    fi
+    usage_names_hidden "names no unreadable repository in aggregate output, logs or JSON" "$USAGE_OUT" "$USAGE_ERR" "$USAGE_JSON"
+    if grep -q '^RETRY: attempt 4/5 failed: a gh call failed (exit 1); waiting 60 s$' "$USAGE_ERR"; then
+        pass "usage report backs off 5, 15, 30 and 60 s across five attempts"
+    else
+        fail "usage report retry backoff is wrong ($(grep RETRY "$USAGE_ERR" | tr '\n' '|'))"
+    fi
+    run_usage unreadable "$end_epoch" --per-repo
+    if grep -q '^- `zz-epsilon-secret`: ' "$USAGE_OUT"; then
+        pass "usage report --per-repo names the unreadable repository"
+    else
+        fail "usage report --per-repo does not name the unreadable repository"
+    fi
+
+    # The 1000-result cap below the minimum slice fails that repository closed.
+    run_usage capped "$end_epoch"
+    rc=$?
+    if [ "$rc" -eq 1 ] && grep -q 'more runs in one 3600 s slice than the 1000-result search limit' "$USAGE_ERR"; then
+        pass "usage report fails closed when a minimum slice still exceeds the 1000-result cap"
+    else
+        fail "usage report capped range: exit ${rc} ($(head -c 400 "$USAGE_ERR" | tr '\n' '|'))"
+    fi
+    usage_names_hidden "names no repository when the cap cannot be split" "$USAGE_OUT" "$USAGE_ERR"
+
+    run_usage no-org "$end_epoch"
+    rc=$?
+    if [ "$rc" -eq 1 ] && grep -q '^usage data unavailable: ' "$USAGE_OUT" && ! grep -q '|' "$USAGE_OUT"; then
+        pass "usage report prints no tables when the organization's repositories cannot be listed"
+    else
+        fail "usage report without a repository list: exit ${rc} ($(head -c 300 "$USAGE_OUT" | tr '\n' '|'))"
+    fi
+
+    # Rate limits: the primary limit waits for its reset (x-ratelimit-reset via
+    # GET rate_limit), a secondary limit waits a minute, a reset too far away
+    # fails the repository; a hung call times out.
+    run_usage rate-limited "$end_epoch" --days 1 --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(cat "${USAGE_DIR}/sleeps" 2>/dev/null)" = 31 ] \
+        && grep -q '^RETRY: attempt 1/5 failed: a gh call was rate limited; waiting 31 s$' "$USAGE_ERR" \
+        && [ "$(grep -c '^api rate_limit$' "${USAGE_DIR}/gh.calls")" -eq 1 ]; then
+        usage_json_check "waits for the primary rate limit's reset, then completes" '
+assert r["complete"] and r["totals"]["fleet_jobs"] == 20, r["totals"]'
+    else
+        fail "usage report primary rate limit: exit ${rc}, sleeps '$(tr '\n' ' ' < "${USAGE_DIR}/sleeps" 2>/dev/null)' ($(head -c 300 "$USAGE_ERR" | tr '\n' '|'))"
+    fi
+    run_usage secondary-limited "$end_epoch" --days 1
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(cat "${USAGE_DIR}/sleeps" 2>/dev/null)" = 60 ]; then
+        pass "usage report waits one minute on a secondary rate limit"
+    else
+        fail "usage report secondary rate limit: exit ${rc}, sleeps '$(tr '\n' ' ' < "${USAGE_DIR}/sleeps" 2>/dev/null)'"
+    fi
+    run_usage rate-limit-too-long "$end_epoch" --days 1
+    rc=$?
+    if [ "$rc" -eq 1 ] && [ ! -s "${USAGE_DIR}/sleeps" ] && grep -q 'INCOMPLETE' "$USAGE_OUT" \
+        && grep -q 'rate limited for more than 900 s' "$USAGE_ERR"; then
+        pass "usage report fails a repository whose rate-limit reset exceeds the maximum wait"
+    else
+        fail "usage report long rate limit: exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' '|'))"
+    fi
+    USAGE_ENV="GH_CALL_TIMEOUT_SECONDS=1"
+    run_usage hung "$end_epoch" --days 1
+    rc=$?
+    USAGE_ENV="USAGE_UNUSED=1"
+    if [ "$rc" -eq 1 ] && [ "$(grep -c 'a gh call timed out' "$USAGE_ERR")" -eq 5 ] && grep -q 'INCOMPLETE' "$USAGE_OUT"; then
+        pass "usage report times out a hung gh call, retries it, then marks the report INCOMPLETE"
+    else
+        fail "usage report hung call: exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' '|'))"
+    fi
+
+    for usage in "--days" "--days 0" "--days 32" "--days x" "--org bad_org!" "--end 2026-10-26" "--end 2026-10-27T00:00:00Z" \
+        "--end 2026-99-26T00:00:00Z" "--end 2026-02-30T00:00:00Z" "--end 2026-10-26T25:00:00Z" "--json" "--extra 1"; do
+        # shellcheck disable=SC2086 # usage is an argument list by design
+        run_usage empty "$end_epoch" $usage
+        rc=$?
+        if [ "$rc" -eq 2 ] && [ ! -s "${USAGE_DIR}/gh.calls" ] && ! grep -q Traceback "$USAGE_ERR"; then
+            pass "usage report rejects '${usage}' with exit 2 before any read"
+        else
+            fail "usage report exit ${rc} (expected 2, no reads) for '${usage}'"
+        fi
+    done
+    USAGE_ENV="GITHUB_ACTIONS=true"
+    run_usage empty "$end_epoch" --per-repo
+    rc=$?
+    USAGE_ENV="USAGE_UNUSED=1"
+    if [ "$rc" -eq 2 ] && [ ! -s "${USAGE_DIR}/gh.calls" ] && grep -q 'refused in GitHub Actions' "$USAGE_ERR"; then
+        pass "usage report refuses --per-repo when GITHUB_ACTIONS=true"
+    else
+        fail "usage report accepted --per-repo under GITHUB_ACTIONS=true (exit ${rc})"
+    fi
+
+    if ! grep -Eq -- '(-X|--method)[ =]|"(POST|PUT|PATCH|DELETE)"|--input' "${REPO_ROOT}/scripts/ci-usage-report.sh" "${REPO_ROOT}/scripts/lib/ci_usage_report.py"; then
+        pass "usage report contains no mutating gh api call"
+    else
+        fail "usage report contains a mutating gh api call"
+    fi
+
+    if python3 - "$workflow" <<'PY'
+import re
+import sys
+
+import yaml
+
+text = open(sys.argv[1], encoding="utf-8").read()
+workflow = yaml.safe_load(text)
+triggers = workflow[True]  # PyYAML reads the bare key `on` as True
+assert set(triggers) == {"schedule", "workflow_dispatch"}, triggers
+assert triggers["schedule"] == [{"cron": "0 8 * * 1"}], triggers["schedule"]
+assert workflow["permissions"] == {"contents": "read"}, workflow["permissions"]
+job = workflow["jobs"]["report"]
+assert job["runs-on"] == "ubuntu-latest" and job["defaults"] == {"run": {"shell": "bash"}}
+steps = {step.get("name"): step for step in job["steps"]}
+build = steps["Build usage report"]
+assert build["env"]["GH_TOKEN"] == "${{ secrets.RUNNER_TOKEN }}"
+assert "./scripts/ci-usage-report.sh" in build["run"] and "--json" in build["run"]
+assert "--per-repo" not in text, "the public workflow must never request per-repository output"
+assert "GITHUB_STEP_SUMMARY" in steps["Write job summary"]["run"]
+assert steps["Upload report"]["uses"].startswith("actions/upload-artifact@")
+assert "${{ inputs." not in "".join(step.get("run", "") for step in job["steps"]), "inputs interpolated into a run block"
+assert not re.search(r"\b(kubectl|helm|doctl)\b|gh (run|workflow|pr|issue|release|secret|variable) |--method|-X ", text)
+PY
+    then
+        pass "CI Usage Report workflow is weekly + manual, contents: read, aggregate only, RUNNER_TOKEN only for the report, no mutations"
+    else
+        fail "CI Usage Report workflow contract is wrong"
+    fi
+}
+
+
 assert_with_fakes_selftest
 assert_burst_contracts
 assert_generated_drain_values
@@ -4165,6 +4519,7 @@ assert_ci_lint_coverage
 assert_admission_docs_name_no_collaborator
 assert_operator_docs_current
 assert_cost_report
+assert_ci_usage_report
 assert_status_workflow
 assert_doctl_zero_encoding
 assert_network_policy
