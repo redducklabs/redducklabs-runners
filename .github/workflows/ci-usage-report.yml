@@ -16,7 +16,7 @@ name: CI Usage Report
 # Visibility: this repository is public, so its logs, summary and artifact are
 # readable by anyone who can read it. The report runs in its default aggregate
 # mode: organization totals only, no repository names or per-repository
-# numbers on stdout, stderr or in the JSON. Never add --per-repo here (the
+# numbers on stdout, stderr or in the JSON. Never request per-repository output here (the
 # script refuses it when GITHUB_ACTIONS=true; see docs/SECURITY.md).
 
 on:
