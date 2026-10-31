@@ -4360,13 +4360,18 @@ assert r["fleet_queue_wait"]["p50_seconds"] is None'
     run_usage unreadable "$end_epoch" --json "$USAGE_JSON"
     rc=$?
     if [ "$rc" -eq 1 ] && grep -q '^\*\*INCOMPLETE:\*\* 1 repositories could not be read' "$USAGE_OUT" \
-        && [ "$(grep -c 'zz-epsilon-secret/actions/runs' "${USAGE_DIR}/gh.calls")" -eq 3 ] \
+        && [ "$(grep -c 'zz-epsilon-secret/actions/runs' "${USAGE_DIR}/gh.calls")" -eq 5 ] \
         && grep -q '^UNREADABLE: repository 2/2: a gh call failed (exit 1)$' "$USAGE_ERR"; then
         pass "usage report retries, then counts an unreadable repository INCOMPLETE and exits 1"
     else
         fail "usage report unreadable repository: exit ${rc} ($(head -c 400 "$USAGE_OUT" | tr '\n' '|') $(head -c 300 "$USAGE_ERR" | tr '\n' '|'))"
     fi
     usage_names_hidden "names no unreadable repository in aggregate output, logs or JSON" "$USAGE_OUT" "$USAGE_ERR" "$USAGE_JSON"
+    if grep -q '^RETRY: attempt 4/5 failed: a gh call failed (exit 1); waiting 60 s$' "$USAGE_ERR"; then
+        pass "usage report backs off 5, 15, 30 and 60 s across five attempts"
+    else
+        fail "usage report retry backoff is wrong ($(grep RETRY "$USAGE_ERR" | tr '\n' '|'))"
+    fi
     run_usage unreadable "$end_epoch" --per-repo
     if grep -q '^- `zz-epsilon-secret`: ' "$USAGE_OUT"; then
         pass "usage report --per-repo names the unreadable repository"
@@ -4398,7 +4403,7 @@ assert r["fleet_queue_wait"]["p50_seconds"] is None'
     run_usage rate-limited "$end_epoch" --days 1 --json "$USAGE_JSON"
     rc=$?
     if [ "$rc" -eq 0 ] && [ "$(cat "${USAGE_DIR}/sleeps" 2>/dev/null)" = 31 ] \
-        && grep -q '^RETRY: attempt 1/3 failed: a gh call was rate limited; waiting 31 s$' "$USAGE_ERR" \
+        && grep -q '^RETRY: attempt 1/5 failed: a gh call was rate limited; waiting 31 s$' "$USAGE_ERR" \
         && [ "$(grep -c '^api rate_limit$' "${USAGE_DIR}/gh.calls")" -eq 1 ]; then
         usage_json_check "waits for the primary rate limit's reset, then completes" '
 assert r["complete"] and r["totals"]["fleet_jobs"] == 20, r["totals"]'
@@ -4424,7 +4429,7 @@ assert r["complete"] and r["totals"]["fleet_jobs"] == 20, r["totals"]'
     run_usage hung "$end_epoch" --days 1
     rc=$?
     USAGE_ENV="USAGE_UNUSED=1"
-    if [ "$rc" -eq 1 ] && [ "$(grep -c 'a gh call timed out' "$USAGE_ERR")" -eq 3 ] && grep -q 'INCOMPLETE' "$USAGE_OUT"; then
+    if [ "$rc" -eq 1 ] && [ "$(grep -c 'a gh call timed out' "$USAGE_ERR")" -eq 5 ] && grep -q 'INCOMPLETE' "$USAGE_OUT"; then
         pass "usage report times out a hung gh call, retries it, then marks the report INCOMPLETE"
     else
         fail "usage report hung call: exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' '|'))"

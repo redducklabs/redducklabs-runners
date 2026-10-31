@@ -90,12 +90,15 @@ RUN_MIN_SLICE_SECONDS = 3600
 # up to 5 days of self-hosted job execution), plus one day for a job to queue
 # (GitHub fails a job still queued after 24 hours) and one day of margin.
 RERUN_LOOKBACK_DAYS = 37
-READ_ATTEMPTS = 3
-READ_BACKOFF_SECONDS = (5, 15)
+# GitHub answers bursts of parallel reads with transient 5xx errors (502s seen
+# live on job-list reads); five attempts over about two minutes ride them out.
+READ_ATTEMPTS = 5
+READ_BACKOFF_SECONDS = (5, 15, 30, 60)
 JOB_READ_WORKERS = 6
 GH_CALL_TIMEOUT_SECONDS = 120
 RATE_LIMIT_MAX_WAIT_SECONDS = 900
 SECONDARY_RATE_LIMIT_WAIT_SECONDS = 60
+HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 RATE_LIMITED = re.compile(r"rate limit|HTTP 429|secondary rate", re.IGNORECASE)
 # Fleet thresholds: the baseline's two nodes run 4 jobs; ARC maxRunners is 20.
 CONCURRENCY_THRESHOLDS = (4, 16, 20)
@@ -176,8 +179,12 @@ def run_once(argv, timeout=None):
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip().splitlines()
         limited = any(RATE_LIMITED.search(line) for line in detail)
+        # The HTTP status is the only part of gh's error text that is safe to
+        # publish (the rest can carry a repository path).
+        status = next((match.group(1) for match in (HTTP_STATUS.search(line) for line in detail) if match), None)
         raise ReadError(f"'{what}' failed (exit {completed.returncode})" + (f": {detail[0][:200]}" if detail else ""),
-                        "a gh call was rate limited" if limited else f"a gh call failed (exit {completed.returncode})",
+                        "a gh call was rate limited" if limited else
+                        f"a gh call failed (exit {completed.returncode}" + (f", HTTP {status})" if status else ")"),
                         rate_limited=limited)
     # gh prints UTF-8 (job and workflow names may hold any character), whatever
     # the locale; decoding with the locale default (cp1252 on Windows) fails.
