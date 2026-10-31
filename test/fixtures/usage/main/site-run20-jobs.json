@@ -4,6 +4,7 @@
   "jobs": [
    {
     "id": 2001,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",

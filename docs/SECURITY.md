@@ -58,8 +58,17 @@ githubConfigSecret:
 - **CI Usage Report** lists the organization's repositories and reads Actions
   runs and jobs (GET only) of every non-archived repository, which needs the
   `repo` scope for the private ones. It runs on GitHub-hosted `ubuntu-latest`
-  with `contents: read`, writes only its job summary and artifact (repository
-  names, job counts and minutes; no logs or secrets), and mutates nothing.
+  with `contents: read` and mutates nothing. Because this repository is public
+  and its Actions logs, job summaries and artifacts are readable by anyone who
+  can read it, everything the workflow emits (summary, artifact, stdout and
+  stderr) is aggregate and non-identifying: organization totals for fleet and
+  hosted jobs and minutes, cost totals by runner SKU, concurrency and queue
+  statistics, and a count of unreadable repositories. No repository name,
+  per-repository number, job name or API error text is printed. The
+  per-repository breakdown (`--per-repo`) exists only for an operator's local
+  run; the workflow never passes it and the script refuses it when
+  `GITHUB_ACTIONS=true`. Tests in `test/verify-burst-autoscaling.sh` check that
+  no fixture repository name reaches aggregate output, logs or JSON.
 - **Runner Acceptance Evidence** reads `redducklabs/aurolegal.ai` Actions runs,
   jobs and tags, and cancels the acceptance probe run it has verified. It never
   cancels a run it has not verified (repository, workflow path, `headSha`,

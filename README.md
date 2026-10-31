@@ -520,14 +520,25 @@ authenticated for the organization (read-only):
 ./scripts/ci-usage-report.sh                       # last 7 days
 ./scripts/ci-usage-report.sh --days 14 --json usage.json
 ./scripts/ci-usage-report.sh --end 2026-10-26T00:00:00Z
+./scripts/ci-usage-report.sh --per-repo            # adds the per-repository breakdown
 ```
 
-For every non-archived repository of `redducklabs` it lists the workflow runs
-created in the window (and `3` days before it, for re-runs), bisecting any
-created range above the API's 1000-result search cap, reads the jobs of every
-attempt (`filter=all`), and counts each job that started in the window:
+This repository is public, and anyone who can read it can read its Actions
+logs, job summaries and artifacts. The report therefore publishes only
+organization totals by default: no output, JSON field, progress or error line
+names a repository or attributes a number to one. `--per-repo` adds the
+per-repository table and names unreadable repositories; it is for an
+operator's terminal, the workflow never passes it, and the script refuses it
+when `GITHUB_ACTIONS=true`.
 
-- **Fleet vs hosted job-minutes per repository.** A job is a fleet job when its
+For every non-archived repository of `redducklabs` it lists the workflow runs
+created from 32 days before the window (a re-run keeps its run's creation time
+and GitHub allows re-runs for 30 days; the rest is queueing margin), bisecting
+any created range above the API's 1000-result search cap, reads the jobs of
+every attempt (`filter=all`), and counts each job that started in the window:
+
+- **Fleet vs hosted job-minutes** (organization totals; per repository with
+  `--per-repo`). A job is a fleet job when its
   runner name starts with `redducklabs-runners-`, GitHub-hosted when it ran in
   the `GitHub Actions` runner group, and "other self-hosted" otherwise. Skipped
   jobs and jobs cancelled before pickup carry no minutes.
@@ -539,16 +550,20 @@ attempt (`filter=all`), and counts each job that started in the window:
   standard runner (a custom larger-runner label) is shown as unpriced minutes,
   never as $0.
 - **Fleet concurrency profile.** From the fleet jobs' `started_at`-`completed_at`
-  intervals, time-weighted over the whole window: p50, p95 and max concurrent
+  intervals that overlap the window (including jobs that started before it),
+  clipped to it and time-weighted over the whole window: p50, p95 and max concurrent
   fleet jobs, minutes at >= 4 (what the two baseline nodes hold), >= 16 and >= 20
   (`maxRunners`), and fleet queue wait (`started_at - created_at`) p50/p95/max.
   See the runbook's "Tuning the burst ceiling and warm floor".
 
 The token needs Actions read on the organization's private repositories; the
 workflow uses `RUNNER_TOKEN` for that (`GITHUB_TOKEN` reads only this
-repository). A repository that cannot be read is listed and the report is
-marked `INCOMPLETE` (exit 1, numbers are lower bounds); a failed repository
-listing prints `usage data unavailable` and no tables.
+repository). Every `gh` call has a timeout and is retried; a rate-limited call
+waits for the primary limit's reset (read from `GET rate_limit`) or one minute
+for a secondary limit, and gives up if the reset is more than 15 minutes away.
+A repository that cannot be read is counted (named only with `--per-repo`)
+and the report is marked `INCOMPLETE` (exit 1, numbers are lower bounds); a
+failed repository listing prints `usage data unavailable` and no tables.
 
 ### Verify GitHub Registration
 ```bash

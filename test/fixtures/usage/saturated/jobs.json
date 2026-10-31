@@ -4,6 +4,7 @@
   "jobs": [
    {
     "id": 3000,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -18,6 +19,7 @@
    },
    {
     "id": 3001,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -32,6 +34,7 @@
    },
    {
     "id": 3002,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -46,6 +49,7 @@
    },
    {
     "id": 3003,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -60,6 +64,7 @@
    },
    {
     "id": 3004,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -74,6 +79,7 @@
    },
    {
     "id": 3005,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -88,6 +94,7 @@
    },
    {
     "id": 3006,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -102,6 +109,7 @@
    },
    {
     "id": 3007,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -116,6 +124,7 @@
    },
    {
     "id": 3008,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -130,6 +139,7 @@
    },
    {
     "id": 3009,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -144,6 +154,7 @@
    },
    {
     "id": 3010,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -158,6 +169,7 @@
    },
    {
     "id": 3011,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -172,6 +184,7 @@
    },
    {
     "id": 3012,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -186,6 +199,7 @@
    },
    {
     "id": 3013,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -200,6 +214,7 @@
    },
    {
     "id": 3014,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -214,6 +229,7 @@
    },
    {
     "id": 3015,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -228,6 +244,7 @@
    },
    {
     "id": 3016,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -242,6 +259,7 @@
    },
    {
     "id": 3017,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -256,6 +274,7 @@
    },
    {
     "id": 3018,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",
@@ -270,6 +289,7 @@
    },
    {
     "id": 3019,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "success",

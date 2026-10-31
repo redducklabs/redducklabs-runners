@@ -1,7 +1,7 @@
 name: CI Usage Report
 
 # Weekly GitHub Actions job usage across the organization's repositories:
-# fleet vs GitHub-hosted job-minutes per repository, estimated hosted cost at
+# fleet vs GitHub-hosted job-minutes, estimated hosted cost at
 # GitHub's published prices, and the fleet concurrency and queue-wait profile
 # used to tune ARC maxRunners (burst ceiling) and minRunners (warm floor).
 # See scripts/ci-usage-report.sh and docs/runbooks/node-pool-sizing.md,
@@ -12,6 +12,12 @@ name: CI Usage Report
 # lock. RUNNER_TOKEN is used because GITHUB_TOKEN can read only this
 # repository; reading Actions runs and jobs of the organization's private
 # repositories needs the PAT's `repo` scope.
+#
+# Visibility: this repository is public, so its logs, summary and artifact are
+# readable by anyone who can read it. The report runs in its default aggregate
+# mode: organization totals only, no repository names or per-repository
+# numbers on stdout, stderr or in the JSON. Never add --per-repo here (the
+# script refuses it when GITHUB_ACTIONS=true; see docs/SECURITY.md).
 
 on:
   workflow_dispatch:

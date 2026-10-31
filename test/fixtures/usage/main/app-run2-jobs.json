@@ -4,6 +4,7 @@
   "jobs": [
    {
     "id": 201,
+    "name": "build ✓ ünïcode",
     "run_attempt": 1,
     "status": "completed",
     "conclusion": "failure",
@@ -18,6 +19,7 @@
    },
    {
     "id": 202,
+    "name": "build ✓ ünïcode",
     "run_attempt": 2,
     "status": "completed",
     "conclusion": "success",

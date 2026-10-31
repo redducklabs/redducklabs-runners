@@ -1,24 +1,24 @@
 [
  [
   {
-   "name": "app",
+   "name": "zz-alpha-app",
    "visibility": "private",
    "archived": false
   },
   {
-   "name": "site",
+   "name": "zz-beta-site",
    "visibility": "public",
    "archived": false
   },
   {
-   "name": "old",
+   "name": "zz-delta-old",
    "visibility": "private",
    "archived": true
   }
  ],
  [
   {
-   "name": "tool",
+   "name": "zz-gamma-tool",
    "visibility": "private",
    "archived": false
   }

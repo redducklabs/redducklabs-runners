@@ -111,8 +111,12 @@ from the GitHub jobs API. Read it before proposing a bounds change:
   concurrency is time-weighted over the whole week, idle nights and weekends
   included.
 - **Hosted cost.** The estimated hosted list-price cost and the hosted minutes
-  per repository show what still runs GitHub-hosted (by design: secret-handling
-  jobs, public repositories, Windows/macOS) and what moving it would save.
+  show what still runs GitHub-hosted (by design: secret-handling jobs, public
+  repositories, Windows/macOS) and what moving it would save. The workflow
+  publishes organization totals only (this repository is public); for the
+  per-repository breakdown run `scripts/ci-usage-report.sh --per-repo` in your
+  own terminal and do not paste its output into this repository's issues, PRs
+  or logs.
 
 Any bounds change is a reviewed commit to `deploy/dind-values.yaml` (and Node
 Pool Sizing `set-burst-maxima` for the pools) followed by Deploy, as above.
