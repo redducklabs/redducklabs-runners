@@ -104,8 +104,10 @@ from the GitHub jobs API. Read it before proposing a bounds change:
   several weeks is evidence for a lower ceiling (fewer burst nodes at the cost
   cap); repeated time at 20 is evidence for a higher one, which also needs the
   burst pool maxima and the 10-node cost cap revisited.
-- **`minRunners` (2, the warm floor).** Minutes at >= 4 are time beyond what the
-  two baseline nodes hold, i.e. burst node time. A fleet queue wait p50 near the
+- **`minRunners` (2, the warm floor).** Minutes at >= 4 are time at or above the
+  two baseline nodes' capacity (they hold exactly four jobs); demand beyond the
+  baseline starts at 5 concurrent jobs. These count jobs, not burst-node
+  residency or node-hours (the cost report measures those). A fleet queue wait p50 near the
   cold-start time (a burst node boot) means most jobs found no warm runner; a
   p50 of seconds means the warm floor absorbs typical demand. p50/p95
   concurrency is time-weighted over the whole week, idle nights and weekends
