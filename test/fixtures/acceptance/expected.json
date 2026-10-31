@@ -170,6 +170,16 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-attempt-3-shape": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "A-pass-combined-fallback-after-max": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "A-pass-idle-pending-early": {
   "criteria": [],
   "pass": true,
@@ -195,6 +205,39 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "A-pass-worker-pool-scale-up": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "A-pod-on-fallback-early": {
+  "criteria": [
+   "A-primary-only"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-baseline-scale-up": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-combined-before-primary-max": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-fallback-before-primary-max": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-priority-fallback-group-unregistered": {
   "criteria": [
    "A-priority"
@@ -202,7 +245,21 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "A-priority-fallback-same-second": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "A-priority-no-scale-up-events": {
+  "criteria": [
+   "A-priority"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "A-priority-unknown-group": {
   "criteria": [
    "A-priority"
   ],
@@ -314,6 +371,16 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "B-pass-repeated-event": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "B-pass-worker-pool-scale-up": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "B-pending-pods": {
   "criteria": [
    "B-placement"
@@ -341,6 +408,13 @@
  "B-primary-not-restored": {
   "criteria": [
    "B-restored"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-priority-combined-event": {
+  "criteria": [
+   "B-priority"
   ],
   "pass": false,
   "ready_for_migration": false

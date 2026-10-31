@@ -486,6 +486,20 @@ def runner_job(item):
     return {field: status.get(field) for field in ER_JOB_FIELDS if status.get(field) not in (None, "", 0)}
 
 
+RUNNER_LABEL = ("node-type", "github-runner")
+RUNNER_TAINT_KEY = "github-runner"
+
+
+def node_pool_identity(entry):
+    """A node pool's ID, name, labels, taints and whether it is a runner pool
+    (runner label node-type=github-runner or the github-runner taint)."""
+    labels = entry.get("labels") or {}
+    taints = [{str(key).lower(): value for key, value in taint.items()}
+              for taint in entry.get("taints") or [] if isinstance(taint, dict)]
+    runner = labels.get(RUNNER_LABEL[0]) == RUNNER_LABEL[1] or any(t.get("key") == RUNNER_TAINT_KEY for t in taints)
+    return {"id": entry.get("id"), "name": entry.get("name"), "labels": labels, "taints": taints, "runner": runner}
+
+
 def pool_summary(pools, registered):
     summary = {}
     for entry in pools:
@@ -594,6 +608,10 @@ def snapshot(state, final=False):
     for item in nodes:
         registered[node_pool_of(item)] = registered.get(node_pool_of(item), 0) + 1
     summary = pool_summary(pools, registered)
+    # Every node pool of the cluster with its labels and taints, so the
+    # verdict can resolve a scale-up event's node group ID and tell runner
+    # pools from pools that cannot host runner pods (Ruling 46).
+    state["node_pools"] = [node_pool_identity(entry) for entry in pools if isinstance(entry, dict)]
     # The autoscaler's per-pool targets (count) over time, kept as
     # diagnostics: periodic reads cannot order scale-up decisions, which the
     # verdict judges from the autoscaler's scale-up events (Ruling 44 revised).
@@ -994,6 +1012,7 @@ def cmd_finalize(args):
             "latest_collection_at": state["latest_collection"]["at"],
             "pod_collections": state.get("pod_collections") or [],
             "pool_collections": state.get("pool_collections") or [],
+            "node_pools": state.get("node_pools") or [],
             "pools_before": state["pools_before"], "pools_after": state.get("pools_latest"),
             "arc_contract_after": arc_contract(state), "phase_c": None,
             "trust_readback": None, "expander_readback": expander_readback(state),

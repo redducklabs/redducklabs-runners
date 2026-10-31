@@ -318,8 +318,19 @@ kubectl -n arc-runners get ephemeralrunners -o json \
 
 Dispatch at a quiet time and re-run the phase if a job arrived anyway.
 `A-priority` / `B-priority` read the cluster-autoscaler's `TriggeredScaleUp`
-and `ScaledUpGroup` events: in A every scale-up must name only the primary
-node pool ID, in B only the fallback's.
+and `ScaledUpGroup` events, aggregated "(combined from similar events): "
+messages included. In A (Ruling 45) every fallback scale-up must come strictly
+after a primary scale-up to 6 of 6; fallback nodes without runner pods are
+reported as a cost signal and do not fail A (a from-zero burst can add up to
+two extra fallback nodes for ten minutes or more while the primary nodes boot).
+Only runner node groups are judged (Ruling 46): a scale-up of a pool that
+cannot host runner pods (for example `worker-pool`) is noted as unrelated
+demand, while one naming the baseline or an unknown node group ID fails.
+In B every scale-up must name only the fallback, and an aggregated
+"(combined from similar events): " event fails `B-priority` (its earlier
+occurrences may have named the primary); re-run Phase B if it happens. The
+extra fallback nodes' cost is read from their measured lifetime in the Runner
+Cost Report.
 
 Pickup thresholds for phases A, B and E: warm pickup p95 ≤ 90 s, cold pickup
 p95 ≤ 8 minutes (a job is cold when its runner's node was created after the job
@@ -435,7 +446,7 @@ anchor runs; a rejected anchor run still cancels the verified probe.
 
 | Phase | Setup | Probe | Evidence dispatch | Pass criteria |
 |---|---|---|---|---|
-| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=14` (16 runner pods), `network_targets` | `phase=A`, probe | 14 distinct concurrent runners; during the hold, of every runner pod of the scale set (probe and idle), exactly 4 on baseline and 12 on the primary pool, none elsewhere, and no fallback node; no other run's job on the fleet during the hold (`A-shared-fleet`); every cluster-autoscaler scale-up event names only the primary (`A-priority`); `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
+| A. Primary burst from zero | burst pools at 0 nodes; expander configured; runner network policy set valid | `batch`, `jobs=14` (16 runner pods), `network_targets` | `phase=A`, probe | 14 distinct concurrent runners; during the hold, of every runner pod of the scale set (probe and idle), exactly 4 on baseline and 12 on the primary pool, none elsewhere, and no runner pod on the fallback in any in-hold collection (fallback nodes alone are a reported cost, Ruling 45); no other run's job on the fleet during the hold (`A-shared-fleet`); every fallback scale-up strictly after a primary scale-up to 6 of 6 (`A-priority`); `A-compatibility`: a passing pool-state check (compatibility, headroom) covering every primary node, the first live measurement of `s-8vcpu-16gb-amd` allocatable; no burst node predates the probe; expander readback; pickup thresholds; `A-network`: the `network-probe` job succeeded on a fleet runner, every allowed target connected and every forbidden target timed out, and the evidence workflow resolved the targets in the cluster (a `worker-pool` node's InternalIP, a baseline node's InternalIP, a runner node's ExternalIP, the `default/kubernetes` ClusterIP, a declared port of a ClusterIP service and of a pod outside `arc-runners` that is not a kube-dns pod) |
 | B. Fallback from zero | `set-burst-maxima primary_max=0 fallback_max=2`; both at 0 nodes | `batch`, `jobs=6` (8 runner pods) | `phase=B`, probe; **after the probe completes, run `set-burst-maxima primary_max=6 fallback_max=2`** (the evidence run waits up to 30 minutes for it) | 6 distinct concurrent runners; during the hold, of every runner pod of the scale set, exactly 4 on baseline and 4 on exactly two new fallback nodes, none on the primary and none unscheduled; no other run's job on the fleet during the hold (`B-shared-fleet`); every cluster-autoscaler scale-up event names only the fallback (`B-priority`); a passing pool-state check (compatibility, headroom) covering both fallback nodes, the first live measurement of `s-8vcpu-16gb-intel` allocatable; primary back at 0/6; pickup thresholds |
 | C. Idle retirement and return to zero | after A, pools at 0 nodes | none | dispatch Scale Runners `acceptance-phase-c`, then `phase=C`, `phase_c_run_id` | every cycle 4 baseline + 4 burst at minRunners=8 with nothing retired; a burst survivor retired (or three cycles recorded `fixture-only`, which passes with a tracked follow-up); burst pools at zero nodes within 60 minutes; `jobs_killed=0` (fleet jobs, on `redducklabs-runners-*` runners, cancelled or failed with `completed_at` inside the Phase C run, in every attempt of every workflow run created up to 65 days before it, measured by the evidence workflow); ARC `burst` |
 | D. Drain under continuing load | after C | `continuous` | start the probe, wait until about 12 entries run, dispatch Deploy `drain`, then `phase=D`, probe, `drain_run_id` | drain run is this repository's Deploy `drain` at `$SHA`, success; ≥ 8 entries in progress when its "Drain runners" step started; ≥ 1 in progress throughout until it completed; entries still queued or running when it completed; every entry succeeded; every scheduled runner pod created after the drain READBACK is on baseline (pods never seen scheduled are reported, not failed); no `TriggeredScaleUp` for a runner pod after it; burst pools at zero nodes; ARC `drain` |
@@ -687,3 +698,11 @@ succeeded; evidence run 40830774010 failed only `A-primary-only`: a
 autoscaler added one fallback node. Pickup and the network probe passed.
 Re-run Phase A on a quiet fleet at the reviewed commit that contains the
 Ruling 44 fix.
+
+2026-10-31, at main `bab889a`: Phase A attempt 3: probe run 40897316886
+succeeded; evidence run 40897337833 placed 4 baseline + 12 primary runner pods
+but failed `A-primary-only` (two fallback nodes registered, no runner pod on
+them) and `A-priority` (an aggregated "(combined from similar events): "
+message did not parse, and fallback scale-ups failed the old rule). The
+fallback was raised only after the primary was at 6 of 6 (Ruling 45). Re-run
+Phase A at the reviewed commit that contains the Ruling 45 fix.
