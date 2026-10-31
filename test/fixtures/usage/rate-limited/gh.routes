@@ -1,4 +1,4 @@
 api --paginate --slurp orgs/redducklabs/repos?type=all&per_page=100|repos.json
-api --paginate --slurp repos/redducklabs/zz-alpha-app/actions/runs?created=2026-09-23T00:00:00Z..2026-10-26T00:00:00Z&per_page=100|runs.json
+api --paginate --slurp repos/redducklabs/zz-alpha-app/actions/runs?created=2026-09-18T00:00:00Z..2026-10-26T00:00:00Z&per_page=100|runs.json
 api --paginate --slurp repos/redducklabs/zz-alpha-app/actions/runs/30/jobs?filter=all&per_page=100|jobs.json
 api rate_limit|rate_limit.json

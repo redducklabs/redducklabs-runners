@@ -532,8 +532,10 @@ operator's terminal, the workflow never passes it, and the script refuses it
 when `GITHUB_ACTIONS=true`.
 
 For every non-archived repository of `redducklabs` it lists the workflow runs
-created from 32 days before the window (a re-run keeps its run's creation time
-and GitHub allows re-runs for 30 days; the rest is queueing margin), bisecting
+created from 37 days before the window (a re-run keeps its run's creation
+time; GitHub allows re-runs for 30 days and a workflow run lives at most 35
+days, so a job overlapping the window belongs to a run created at most 35 days
+before it; the rest is queueing margin), bisecting
 any created range above the API's 1000-result search cap, reads the jobs of
 every attempt (`filter=all`), and counts each job that started in the window:
 

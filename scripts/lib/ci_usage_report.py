@@ -35,11 +35,13 @@ rate-limited response waits for the primary limit's reset time, or one minute
 for a secondary limit, and fails the read if that wait exceeds
 RATE_LIMIT_MAX_WAIT_SECONDS.
 
-Run discovery. A re-run keeps its run's original created_at, and GitHub allows
-re-runs up to 30 days after the initial run, so runs are listed from
-RERUN_LOOKBACK_DAYS (30 days plus a margin for a re-run's jobs queueing before
-they start) before the window. A completed run last updated before the window
-is skipped without reading its jobs.
+Run discovery. A re-run keeps its run's original created_at. GitHub allows
+re-runs up to 30 days after the initial run, a self-hosted job may then run
+for up to 5 days, and a workflow run lives at most 35 days, so a job that
+overlaps the window belongs to a run created at most 35 days before the
+window starts. Runs are listed from RERUN_LOOKBACK_DAYS (35 days plus one day
+for a job to queue and one day of margin) before the window. A completed run
+last updated before the window is skipped without reading its jobs.
 
 Selection. Job counts, minutes, cost and queue wait use the jobs that started
 in the window. The concurrency profile uses every fleet job whose interval
@@ -84,9 +86,10 @@ FLEET_RUNNER_PREFIX = "redducklabs-runners-"
 HOSTED_GROUP = "GitHub Actions"
 RUN_LIST_CAP = 1000
 RUN_MIN_SLICE_SECONDS = 3600
-# 30-day re-run horizon, plus one day for a re-run's jobs to queue (GitHub
-# fails a job still queued after 24 hours) and one day of margin.
-RERUN_LOOKBACK_DAYS = 32
+# 35-day workflow-run lifetime (a re-run up to 30 days after creation, then
+# up to 5 days of self-hosted job execution), plus one day for a job to queue
+# (GitHub fails a job still queued after 24 hours) and one day of margin.
+RERUN_LOOKBACK_DAYS = 37
 READ_ATTEMPTS = 3
 READ_BACKOFF_SECONDS = (5, 15)
 JOB_READ_WORKERS = 6
@@ -601,8 +604,8 @@ def markdown(report):
               "| Concurrent fleet jobs | Minutes |", "|---:|---:|"]
     lines += [f"| {level} | {fmt_minutes(minutes)} |" for level, minutes in concurrency["minutes_by_level"].items()]
     lines += ["", "</details>", "",
-              f"Runs are discovered from {RERUN_LOOKBACK_DAYS} days before the window (GitHub's 30-day re-run horizon "
-              "plus queueing margin). Queue wait is started_at - created_at of each fleet job that started in the "
+              f"Runs are discovered from {RERUN_LOOKBACK_DAYS} days before the window (GitHub's 35-day workflow-run "
+              "lifetime plus queueing margin). Queue wait is started_at - created_at of each fleet job that started in the "
               "window, including any wait for a burst node to boot."]
     return "\n".join(lines) + "\n"
 

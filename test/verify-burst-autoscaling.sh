@@ -4220,7 +4220,7 @@ assert_ci_usage_report() {
     fi
     usage_json_check "reports the 7-day window ending at --end and reads every non-archived repository" '
 assert r["window"]["start"] == "2026-10-19T00:00:00Z" and r["window"]["end"] == "2026-10-26T00:00:00Z", r["window"]
-assert r["window"]["rerun_lookback_days"] == 32
+assert r["window"]["rerun_lookback_days"] == 37
 assert r["complete"] and r["repositories_read"] == 3 and r["per_repository"], r
 assert [row["repository"] for row in r["repositories"]] == ["zz-alpha-app", "zz-beta-site", "zz-gamma-tool"]'
     usage_json_check "counts fleet jobs of every attempt that started in the window, including a re-run of a 10-day-old run" '
@@ -4265,16 +4265,16 @@ p = r["pricing"]
 assert p["source"] == "https://docs.github.com/en/billing/reference/actions-runner-pricing" and p["retrieved"] == "2026-10-29", p
 assert p["usd_per_minute"]["actions_linux"] == 0.006'
     if [ "$(grep -c 'zz-gamma-tool/actions/runs/10/jobs' "${USAGE_DIR}/gh.calls")" -eq 1 ] \
-        && grep -q 'zz-gamma-tool/actions/runs?created=2026-09-17T00:00:00Z..2026-10-06T12:00:00Z' "${USAGE_DIR}/gh.calls" \
-        && grep -q 'zz-gamma-tool/actions/runs?created=2026-10-06T12:00:00Z..2026-10-26T00:00:00Z' "${USAGE_DIR}/gh.calls"; then
+        && grep -q 'zz-gamma-tool/actions/runs?created=2026-09-12T00:00:00Z..2026-10-04T00:00:00Z' "${USAGE_DIR}/gh.calls" \
+        && grep -q 'zz-gamma-tool/actions/runs?created=2026-10-04T00:00:00Z..2026-10-26T00:00:00Z' "${USAGE_DIR}/gh.calls"; then
         pass "usage report bisects a created range over the 1000-result cap and reads an overlapping run once"
     else
         fail "usage report range split or deduplication is wrong ($(tr '\n' '|' < "${USAGE_DIR}/gh.calls" | head -c 600))"
     fi
-    if grep -q 'zz-alpha-app/actions/runs?created=2026-09-17T00:00:00Z..2026-10-26T00:00:00Z' "${USAGE_DIR}/gh.calls"; then
-        pass "usage report discovers runs from 32 days before the window (30-day re-run horizon plus queueing margin)"
+    if grep -q 'zz-alpha-app/actions/runs?created=2026-09-12T00:00:00Z..2026-10-26T00:00:00Z' "${USAGE_DIR}/gh.calls"; then
+        pass "usage report discovers runs from 37 days before the window (35-day run lifetime plus queueing margin)"
     else
-        fail "usage report run discovery does not start 32 days before the window"
+        fail "usage report run discovery does not start 37 days before the window"
     fi
     if ! grep -Eq 'runs/3/jobs|repos/redducklabs/zz-delta-old/' "${USAGE_DIR}/gh.calls"; then
         pass "usage report skips completed runs updated before the window and archived repositories"
@@ -4312,6 +4312,21 @@ assert p["usd_per_minute"]["actions_linux"] == 0.006'
     usage_json_check "aggregate JSON has no per-repository section" '
 assert "repositories" not in r and "unreadable_repositories" not in r and r["per_repository"] is False, sorted(r)
 assert r["totals"]["fleet_jobs"] == 6 and r["fleet_concurrency"]["max"] == 3'
+
+    # A run created before the old 32-day cutoff, re-run 29.5 days later; its
+    # fleet job runs 5 days and carries 12 hours into the window.
+    run_usage long-carry-in "$end_epoch" --end 2026-10-26T00:00:00Z --json "$USAGE_JSON"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        usage_json_check "counts a fleet job of a run created 34 days before the window in concurrency only, complete" '
+assert r["complete"], r
+c = r["fleet_concurrency"]
+assert c["minutes_by_level"] == {"0": 10080 - 720, "1": 720}, c["minutes_by_level"]
+assert c["max"] == 1, c
+assert r["totals"]["fleet_jobs"] == 0 and r["fleet_queue_wait"]["jobs"] == 0, (r["totals"], r["fleet_queue_wait"])'
+    else
+        fail "usage report long carry-in scenario exit ${rc} ($(head -c 300 "$USAGE_ERR" | tr '\n' ' '))"
+    fi
 
     # saturated: concurrency 4 all day, 16 for 11 hours and 20 for one hour.
     run_usage saturated "$end_epoch" --days 1 --json "$USAGE_JSON"
