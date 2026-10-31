@@ -896,10 +896,12 @@ was set 0→2→3→6 between 15:01:36 and 15:01:41, its six nodes were created 
 which `NotTriggerScaleUp` reported "max node group size reached". The
 autoscaler over-estimated demand from template allocatable while the primary
 nodes were still booting; the fallback nodes registered at 15:04:03 and no
-runner pod ever ran on them. That is a cost, not a priority failure: a
-from-zero burst can add up to two extra fallback nodes for roughly ten minutes
-or more until scale-down removes them (two fallback node-hours at most per
-such burst, $0.16667 each).
+runner pod ever ran on them. That is a cost, not a priority failure: attempt 3
+added two extra fallback nodes (the fallback maximum) during a from-zero burst,
+and they stay until the autoscaler's scale-down removes them, ten minutes or
+more after they become unneeded. Nothing here bounds that lifetime; the cost is
+read from measured node lifetime (Runner Cost Report), at $0.16667 per
+fallback node-hour.
 
 - `A-priority` passes only if at least one scale-up event names the primary,
   no event names a group other than the primary and the fallback, and every
@@ -918,8 +920,10 @@ such burst, $0.16667 each).
 - `A-primary-only` no longer fails on fallback nodes: no in-hold collection may
   show a runner pod on the fallback, and the latest must show exactly 4
   baseline and 12 primary. The verdict notes the number of fallback nodes as a
-  cost signal. `B-priority` is unchanged: every scale-up names only the
-  fallback.
+  cost signal. `B-priority` still requires every scale-up to name only the
+  fallback, and now also fails on any aggregated event, because the groups of
+  its earlier occurrences cannot be established (PR #45 review 1); repeated
+  identical-message events without the prefix are judged by their message.
 
 DigitalOcean permits `min_nodes=max_nodes=0` on an autoscaling pool; Phase B
 uses that to make the fallback the only eligible burst group. There is no

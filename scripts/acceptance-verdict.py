@@ -480,7 +480,8 @@ def check_scale_up_priority(phase, evidence, failures, notes):
     not parse fails closed.
 
     Phase B: every event names only the fallback group (the primary is 0/0),
-    and at least one does.
+    and at least one does; an aggregated (combined) event fails, because the
+    groups of its earlier occurrences cannot be established.
 
     Phase A (Ruling 45): at least one event names the primary, no event names
     any other group but the fallback, and every event that may stand for a
@@ -526,6 +527,16 @@ def check_scale_up_priority(phase, evidence, failures, notes):
         first = ts(event.get("first_timestamp"), "event first_timestamp")
         last = ts(event.get("last_timestamp") or event.get("first_timestamp"), "event last_timestamp")
         earliest = max(first, start) if start is not None else first
+        if combined and phase != "A":
+            # Phase B: an aggregated event keeps only its latest message, so
+            # the groups of its earlier occurrences cannot be established and
+            # one of them may be the forbidden primary; fail closed. Repeated
+            # identical-message events (count > 1, no prefix) are still judged
+            # by their message (PR #45 review 1).
+            failures.append(f"{label}: an aggregated {event.get('reason')} event "
+                            f"({event.get('count')} occurrences from {event.get('first_timestamp')}) hides the node "
+                            f"groups of its earlier scale-ups: {str(event.get('message'))[:120]!r}; "
+                            f"re-run the phase")
         for group, target, maximum in decisions:
             named[group] = named.get(group, 0) + 1
             if phase != "A":

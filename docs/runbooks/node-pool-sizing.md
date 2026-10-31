@@ -290,7 +290,11 @@ messages included. In A (Ruling 45) every fallback scale-up must come strictly
 after a primary scale-up to 6 of 6; fallback nodes without runner pods are
 reported as a cost signal and do not fail A (a from-zero burst can add up to
 two extra fallback nodes for ten minutes or more while the primary nodes boot).
-In B every scale-up must name only the fallback.
+In B every scale-up must name only the fallback, and an aggregated
+"(combined from similar events): " event fails `B-priority` (its earlier
+occurrences may have named the primary); re-run Phase B if it happens. The
+extra fallback nodes' cost is read from their measured lifetime in the Runner
+Cost Report.
 
 Pickup thresholds for phases A, B and E: warm pickup p95 ≤ 90 s, cold pickup
 p95 ≤ 8 minutes (a job is cold when its runner's node was created after the job

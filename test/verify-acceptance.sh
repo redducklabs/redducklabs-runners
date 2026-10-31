@@ -146,6 +146,10 @@ for name, criterion in (("A-priority-fallback-before-primary-max", "A-priority")
                         ("A-priority-combined-before-primary-max", "A-priority"),
                         ("A-pod-on-fallback-early", "A-primary-only")):
     assert expected[name]["criteria"] == [criterion], name
+# PR #45 review 1: an aggregated event fails Phase B; repeated identical
+# messages without the prefix are judged by their message.
+assert expected["B-priority-combined-event"]["criteria"] == ["B-priority"]
+assert expected["B-pass-repeated-event"]["pass"] is True
 PY
     then
         pass "fixtures: every file is expected, each phase has passing and violating cases, cold p95 of 9 minutes fails A/B/E, D has no pickup criterion, only E-pass is ready"

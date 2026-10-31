@@ -347,6 +347,11 @@
   "pass": true,
   "ready_for_migration": false
  },
+ "B-pass-repeated-event": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
  "B-pending-pods": {
   "criteria": [
    "B-placement"
@@ -374,6 +379,13 @@
  "B-primary-not-restored": {
   "criteria": [
    "B-restored"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
+ "B-priority-combined-event": {
+  "criteria": [
+   "B-priority"
   ],
   "pass": false,
   "ready_for_migration": false
