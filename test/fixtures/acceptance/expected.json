@@ -568,29 +568,60 @@
    "D-overlap-continuous"
   ],
   "pass": false,
-  "ready_for_migration": false
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 340
+  }
  },
  "D-gap-over-warm-threshold": {
   "criteria": [
    "D-overlap-continuous"
   ],
   "pass": false,
-  "ready_for_migration": false
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 91
+  }
  },
  "D-pass": {
   "criteria": [],
   "pass": true,
-  "ready_for_migration": false
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 0
+  }
  },
  "D-pass-gap-at-warm-threshold": {
   "criteria": [],
   "pass": true,
-  "ready_for_migration": false
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 90
+  }
  },
  "D-pass-replacement-gap": {
   "criteria": [],
   "pass": true,
-  "ready_for_migration": false
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 18
+  }
+ },
+ "D-pass-trailing-gap-clipped": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 30
+  }
+ },
+ "D-pass-trailing-gap-late-start": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 30
+  }
  },
  "D-pass-unscheduled-pod-after-drain": {
   "criteria": [],
@@ -633,6 +664,16 @@
   ],
   "pass": false,
   "ready_for_migration": false
+ },
+ "D-trailing-gap-over-warm-threshold": {
+  "criteria": [
+   "D-overlap-continuous"
+  ],
+  "pass": false,
+  "ready_for_migration": false,
+  "report": {
+   "max_gap_seconds": 91
+  }
  },
  "E-arc-not-burst": {
   "criteria": [
