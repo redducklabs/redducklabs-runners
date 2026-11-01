@@ -272,14 +272,9 @@ set `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` to that path on the runner.
   the shared `work` volume, and recorded revisions remain valid rollback
   targets. The contract validator and the Deploy admission check pin all of
   this exactly.
-- Transition: until Deploy `deploy` applies the tool cache, the live burst
-  release is the earlier template. The validator therefore also admits that
-  exact pre-tool-cache burst-family template (every tool-cache part absent
-  together). Otherwise every fleet gate, Emergency Stop's readback included,
-  would classify the live fleet as matching no contract. A partial tool cache
-  matches neither template. The Deploy admission check admits only the full
-  tool cache for a new release. Remove the transition variant once the fleet
-  runs the tool cache.
+- The pre-tool-cache burst-family template is no longer admitted: the
+  transition variant that let the earlier live release classify was removed
+  once the fleet was deployed with the tool cache (2026-11-01).
 
 ### Container Network Security
 

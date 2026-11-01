@@ -365,19 +365,18 @@ PY
     expect_reject "drain without the tool-cache volume" drain 2 4 private "$tmp"
     mutate "${WORK_DIR}/acceptance-8.yaml" "$tmp" "${tc_fns}by(doc, 'dind')['volumeMounts'] = [m for m in by(doc, 'dind')['volumeMounts'] if m['name'] != 'tool-cache']"
     expect_reject "burst-acceptance 8/20 without the dind tool-cache mount" burst-acceptance 8 20 private "$tmp"
-    # Transition variant: the live burst release predates the tool cache until
-    # Deploy `deploy` applies it, so the exact pre-tool-cache template (all
-    # tool-cache parts absent together) must still classify; partial ones above
-    # must not.
+    # The pre-tool-cache burst-family template (all tool-cache parts absent
+    # together) was admitted only until the fleet was deployed with the tool
+    # cache; it no longer classifies in any burst-family state.
     local strip_tc="${tc_fns}spec = doc['template']['spec']; spec['volumes'] = [v for v in spec['volumes'] if v['name'] != 'tool-cache']; by(doc, 'dind')['volumeMounts'] = [m for m in by(doc, 'dind')['volumeMounts'] if m['name'] != 'tool-cache']; by(doc, 'runner')['volumeMounts'] = [m for m in by(doc, 'runner')['volumeMounts'] if m['name'] != 'tool-cache']; by(doc, 'runner')['env'] = [e for e in by(doc, 'runner')['env'] if e['name'] not in ('RUNNER_TOOL_CACHE', 'AGENT_TOOLSDIRECTORY')]"
     mutate "$burst" "$tmp" "$strip_tc"
-    expect_accept "pre-tool-cache burst release as burst 2/20 (transition)" burst 2 20 private "$tmp"
+    expect_reject "pre-tool-cache burst release as burst 2/20 (transition variant removed)" burst 2 20 private "$tmp"
     mutate "${WORK_DIR}/acceptance-8.yaml" "$tmp" "$strip_tc"
-    expect_accept "pre-tool-cache burst release as burst-acceptance 8/20 (transition)" burst-acceptance 8 20 private "$tmp"
+    expect_reject "pre-tool-cache burst release as burst-acceptance 8/20 (transition variant removed)" burst-acceptance 8 20 private "$tmp"
     mutate "$drain" "$tmp" "$strip_tc"
-    expect_accept "pre-tool-cache drain release as drain 2/4 (transition)" drain 2 4 private "$tmp"
+    expect_reject "pre-tool-cache drain release as drain 2/4 (transition variant removed)" drain 2 4 private "$tmp"
     mutate "$burst" "$tmp" "${strip_tc}; doc['minRunners'] = 0; doc['maxRunners'] = 0"
-    expect_accept "pre-tool-cache burst release stopped as burst-stopped (transition)" burst-stopped 0 0 private "$tmp"
+    expect_reject "pre-tool-cache burst release stopped as burst-stopped (transition variant removed)" burst-stopped 0 0 private "$tmp"
     mutate "$burst" "$tmp" "${strip_tc}; by(doc, 'runner')['env'] += [{'name': 'RUNNER_TOOL_CACHE', 'value': '/opt/hostedtoolcache'}]"
     expect_reject "pre-tool-cache burst with only RUNNER_TOOL_CACHE (dind cannot see it)" burst 2 20 private "$tmp"
     mutate "$density" "$tmp" "${tc_fns}by(doc, 'runner')['env'] += [{'name': 'RUNNER_TOOL_CACHE', 'value': '/opt/hostedtoolcache'}]"
