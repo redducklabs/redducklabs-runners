@@ -481,6 +481,12 @@ def gh(sim, args):
         if parts[3:5] == ["git", "ref"] and parts[5] == "tags":
             tag = sim.scenario["tags"].get("/".join(parts[6:]))
             return out({"object": {"type": tag["type"], "sha": tag["sha"]}}) if tag else 1
+        if parts[3] == "compare" and len(parts) == 5:
+            # scenario "compare" maps "BASE...HEAD" to the API status (ahead,
+            # behind, diverged); an unlisted pair is an unknown commit (404).
+            base, head = parts[4].split("...", 1)
+            status = "identical" if base == head else (sim.scenario.get("compare") or {}).get(parts[4])
+            return out({"status": status}) if status else 1
         if parts[3:5] == ["git", "tags"]:
             for tag in sim.scenario["tags"].values():
                 if tag["sha"] == parts[5]:
@@ -566,6 +572,11 @@ def kubectl(sim, args):
     scenario = sim.scenario
     if args[:2] == ["config", "use-context"]:
         return 0
+    if args[0] == "get" and not os.path.exists(os.path.join(sim.directory, "kubeconfig")):
+        # Like kubectl without a kubeconfig: it dials the default localhost:8080.
+        print('couldn't get current server API group list: Get "http://localhost:8080/api?timeout=32s": '
+              "dial tcp [::1]:8080: connect: connection refused", file=sys.stderr)
+        return 1
     if args == ["config", "current-context"]:
         print("do-sfo3-redducklabs-cluster")
         return 0
@@ -596,7 +607,10 @@ def kubectl(sim, args):
 
 def doctl(sim, args):
     line = " ".join(args)
-    if args[:2] == ["auth", "init"] or args[:4] == ["kubernetes", "cluster", "kubeconfig", "save"]:
+    if args[:2] == ["auth", "init"]:
+        return 0
+    if args[:4] == ["kubernetes", "cluster", "kubeconfig", "save"]:
+        open(os.path.join(sim.directory, "kubeconfig"), "w", encoding="utf-8").close()
         return 0
     if line == "kubernetes cluster list -o json":
         return out([sim.scenario["cluster"]])
