@@ -570,7 +570,24 @@
   "pass": false,
   "ready_for_migration": false
  },
+ "D-gap-over-warm-threshold": {
+  "criteria": [
+   "D-overlap-continuous"
+  ],
+  "pass": false,
+  "ready_for_migration": false
+ },
  "D-pass": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "D-pass-gap-at-warm-threshold": {
+  "criteria": [],
+  "pass": true,
+  "ready_for_migration": false
+ },
+ "D-pass-replacement-gap": {
   "criteria": [],
   "pass": true,
   "ready_for_migration": false

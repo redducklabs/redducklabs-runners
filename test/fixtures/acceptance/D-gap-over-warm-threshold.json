@@ -1,0 +1,1365 @@
+{
+  "arc_contract_after": "drain",
+  "events": [],
+  "expander_readback": {
+    "expanders": [
+      "priority",
+      "random"
+    ],
+    "managed": true,
+    "priorities": {
+      "1": [
+        ".*"
+      ],
+      "100": [
+        "pool-pri"
+      ],
+      "50": [
+        "pool-fb"
+      ]
+    }
+  },
+  "expected_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "nodes": [
+    {
+      "created_at": "2026-10-01T00:00:00Z",
+      "kubelet_version": "v1.36.2",
+      "name": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "ready_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "created_at": "2026-10-01T00:00:00Z",
+      "kubelet_version": "v1.36.2",
+      "name": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "ready_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "created_at": "2026-11-02T18:01:00Z",
+      "kubelet_version": "v1.36.2",
+      "name": "p1",
+      "pool": "github-runners-burst-amd-16g",
+      "ready_at": "2026-11-02T18:01:00Z"
+    },
+    {
+      "created_at": "2026-11-02T18:01:00Z",
+      "kubelet_version": "v1.36.2",
+      "name": "p2",
+      "pool": "github-runners-burst-amd-16g",
+      "ready_at": "2026-11-02T18:01:00Z"
+    },
+    {
+      "created_at": "2026-11-02T18:01:00Z",
+      "kubelet_version": "v1.36.2",
+      "name": "p3",
+      "pool": "github-runners-burst-amd-16g",
+      "ready_at": "2026-11-02T18:01:00Z"
+    },
+    {
+      "created_at": "2026-11-02T18:01:00Z",
+      "kubelet_version": "v1.36.2",
+      "name": "p4",
+      "pool": "github-runners-burst-amd-16g",
+      "ready_at": "2026-11-02T18:01:00Z"
+    }
+  ],
+  "phase": "D",
+  "phase_c": null,
+  "pods": [
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:00:10Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr1",
+      "uid": "uid-dr1"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:00:10Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr2",
+      "uid": "uid-dr2"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:00:10Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr3",
+      "uid": "uid-dr3"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:00:10Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr4",
+      "uid": "uid-dr4"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p1",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr5",
+      "uid": "uid-dr5"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p1",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr6",
+      "uid": "uid-dr6"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p2",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr7",
+      "uid": "uid-dr7"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p2",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr8",
+      "uid": "uid-dr8"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p3",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr9",
+      "uid": "uid-dr9"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p3",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr10",
+      "uid": "uid-dr10"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p4",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr11",
+      "uid": "uid-dr11"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:04:40Z",
+      "node": "p4",
+      "pool": "github-runners-burst-amd-16g",
+      "runner_name": "dr12",
+      "uid": "uid-dr12"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:05:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr13",
+      "uid": "uid-dr13"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:05:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr14",
+      "uid": "uid-dr14"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:05:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr15",
+      "uid": "uid-dr15"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:05:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr16",
+      "uid": "uid-dr16"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:10:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr17",
+      "uid": "uid-dr17"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:10:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr18",
+      "uid": "uid-dr18"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:10:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr19",
+      "uid": "uid-dr19"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:10:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr20",
+      "uid": "uid-dr20"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:15:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr21",
+      "uid": "uid-dr21"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:15:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr22",
+      "uid": "uid-dr22"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:15:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr23",
+      "uid": "uid-dr23"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:15:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr24",
+      "uid": "uid-dr24"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:20:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr25",
+      "uid": "uid-dr25"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:20:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr26",
+      "uid": "uid-dr26"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:20:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr27",
+      "uid": "uid-dr27"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:20:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr28",
+      "uid": "uid-dr28"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:25:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr29",
+      "uid": "uid-dr29"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:25:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr30",
+      "uid": "uid-dr30"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:25:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr31",
+      "uid": "uid-dr31"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:25:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr32",
+      "uid": "uid-dr32"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:30:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr33",
+      "uid": "uid-dr33"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:30:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr34",
+      "uid": "uid-dr34"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:30:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr35",
+      "uid": "uid-dr35"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:30:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr36",
+      "uid": "uid-dr36"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:35:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr37",
+      "uid": "uid-dr37"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:35:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr38",
+      "uid": "uid-dr38"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:35:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr39",
+      "uid": "uid-dr39"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:35:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr40",
+      "uid": "uid-dr40"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:40:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr41",
+      "uid": "uid-dr41"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:40:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr42",
+      "uid": "uid-dr42"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:40:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr43",
+      "uid": "uid-dr43"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:40:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr44",
+      "uid": "uid-dr44"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:45:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr45",
+      "uid": "uid-dr45"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:45:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr46",
+      "uid": "uid-dr46"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:45:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr47",
+      "uid": "uid-dr47"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:45:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr48",
+      "uid": "uid-dr48"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:50:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr49",
+      "uid": "uid-dr49"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:50:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr50",
+      "uid": "uid-dr50"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:50:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr51",
+      "uid": "uid-dr51"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:50:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr52",
+      "uid": "uid-dr52"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:55:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr53",
+      "uid": "uid-dr53"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:55:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr54",
+      "uid": "uid-dr54"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:55:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr55",
+      "uid": "uid-dr55"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T18:55:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr56",
+      "uid": "uid-dr56"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:00:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr57",
+      "uid": "uid-dr57"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:00:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr58",
+      "uid": "uid-dr58"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:00:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr59",
+      "uid": "uid-dr59"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:00:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr60",
+      "uid": "uid-dr60"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:05:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr61",
+      "uid": "uid-dr61"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:05:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr62",
+      "uid": "uid-dr62"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:05:40Z",
+      "node": "baseline-a",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr63",
+      "uid": "uid-dr63"
+    },
+    {
+      "annotations": {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+      },
+      "created_at": "2026-11-02T19:05:40Z",
+      "node": "baseline-b",
+      "pool": "github-runners-pool-16g",
+      "runner_name": "dr64",
+      "uid": "uid-dr64"
+    }
+  ],
+  "pool_state_checks": [],
+  "pools_after": {
+    "github-runners-burst-amd-16g": {
+      "count": 0,
+      "id": "pool-pri",
+      "max": 6,
+      "min": 0,
+      "nodes": 0
+    },
+    "github-runners-burst-intel-16g": {
+      "count": 0,
+      "id": "pool-fb",
+      "max": 2,
+      "min": 0,
+      "nodes": 0
+    },
+    "github-runners-pool-16g": {
+      "count": 2,
+      "id": "pool-base",
+      "max": 2,
+      "min": 2,
+      "nodes": 2
+    }
+  },
+  "pools_before": {
+    "github-runners-burst-amd-16g": {
+      "count": 0,
+      "id": "pool-pri",
+      "max": 6,
+      "min": 0,
+      "nodes": 0
+    },
+    "github-runners-burst-intel-16g": {
+      "count": 0,
+      "id": "pool-fb",
+      "max": 2,
+      "min": 0,
+      "nodes": 0
+    },
+    "github-runners-pool-16g": {
+      "count": 2,
+      "id": "pool-base",
+      "max": 2,
+      "min": 2,
+      "nodes": 2
+    }
+  },
+  "probe": {
+    "dispatch_tag": "runner-burst-acceptance-2026-11-02-a",
+    "drain": {
+      "completed": "2026-11-02T18:40:00Z",
+      "conclusion": "success",
+      "effective": "2026-11-02T18:09:00Z",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "operation_job": "Drain Burst Runners",
+      "repository": "redducklabs/redducklabs-runners",
+      "run_id": 444,
+      "started": "2026-11-02T18:08:00Z",
+      "workflow_path": ".github/workflows/deploy-runners.yml"
+    },
+    "expected_workflow_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "repository": "redducklabs/aurolegal.ai",
+    "run": {
+      "attempt": 1,
+      "conclusion": "success",
+      "created_at": "2026-11-02T18:00:00Z",
+      "event": "workflow_dispatch",
+      "head_branch": "runner-burst-acceptance-2026-11-02-a",
+      "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "id": 777,
+      "jobs": [
+        {
+          "completed_at": "2026-11-02T18:05:30Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9001,
+          "name": "continuous 1",
+          "runner_name": "dr1",
+          "started_at": "2026-11-02T18:00:30Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:05:30Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9002,
+          "name": "continuous 2",
+          "runner_name": "dr2",
+          "started_at": "2026-11-02T18:00:30Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:05:30Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9003,
+          "name": "continuous 3",
+          "runner_name": "dr3",
+          "started_at": "2026-11-02T18:00:30Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:05:30Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9004,
+          "name": "continuous 4",
+          "runner_name": "dr4",
+          "started_at": "2026-11-02T18:00:30Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9005,
+          "name": "continuous 5",
+          "runner_name": "dr5",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9006,
+          "name": "continuous 6",
+          "runner_name": "dr6",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9007,
+          "name": "continuous 7",
+          "runner_name": "dr7",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9008,
+          "name": "continuous 8",
+          "runner_name": "dr8",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9009,
+          "name": "continuous 9",
+          "runner_name": "dr9",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9010,
+          "name": "continuous 10",
+          "runner_name": "dr10",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9011,
+          "name": "continuous 11",
+          "runner_name": "dr11",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:10:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:00:00Z",
+          "id": 9012,
+          "name": "continuous 12",
+          "runner_name": "dr12",
+          "started_at": "2026-11-02T18:05:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:05:30Z",
+          "id": 9013,
+          "name": "continuous 13",
+          "runner_name": "dr13",
+          "started_at": "2026-11-02T18:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:05:30Z",
+          "id": 9014,
+          "name": "continuous 14",
+          "runner_name": "dr14",
+          "started_at": "2026-11-02T18:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:05:30Z",
+          "id": 9015,
+          "name": "continuous 15",
+          "runner_name": "dr15",
+          "started_at": "2026-11-02T18:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:05:30Z",
+          "id": 9016,
+          "name": "continuous 16",
+          "runner_name": "dr16",
+          "started_at": "2026-11-02T18:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:16:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9017,
+          "name": "continuous 17",
+          "runner_name": "dr17",
+          "started_at": "2026-11-02T18:12:31Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:16:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9018,
+          "name": "continuous 18",
+          "runner_name": "dr18",
+          "started_at": "2026-11-02T18:12:31Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:16:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9019,
+          "name": "continuous 19",
+          "runner_name": "dr19",
+          "started_at": "2026-11-02T18:12:31Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:16:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9020,
+          "name": "continuous 20",
+          "runner_name": "dr20",
+          "started_at": "2026-11-02T18:12:31Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:21:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9021,
+          "name": "continuous 21",
+          "runner_name": "dr21",
+          "started_at": "2026-11-02T18:16:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:21:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9022,
+          "name": "continuous 22",
+          "runner_name": "dr22",
+          "started_at": "2026-11-02T18:16:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:21:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9023,
+          "name": "continuous 23",
+          "runner_name": "dr23",
+          "started_at": "2026-11-02T18:16:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:21:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:10:00Z",
+          "id": 9024,
+          "name": "continuous 24",
+          "runner_name": "dr24",
+          "started_at": "2026-11-02T18:16:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:26:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:11:00Z",
+          "id": 9025,
+          "name": "continuous 25",
+          "runner_name": "dr25",
+          "started_at": "2026-11-02T18:21:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:26:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:11:00Z",
+          "id": 9026,
+          "name": "continuous 26",
+          "runner_name": "dr26",
+          "started_at": "2026-11-02T18:21:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:26:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:11:00Z",
+          "id": 9027,
+          "name": "continuous 27",
+          "runner_name": "dr27",
+          "started_at": "2026-11-02T18:21:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:26:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:11:00Z",
+          "id": 9028,
+          "name": "continuous 28",
+          "runner_name": "dr28",
+          "started_at": "2026-11-02T18:21:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:31:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:16:00Z",
+          "id": 9029,
+          "name": "continuous 29",
+          "runner_name": "dr29",
+          "started_at": "2026-11-02T18:26:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:31:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:16:00Z",
+          "id": 9030,
+          "name": "continuous 30",
+          "runner_name": "dr30",
+          "started_at": "2026-11-02T18:26:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:31:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:16:00Z",
+          "id": 9031,
+          "name": "continuous 31",
+          "runner_name": "dr31",
+          "started_at": "2026-11-02T18:26:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:31:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:16:00Z",
+          "id": 9032,
+          "name": "continuous 32",
+          "runner_name": "dr32",
+          "started_at": "2026-11-02T18:26:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:36:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:21:00Z",
+          "id": 9033,
+          "name": "continuous 33",
+          "runner_name": "dr33",
+          "started_at": "2026-11-02T18:31:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:36:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:21:00Z",
+          "id": 9034,
+          "name": "continuous 34",
+          "runner_name": "dr34",
+          "started_at": "2026-11-02T18:31:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:36:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:21:00Z",
+          "id": 9035,
+          "name": "continuous 35",
+          "runner_name": "dr35",
+          "started_at": "2026-11-02T18:31:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:36:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:21:00Z",
+          "id": 9036,
+          "name": "continuous 36",
+          "runner_name": "dr36",
+          "started_at": "2026-11-02T18:31:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:41:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:26:00Z",
+          "id": 9037,
+          "name": "continuous 37",
+          "runner_name": "dr37",
+          "started_at": "2026-11-02T18:36:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:41:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:26:00Z",
+          "id": 9038,
+          "name": "continuous 38",
+          "runner_name": "dr38",
+          "started_at": "2026-11-02T18:36:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:41:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:26:00Z",
+          "id": 9039,
+          "name": "continuous 39",
+          "runner_name": "dr39",
+          "started_at": "2026-11-02T18:36:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:41:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:26:00Z",
+          "id": 9040,
+          "name": "continuous 40",
+          "runner_name": "dr40",
+          "started_at": "2026-11-02T18:36:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:46:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:31:00Z",
+          "id": 9041,
+          "name": "continuous 41",
+          "runner_name": "dr41",
+          "started_at": "2026-11-02T18:41:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:46:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:31:00Z",
+          "id": 9042,
+          "name": "continuous 42",
+          "runner_name": "dr42",
+          "started_at": "2026-11-02T18:41:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:46:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:31:00Z",
+          "id": 9043,
+          "name": "continuous 43",
+          "runner_name": "dr43",
+          "started_at": "2026-11-02T18:41:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:46:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:31:00Z",
+          "id": 9044,
+          "name": "continuous 44",
+          "runner_name": "dr44",
+          "started_at": "2026-11-02T18:41:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:51:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:36:00Z",
+          "id": 9045,
+          "name": "continuous 45",
+          "runner_name": "dr45",
+          "started_at": "2026-11-02T18:46:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:51:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:36:00Z",
+          "id": 9046,
+          "name": "continuous 46",
+          "runner_name": "dr46",
+          "started_at": "2026-11-02T18:46:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:51:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:36:00Z",
+          "id": 9047,
+          "name": "continuous 47",
+          "runner_name": "dr47",
+          "started_at": "2026-11-02T18:46:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:51:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:36:00Z",
+          "id": 9048,
+          "name": "continuous 48",
+          "runner_name": "dr48",
+          "started_at": "2026-11-02T18:46:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:56:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:41:00Z",
+          "id": 9049,
+          "name": "continuous 49",
+          "runner_name": "dr49",
+          "started_at": "2026-11-02T18:51:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:56:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:41:00Z",
+          "id": 9050,
+          "name": "continuous 50",
+          "runner_name": "dr50",
+          "started_at": "2026-11-02T18:51:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:56:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:41:00Z",
+          "id": 9051,
+          "name": "continuous 51",
+          "runner_name": "dr51",
+          "started_at": "2026-11-02T18:51:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T18:56:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:41:00Z",
+          "id": 9052,
+          "name": "continuous 52",
+          "runner_name": "dr52",
+          "started_at": "2026-11-02T18:51:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:01:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:46:00Z",
+          "id": 9053,
+          "name": "continuous 53",
+          "runner_name": "dr53",
+          "started_at": "2026-11-02T18:56:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:01:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:46:00Z",
+          "id": 9054,
+          "name": "continuous 54",
+          "runner_name": "dr54",
+          "started_at": "2026-11-02T18:56:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:01:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:46:00Z",
+          "id": 9055,
+          "name": "continuous 55",
+          "runner_name": "dr55",
+          "started_at": "2026-11-02T18:56:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:01:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:46:00Z",
+          "id": 9056,
+          "name": "continuous 56",
+          "runner_name": "dr56",
+          "started_at": "2026-11-02T18:56:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:06:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:51:00Z",
+          "id": 9057,
+          "name": "continuous 57",
+          "runner_name": "dr57",
+          "started_at": "2026-11-02T19:01:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:06:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:51:00Z",
+          "id": 9058,
+          "name": "continuous 58",
+          "runner_name": "dr58",
+          "started_at": "2026-11-02T19:01:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:06:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:51:00Z",
+          "id": 9059,
+          "name": "continuous 59",
+          "runner_name": "dr59",
+          "started_at": "2026-11-02T19:01:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:06:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:51:00Z",
+          "id": 9060,
+          "name": "continuous 60",
+          "runner_name": "dr60",
+          "started_at": "2026-11-02T19:01:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:56:00Z",
+          "id": 9061,
+          "name": "continuous 61",
+          "runner_name": "dr61",
+          "started_at": "2026-11-02T19:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:56:00Z",
+          "id": 9062,
+          "name": "continuous 62",
+          "runner_name": "dr62",
+          "started_at": "2026-11-02T19:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:56:00Z",
+          "id": 9063,
+          "name": "continuous 63",
+          "runner_name": "dr63",
+          "started_at": "2026-11-02T19:06:00Z"
+        },
+        {
+          "completed_at": "2026-11-02T19:11:00Z",
+          "conclusion": "success",
+          "created_at": "2026-11-02T18:56:00Z",
+          "id": 9064,
+          "name": "continuous 64",
+          "runner_name": "dr64",
+          "started_at": "2026-11-02T19:06:00Z"
+        }
+      ],
+      "mode": "continuous"
+    },
+    "tag_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "workflow_path": ".github/workflows/runner-burst-acceptance.yml"
+  },
+  "trust_readback": null
+}
