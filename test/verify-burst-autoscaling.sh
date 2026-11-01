@@ -1457,6 +1457,8 @@ set maxima flags are refused for other operations|base arc-burst pools-open|-|2|
 remove with a node in a burst pool deletes nothing|race-node-registered|status|1|-|primary=0/6 fallback=0/2|zero nodes in 'github-runners-burst-amd-16g'|remove-burst
 remove after one pool was deleted deletes the other|base arc-drain pool-fallback-closed|remove-burst|0|delete:fallback|primary=absent fallback=absent|-|remove-burst
 remove from drain resets expanders then deletes both|drain-for-remove|remove-burst|0|expanders:,delete:primary,delete:fallback|primary=absent fallback=absent|READBACK: only github-runners-pool-16g remains|remove-burst
+remove waits while DOKS still lists a deleted pool|drain-for-remove -- pool-delete-lingers|remove-burst|0|expanders:,delete:primary,delete:fallback|primary=absent fallback=absent|READBACK: pool 'github-runners-burst-amd-16g' no longer listed (read 3)|remove-burst
+remove fails when a deleted pool stays listed past the deadline|drain-for-remove -- pool-delete-never|remove-burst|1|expanders:,delete:primary|primary=0/6 fallback=0/2|still listed 300s after its delete was accepted|remove-burst
 remove from density with open pools is rejected|density-open-pools-remove|-|1|-|primary=0/6 fallback=0/2|at max_nodes=0|remove-burst
 remove: provider count becomes 1 before the delete|drain-for-remove -- race-count-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|provider count 0; found provider count 1|remove-burst
 remove: a node registers before the delete|drain-for-remove -- race-node-before-delete|remove-burst|1|expanders:|primary=0/6 fallback=0/2|zero nodes in 'github-runners-burst-amd-16g'|remove-burst

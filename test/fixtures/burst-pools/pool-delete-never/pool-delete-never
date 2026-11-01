@@ -1,0 +1,1 @@
+Flag: a deleted node pool stays listed forever (DOKS never finishes the delete).

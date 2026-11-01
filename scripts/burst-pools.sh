@@ -350,7 +350,37 @@ mutate() {
         fi
         fail_run "${description} failed (exit ${rc}; ${moved}); no further mutation"
     fi
+    case "$transition" in
+        pool-deleted:*) wait_for_pool_absent "${transition#pool-deleted:}" ;;
+    esac
     compare "$transition" "after ${description}"
+}
+
+# DOKS deletes a node pool asynchronously: "node-pool delete" returns while the
+# pool is still listed (run 41285080919 read it back 3 s later and stopped on
+# identity drift; the pool was gone soon after). After a delete, apply re-reads
+# the pool list every POOL_DELETE_POLL_SECONDS for up to
+# POOL_DELETE_WAIT_SECONDS until the pool is absent, then runs the identity
+# check; a pool still listed at the deadline fails the run, and a re-run
+# continues (an absent pool is a NOOP). Two deletes fit the 30-minute job.
+POOL_DELETE_POLL_SECONDS=10
+POOL_DELETE_WAIT_SECONDS=300
+POOL_DELETE_POLLS=$((POOL_DELETE_WAIT_SECONDS / POOL_DELETE_POLL_SECONDS + 1))
+
+wait_for_pool_absent() {  # name
+    local poll=1 started=$SECONDS
+    while :; do
+        reread
+        if [ "$(pool_bounds "$1")" = absent ]; then
+            [ "$poll" -eq 1 ] || echo "READBACK: pool '$1' no longer listed (read ${poll})"
+            return 0
+        fi
+        [ "$poll" -lt "$POOL_DELETE_POLLS" ] && [ $((SECONDS - started)) -lt "$POOL_DELETE_WAIT_SECONDS" ] \
+            || fail_run "pool '$1' still listed ${POOL_DELETE_WAIT_SECONDS}s after its delete was accepted (${POOL_DELETE_POLLS} reads); re-run remove-burst to continue"
+        echo "WAIT: pool '$1' still listed after its delete (read ${poll}/${POOL_DELETE_POLLS}); next read in ${POOL_DELETE_POLL_SECONDS}s"
+        burst_sleep "$POOL_DELETE_POLL_SECONDS"
+        poll=$((poll + 1))
+    done
 }
 
 # cluster_projection: every cluster field an expander update must not change.
