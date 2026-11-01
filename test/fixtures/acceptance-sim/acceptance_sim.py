@@ -93,7 +93,11 @@ def run_api(run_id, repo, path, head_sha, head_branch, created, conclusion="succ
 
 def doctl_pools(pools):
     return [{"id": entry["id"], "name": name, "min_nodes": entry["min"], "max_nodes": entry["max"],
-             "count": entry["count"], "auto_scale": True} for name, entry in (pools or {}).items()]
+             "count": entry["count"], "auto_scale": True,
+             # Runner pools carry the runner label and taint (Ruling 46).
+             "labels": {"node-type": "github-runner"},
+             "taints": [{"key": "github-runner", "value": "true", "effect": "NoSchedule"}]}
+            for name, entry in (pools or {}).items()]
 
 
 def arc_model_errors(ev):
@@ -277,6 +281,12 @@ def init(directory, evidence_path, overrides):
                          for key, values in (expander.get("priorities") or {}).items())
     scenario["configmap"] = {"metadata": {"labels": {"doks.digitalocean.com/managed": "true"} if expander.get("managed") else {}},
                              "data": {"priorities": priorities}}
+    # Other node pools of the cluster (node_pools evidence, Ruling 46): served
+    # with their labels and taints after the runner pools.
+    runner_names = set((ev.get("pools_before") or {}).keys())
+    scenario["extra_pools"] = [{"id": item["id"], "name": item["name"], "min_nodes": 1, "max_nodes": 3, "count": 2,
+                                "auto_scale": True, "labels": item.get("labels") or {}, "taints": item.get("taints") or []}
+                               for item in ev.get("node_pools") or [] if item.get("name") not in runner_names]
     scenario["pools_before"] = doctl_pools(ev.get("pools_before"))
     scenario["pools_after"] = doctl_pools(ev.get("pools_after"))
     scenario["pools_switch_at"] = complete_at or 0
@@ -471,6 +481,12 @@ def gh(sim, args):
         if parts[3:5] == ["git", "ref"] and parts[5] == "tags":
             tag = sim.scenario["tags"].get("/".join(parts[6:]))
             return out({"object": {"type": tag["type"], "sha": tag["sha"]}}) if tag else 1
+        if parts[3] == "compare" and len(parts) == 5:
+            # scenario "compare" maps "BASE...HEAD" to the API status (ahead,
+            # behind, diverged); an unlisted pair is an unknown commit (404).
+            base, head = parts[4].split("...", 1)
+            status = "identical" if base == head else (sim.scenario.get("compare") or {}).get(parts[4])
+            return out({"status": status}) if status else 1
         if parts[3:5] == ["git", "tags"]:
             for tag in sim.scenario["tags"].values():
                 if tag["sha"] == parts[5]:
@@ -556,6 +572,11 @@ def kubectl(sim, args):
     scenario = sim.scenario
     if args[:2] == ["config", "use-context"]:
         return 0
+    if args[0] == "get" and not os.path.exists(os.path.join(sim.directory, "kubeconfig")):
+        # Like kubectl without a kubeconfig: it dials the default localhost:8080.
+        print("couldn't get current server API group list: Get \"http://localhost:8080/api?timeout=32s\": "
+              "dial tcp [::1]:8080: connect: connection refused", file=sys.stderr)
+        return 1
     if args == ["config", "current-context"]:
         print("do-sfo3-redducklabs-cluster")
         return 0
@@ -586,7 +607,10 @@ def kubectl(sim, args):
 
 def doctl(sim, args):
     line = " ".join(args)
-    if args[:2] == ["auth", "init"] or args[:4] == ["kubernetes", "cluster", "kubeconfig", "save"]:
+    if args[:2] == ["auth", "init"]:
+        return 0
+    if args[:4] == ["kubernetes", "cluster", "kubeconfig", "save"]:
+        open(os.path.join(sim.directory, "kubeconfig"), "w", encoding="utf-8").close()
         return 0
     if line == "kubernetes cluster list -o json":
         return out([sim.scenario["cluster"]])
@@ -598,7 +622,7 @@ def doctl(sim, args):
             read = entry["pools"].get(item["name"]) or {}
             item.update(count=read.get("count", item["count"]), min_nodes=read.get("min", item["min_nodes"]),
                         max_nodes=read.get("max", item["max_nodes"]))
-        return out(encode_pool_list(pools))
+        return out(encode_pool_list(pools + (sim.scenario.get("extra_pools") or [])))
     return None
 
 

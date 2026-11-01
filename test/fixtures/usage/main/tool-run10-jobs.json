@@ -1,0 +1,82 @@
+[
+ {
+  "total_count": 5,
+  "jobs": [
+   {
+    "id": 1001,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-21T00:00:00Z",
+    "started_at": "2026-10-21T00:00:00Z",
+    "completed_at": "2026-10-21T00:10:00Z",
+    "runner_name": "GitHub Actions 1001",
+    "runner_group_name": "GitHub Actions",
+    "labels": [
+     "windows-latest"
+    ]
+   },
+   {
+    "id": 1002,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-21T00:00:00Z",
+    "started_at": "2026-10-21T00:00:00Z",
+    "completed_at": "2026-10-21T00:03:30Z",
+    "runner_name": "GitHub Actions 1002",
+    "runner_group_name": "GitHub Actions",
+    "labels": [
+     "macos-latest"
+    ]
+   },
+   {
+    "id": 1003,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-21T00:00:00Z",
+    "started_at": "2026-10-21T00:00:00Z",
+    "completed_at": "2026-10-21T00:05:00Z",
+    "runner_name": "GitHub Actions 1003",
+    "runner_group_name": "larger-runners",
+    "labels": [
+     "ubuntu-8-core"
+    ]
+   },
+   {
+    "id": 1004,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-21T00:00:00Z",
+    "started_at": "2026-10-21T00:00:00Z",
+    "completed_at": "2026-10-21T00:20:00Z",
+    "runner_name": "build-box",
+    "runner_group_name": "Default",
+    "labels": [
+     "self-hosted"
+    ]
+   },
+   {
+    "id": 1005,
+    "name": "build ✓ ünïcode",
+    "run_attempt": 1,
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-10-25T23:45:00Z",
+    "started_at": "2026-10-25T23:50:00Z",
+    "completed_at": null,
+    "runner_name": "redducklabs-runners-abcde-runner-1005",
+    "runner_group_name": "redducklabs-private-runners",
+    "labels": [
+     "redducklabs-runners"
+    ]
+   }
+  ]
+ }
+]

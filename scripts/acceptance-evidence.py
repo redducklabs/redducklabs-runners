@@ -19,7 +19,8 @@ Subcommands (all share one state file, rewritten after every step):
   verify-anchors  verify the phase's runs in this repository (D: Deploy drain;
             C: Scale Runners acceptance-phase-c; E: Deploy rollback, completed,
             and the Phase A evidence run whose record holds the baseline pool
-            ID) and add them to the state file.
+            ID, at the reviewed SHA or a commit before it, Ruling 50) and add
+            them to the state file.
   watch     poll every 60 s while the watched runs (probe; drain in phase D;
             the Phase C run in phase C) are not completed, capturing runner
             pods, runner nodes, events, node pools and pool-state checks.
@@ -312,13 +313,21 @@ def verify_probe(args, state):
                       "tag_sha": tag_sha, "run": run_data, "drain": None}
 
 
-def verify_fleet_run(run_id, workflow, expected_sha, label):
+def precedes(base, head):
+    """True when commit base is a strict ancestor of head in this repository."""
+    return gh_api(f"repos/{FLEET_REPOSITORY}/compare/{base}...{head}").get("status") == "ahead"
+
+
+def verify_fleet_run(run_id, workflow, expected_sha, label, earlier_ok=False):
+    """earlier_ok also accepts a run at a commit before the reviewed SHA
+    (Ruling 50: the Phase A record outlives fixes merged after Phase A)."""
     data = run_identity(FLEET_REPOSITORY, run_id)
     problems = []
     if data["repository"] != FLEET_REPOSITORY or data["workflow_path"] != workflow:
         problems.append(f"is {data['repository']}:{data['workflow_path']}, expected {FLEET_REPOSITORY}:{workflow}")
-    if data["head_sha"] != expected_sha:
-        problems.append(f"ran at {data['head_sha']}, not the reviewed SHA {expected_sha}")
+    if data["head_sha"] != expected_sha and not (earlier_ok and data["head_sha"] and precedes(data["head_sha"], expected_sha)):
+        problems.append(f"ran at {data['head_sha']}, not the reviewed SHA {expected_sha}"
+                        + (" or a commit before it" if earlier_ok else ""))
     if data["event"] != "workflow_dispatch":
         problems.append(f"event is {data['event']!r}")
     if data["status"] == "completed" and data["conclusion"] != "success":
@@ -368,8 +377,9 @@ def cmd_verify_probe(args):
 
 
 def baseline_record(run_id, expected_sha):
-    """Baseline pool ID from a passing Phase A evidence record at the reviewed SHA."""
-    data = verify_fleet_run(run_id, EVIDENCE_WORKFLOW, expected_sha, "Phase A evidence")
+    """Baseline pool ID from a passing Phase A evidence record at the reviewed SHA
+    or a commit before it."""
+    data = verify_fleet_run(run_id, EVIDENCE_WORKFLOW, expected_sha, "Phase A evidence", earlier_ok=True)
     if data["status"] != "completed" or data["conclusion"] != "success":
         raise ReadError(f"Phase A evidence run {run_id} has not completed successfully")
     directory = tempfile.mkdtemp()
@@ -486,6 +496,20 @@ def runner_job(item):
     return {field: status.get(field) for field in ER_JOB_FIELDS if status.get(field) not in (None, "", 0)}
 
 
+RUNNER_LABEL = ("node-type", "github-runner")
+RUNNER_TAINT_KEY = "github-runner"
+
+
+def node_pool_identity(entry):
+    """A node pool's ID, name, labels, taints and whether it is a runner pool
+    (runner label node-type=github-runner or the github-runner taint)."""
+    labels = entry.get("labels") or {}
+    taints = [{str(key).lower(): value for key, value in taint.items()}
+              for taint in entry.get("taints") or [] if isinstance(taint, dict)]
+    runner = labels.get(RUNNER_LABEL[0]) == RUNNER_LABEL[1] or any(t.get("key") == RUNNER_TAINT_KEY for t in taints)
+    return {"id": entry.get("id"), "name": entry.get("name"), "labels": labels, "taints": taints, "runner": runner}
+
+
 def pool_summary(pools, registered):
     summary = {}
     for entry in pools:
@@ -594,6 +618,10 @@ def snapshot(state, final=False):
     for item in nodes:
         registered[node_pool_of(item)] = registered.get(node_pool_of(item), 0) + 1
     summary = pool_summary(pools, registered)
+    # Every node pool of the cluster with its labels and taints, so the
+    # verdict can resolve a scale-up event's node group ID and tell runner
+    # pools from pools that cannot host runner pods (Ruling 46).
+    state["node_pools"] = [node_pool_identity(entry) for entry in pools if isinstance(entry, dict)]
     # The autoscaler's per-pool targets (count) over time, kept as
     # diagnostics: periodic reads cannot order scale-up decisions, which the
     # verdict judges from the autoscaler's scale-up events (Ruling 44 revised).
@@ -994,6 +1022,7 @@ def cmd_finalize(args):
             "latest_collection_at": state["latest_collection"]["at"],
             "pod_collections": state.get("pod_collections") or [],
             "pool_collections": state.get("pool_collections") or [],
+            "node_pools": state.get("node_pools") or [],
             "pools_before": state["pools_before"], "pools_after": state.get("pools_latest"),
             "arc_contract_after": arc_contract(state), "phase_c": None,
             "trust_readback": None, "expander_readback": expander_readback(state),

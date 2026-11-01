@@ -1,0 +1,2 @@
+api --paginate --slurp orgs/redducklabs/repos?type=all&per_page=100|repos.json
+api --paginate --slurp repos/redducklabs/zz-alpha-app/actions/runs?created=*|runs.json

@@ -41,6 +41,9 @@ Flags (files in the fixture dir):
                              reads still see NotFound before it appears
     configmap-never-created  the expander update never creates the ConfigMap
     configmap-read-error     every ConfigMap read fails with a Forbidden error
+    pool-delete-lingers      holds N: a deleted node pool stays listed for N more
+                             node-pool list reads (DOKS deletes asynchronously)
+    pool-delete-never        a deleted node pool stays listed forever
 
 cluster update requires --update-kubeconfig=false and, like doctl, always
 sets the maintenance window (any=00:00 when the flag is omitted).
@@ -61,6 +64,7 @@ CLUSTER_TAG = "k8s:c4e1f0a2-6b3d-4f58-9a07-1d2e3f4a5b60"
 CONFIGMAP = "cluster-autoscaler-priority-expander"
 CONFIGMAP_FILE = "expander-configmap.json"
 CONFIGMAP_PENDING = "expander-configmap.pending"
+POOL_DELETE_PENDING = "pool-delete.pending"
 # What DOKS creates (DigitalOcean "Autoscale" how-to, priority expander).
 STARTER_CONFIGMAP = {
     "apiVersion": "v1",
@@ -154,7 +158,29 @@ def find_pool(pools, reference):
     return matches[0] if len(matches) == 1 else None
 
 
+def settle_pool_deletes(directory):
+    """Asynchronous delete model: each node-pool list read first counts down
+    every pending delete; a pool whose count already reached 0 is removed
+    before the read is served, and a count of -1 never completes."""
+    pending_path = path(directory, POOL_DELETE_PENDING)
+    if not os.path.isfile(pending_path):
+        return
+    pending = load(directory, POOL_DELETE_PENDING)
+    pools = load(directory, "pools.json")
+    for pool_id, remaining in list(pending.items()):
+        if remaining == 0:
+            pools = [p for p in pools if p.get("id") != pool_id]
+            del pending[pool_id]
+        elif remaining > 0:
+            pending[pool_id] = remaining - 1
+    save(directory, "pools.json", pools)
+    save(directory, POOL_DELETE_PENDING, pending)
+
+
 def doctl(directory, args):
+    if args[:4] == ["kubernetes", "cluster", "node-pool", "list"]:
+        settle_pool_deletes(directory)
+        return NOT_HANDLED
     if args[:4] == ["kubernetes", "cluster", "node-pool", "create"]:
         positionals, flags = parse_flags(args[4:])
         name = flags["name"][-1]
@@ -223,7 +249,19 @@ def doctl(directory, args):
         if pool is None or flags.get("force") != ["true"]:
             print(f"Error: cannot delete node pool {positionals[1]}", file=sys.stderr)
             return 1
-        save(directory, "pools.json", [p for p in pools if p is not pool])
+        if os.path.isfile(path(directory, "pool-delete-never")):
+            lingers = -1
+        elif os.path.isfile(path(directory, "pool-delete-lingers")):
+            with open(path(directory, "pool-delete-lingers"), encoding="utf-8") as stream:
+                lingers = int(stream.read().strip())
+        else:
+            lingers = None
+        if lingers is None:
+            save(directory, "pools.json", [p for p in pools if p is not pool])
+        else:
+            pending = load(directory, POOL_DELETE_PENDING) if os.path.isfile(path(directory, POOL_DELETE_PENDING)) else {}
+            pending[pool["id"]] = lingers
+            save(directory, POOL_DELETE_PENDING, pending)
         print(f"deleted node pool {pool['name']}")
         return 0
     if args[:3] == ["kubernetes", "cluster", "update"]:

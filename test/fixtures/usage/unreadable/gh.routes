@@ -1,0 +1,3 @@
+api --paginate --slurp orgs/redducklabs/repos?type=all&per_page=100|repos.json
+api --paginate --slurp repos/redducklabs/zz-alpha-app/actions/runs?created=2026-09-12T00:00:00Z..2026-10-26T00:00:00Z&per_page=100|runs.json
+api --paginate --slurp repos/redducklabs/zz-epsilon-secret/actions/runs?*|denied.json
