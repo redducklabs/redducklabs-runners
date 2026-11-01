@@ -574,7 +574,7 @@ def kubectl(sim, args):
         return 0
     if args[0] == "get" and not os.path.exists(os.path.join(sim.directory, "kubeconfig")):
         # Like kubectl without a kubeconfig: it dials the default localhost:8080.
-        print('couldn't get current server API group list: Get "http://localhost:8080/api?timeout=32s": '
+        print("couldn't get current server API group list: Get \"http://localhost:8080/api?timeout=32s\": "
               "dial tcp [::1]:8080: connect: connection refused", file=sys.stderr)
         return 1
     if args == ["config", "current-context"]:
