@@ -21,9 +21,11 @@
 #   3. minRunners=2 (burst 2/20); wait up to 60 minutes for both burst pools
 #      to reach zero nodes, running retirement every 2 minutes.
 # Cycles repeat (up to N) until a burst survivor was retired. Every Helm write
-# is "helm upgrade --reuse-values --set minRunners=<n>" inside the identity
-# bracket (scripts/lib/fleet-ops.sh) and is read back with the contract
-# validator. The writes deliberately omit --wait: a run cancelled during a
+# is "helm upgrade --reuse-values --set minRunners=<n> --set maxRunners=20"
+# inside the identity bracket (scripts/lib/fleet-ops.sh) and is read back with
+# the contract validator. maxRunners is set explicitly because Helm returns
+# reused values as float64 and --set values as int64, and the chart's
+# "gt .Values.minRunners .Values.maxRunners" fails on the mix. The writes deliberately omit --wait: a run cancelled during a
 # waiting upgrade can leave the release in status "failed", which the ARC
 # identity check (and so every fleet workflow) then rejects; readiness is
 # covered by the occupancy polling and the contract readback instead. A run
@@ -108,7 +110,8 @@ set_min() {
     esac
     fleet_helm_bracket "$IDENTITIES" "$operation" "$pre" "arc:${contract}:${n}/${max}" \
         upgrade "$FLEET_RELEASE" "$FLEET_CHART" --namespace "$FLEET_NAMESPACE" \
-        --version "$FLEET_CHART_VERSION" --reuse-values --set "minRunners=${n}" --history-max 100
+        --version "$FLEET_CHART_VERSION" --reuse-values --set "minRunners=${n}" --set "maxRunners=${max}" \
+        --history-max 100
     rc=$?
     [ "$rc" -eq 0 ] || return "$rc"
     if ! fleet_readback "$contract" "$n" "$max"; then

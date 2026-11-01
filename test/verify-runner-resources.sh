@@ -491,9 +491,61 @@ sys.stdout.write(yaml.safe_dump_all(docs))
     fi
 }
 
+# Phase C writes with "helm upgrade --reuse-values --set ...". Helm keeps a
+# release's values as JSON, so reused numbers come back as float64 while
+# --set numbers are int64, and the chart's "gt .Values.minRunners
+# .Values.maxRunners" fails on mixed types. Render the stored-values shape with
+# the exact --set arguments of scripts/acceptance-phase-c.sh.
+assert_phase_c_reuse_values_render() {
+    local stored sets n render arg
+    local -a args
+    stored="$(mktemp --suffix=.json)"
+    if ! python -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1])), sys.stdout)' \
+        "$VALUES_FILE" > "$stored"; then
+        fail "could not convert ${VALUES_FILE} to the stored-values (JSON) shape"
+        rm -f "$stored"
+        return
+    fi
+    sets=$(grep -- '--reuse-values --set' "${REPO_ROOT}/scripts/acceptance-phase-c.sh" | grep -oE -- '--set "[^"]+"')
+    if [ -z "$sets" ] || ! grep -q 'maxRunners' <<<"$sets"; then
+        fail "Phase C Helm write does not set maxRunners alongside minRunners: ${sets:-none}"
+        rm -f "$stored"
+        return
+    fi
+    for n in 8 4 2; do
+        args=()
+        while read -r arg; do
+            arg=${arg#--set \"}
+            arg=${arg%\"}
+            arg=${arg//\$\{n\}/$n}
+            arg=${arg//\$\{max\}/20}
+            args+=(--set "$arg")
+        done <<<"$sets"
+        if ! render=$(render_values "$stored" "${args[@]}" 2>&1); then
+            fail "Phase C minRunners=${n} upgrade does not render over stored values: $(grep -m1 '^Error' <<<"$render")"
+            continue
+        fi
+        if printf '%s' "$render" | python -B "$CONTRACT_TOOL" \
+            --contract "$([ "$n" = 2 ] && echo burst || echo burst-acceptance)" --kind manifest \
+            --min-runners "$n" --max-runners 20 --runner-group private; then
+            pass "Phase C minRunners=${n} upgrade renders over stored values and satisfies its contract (${n}/20)"
+        else
+            fail "Phase C minRunners=${n} render does not satisfy its contract (${n}/20)"
+        fi
+    done
+    # Control: setting minRunners alone over stored values is the live failure.
+    if render_values "$stored" --set minRunners=8 >/dev/null 2>&1; then
+        fail "minRunners-only upgrade over stored values renders; the regression check no longer models Helm"
+    else
+        pass "minRunners-only upgrade over stored values fails to render (the live Phase C failure)"
+    fi
+    rm -f "$stored"
+}
+
 assert_burst_render
 assert_drain_render
 assert_null_for_required_value_is_rejected
+assert_phase_c_reuse_values_render
 echo ""
 
 # --- Offline workflow fixtures ----------------------------------------------

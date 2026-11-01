@@ -29,7 +29,7 @@ advances by seconds x knobs.sleep_scale and the world reconciles once:
 Mutations handled here (each appended to mutations.log as one token):
   helm upgrade ... --values deploy/dind-values.yaml   -> burst      "helm-upgrade:burst"
   helm upgrade ... -f <drain values>                  -> drain      "helm-upgrade:drain"
-  helm upgrade ... --reuse-values --set minRunners=N  -> 8/4 or 2   "helm-upgrade:min=N"
+  helm upgrade ... --reuse-values --set minRunners=N --set maxRunners=20 -> 8/4 or 2 "helm-upgrade:min=N"
   helm upgrade ... --reuse-values --set minRunners=0 --set maxRunners=0
                                      -> <base>-stopped (Emergency Stop)  "helm-upgrade:stopped"
   helm upgrade ... --values deploy/density-values.yaml -> density   "helm-upgrade:density"
@@ -590,6 +590,12 @@ def helm(directory, world, args):
             if len(values) != 1 or values[0][11:] not in MIN_LAYER or world["arc"] not in BURST_FAMILY \
                     or option(args, "--version") != "0.14.2" or "--wait" in args:
                 print(f"fake helm: unexpected reuse-values upgrade from {world['arc']}: {args}", file=sys.stderr)
+                return 1
+            # Real Helm: reused values are float64 and --set values int64, so
+            # minRunners without a --set maxRunners fails the chart's gt.
+            if [a for a in args if a.startswith("maxRunners=")] != ["maxRunners=20"]:
+                print("Error: UPGRADE FAILED: template: gha-runner-scale-set/templates/autoscalingrunnerset.yaml:141:11: "
+                      "error calling gt: incompatible types for comparison: int64 and float64", file=sys.stderr)
                 return 1
             target = MIN_LAYER[values[0][11:]]
             return finish_write(directory, world, f"helm-upgrade:min={values[0][11:]}",
