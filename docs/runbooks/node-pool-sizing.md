@@ -125,6 +125,12 @@ Pool Sizing `set-burst-maxima` for the pools) followed by Deploy, as above.
 
 ### Failure rules
 
+- **Asynchronous pool delete (`remove-burst`).** DOKS accepts a node-pool
+  delete before the pool leaves the list. After each delete `remove-burst`
+  re-reads the pool list every 10 s for up to 300 s, then runs the identity
+  check (Ruling 49). A pool still listed at the deadline fails the run before
+  the next pool is touched, so the fallback is left as it was; re-dispatch
+  `remove-burst`, which treats already-absent pools as a no-op and continues.
 - **No Helm retry.** A failed Helm upgrade inside the identity bracket fails
   the run. Read the failure, then re-dispatch the same operation: the re-run
   re-admits the live state and is a no-op on its own postcondition.
