@@ -234,6 +234,9 @@ jobs:
           python3 scripts/acceptance-evidence.py verify-anchors "${ARGS[@]}"
 
       - name: Configure Kubernetes access (read-only)
+        # Also after a rejected anchor run: cleanup reads EphemeralRunners to
+        # prove the cancelled probe left no runner assigned (Ruling 50).
+        if: success() || (always() && steps.verify.outputs.probe_verified == 'true')
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |

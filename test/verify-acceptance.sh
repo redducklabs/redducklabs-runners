@@ -310,7 +310,7 @@ run_evidence() {
         REPO_COPY=$(mktemp -d "${WORK_DIR}/repo.XXXXXX")
         (cd "$REPO_ROOT" && tar --exclude=.git -cf - .) | (cd "$REPO_COPY" && tar -xf -)
     fi
-    rm -f "${REPO_COPY}"/acceptance-*.json "${dir}/calls.log"
+    rm -f "${REPO_COPY}"/acceptance-*.json "${dir}/calls.log" "${dir}/kubeconfig"
     fake_dir=$(mktemp -d "${WORK_DIR}/fakes.XXXXXX")
     fake_home=$(mktemp -d "${WORK_DIR}/home.XXXXXX")
     for tool in gh kubectl doctl helm; do
@@ -708,7 +708,7 @@ CASES
     run_evidence "$dir" "$(probe_inputs D ',"drain_run_id":"444"')"
     expect_evidence "phase D with a drain run from another workflow cancels the verified probe" $? 1 \
         "STEP Cancel the probe and verify cleanup: success" "REJECTED: drain run 444" '^gh run cancel 777 -R redducklabs/aurolegal.ai' \
-        '^doctl|^kubectl get (pods|nodes|events)' "$dir"
+        '^doctl kubernetes cluster (list|node-pool)|^kubectl get (pods|nodes|events)' "$dir"
     if grep -q 'STEP Capture evidence while the probe holds: skipped' "$SIM_OUT" && grep -q 'CLEANUP: clean' "$SIM_ERR"; then
         pass "phase D bad drain: no evidence collected; cleanup verified clean"
     else
@@ -718,7 +718,7 @@ CASES
     run_evidence "$dir" "$(probe_inputs D ',"drain_run_id":"444"')"
     expect_evidence "phase D with a failed drain run cancels the verified probe" $? 1 \
         "STEP Cancel the probe and verify cleanup: success" "concluded 'failure'" '^gh run cancel 777' \
-        '^doctl|^kubectl get (pods|nodes|events)' "$dir"
+        '^doctl kubernetes cluster (list|node-pool)|^kubectl get (pods|nodes|events)' "$dir"
     # The drain completes five minutes after the last probe entry finished.
     local late
     late=$(python3 - "${FIXTURES}/D-pass.json" <<'PY'
@@ -871,6 +871,32 @@ CASES
     dir=$(sim_dir E-pass '{"runs.rollback.complete_at": null}')
     run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
     expect_evidence "phase E rejects a rollback run that has not completed" $? 1 - "rollback run 333 has not completed" '^gh run cancel 777' - "$dir"
+    # Ruling 50: cleanup after a rejected anchor run has cluster access, so it
+    # can prove no EphemeralRunner is still assigned to the cancelled probe.
+    if grep -q 'STEP Cancel the probe and verify cleanup: success' "$SIM_OUT" && grep -q 'CLEANUP: clean' "$SIM_ERR"         && grep -q '^kubectl get ephemeralrunners' "${dir}/calls.log"; then
+        pass "phase E rejected anchor: cleanup read EphemeralRunners and verified clean"
+    else
+        fail "phase E rejected anchor cleanup: $(steps_of) $(grep -E 'CLEANUP|RETRY' "$SIM_ERR" | head -n 3 | tr '
+' ' ')"
+    fi
+    # Ruling 50: a Phase A record from a commit before the reviewed SHA is
+    # accepted; one from a later or unrelated commit is not.
+    local earlier=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    dir=$(sim_dir E-pass "{\"runs.baseline.api.head_sha\": \"${earlier}\", \"compare\": {\"${earlier}...${SHA}\": \"ahead\"}}")
+    run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
+    expect_evidence "phase E accepts a Phase A record from a commit before the reviewed SHA" $? 0         "READY_FOR_MIGRATION=true" - "^gh api repos/redducklabs/redducklabs-runners/compare/${earlier}...${SHA}" - "$dir"
+    while IFS='|' read -r status label; do
+        [ -n "$label" ] || continue
+        dir=$(sim_dir E-pass "{\"runs.baseline.api.head_sha\": \"${earlier}\", \"compare\": {\"${earlier}...${SHA}\": \"${status}\"}}")
+        run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
+        expect_evidence "phase E rejects a Phase A record from ${label}" $? 1 -             "ran at ${earlier}, not the reviewed SHA ${SHA} or a commit before it" '^gh run cancel 777' - "$dir"
+    done <<'CASES'
+behind|a commit after the reviewed SHA
+diverged|a commit off the reviewed history
+CASES
+    dir=$(sim_dir E-pass "{\"runs.baseline.api.head_sha\": \"${earlier}\"}")
+    run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
+    expect_evidence "phase E rejects a Phase A record from an unknown commit" $? 1 - "REJECTED:" '^gh run cancel 777' - "$dir"
     dir=$(sim_dir E-pass '{"artifacts.222/acceptance-A": {"phase": "A", "verdict": {"pass": false}, "pools_before": {}}}')
     run_evidence "$dir" "$(probe_inputs E ',"rollback_run_id":"333","baseline_run_id":"222"')"
     expect_evidence "phase E rejects a baseline run without a passing Phase A record" $? 1 - "does not hold a passing Phase A record" - - "$dir"
