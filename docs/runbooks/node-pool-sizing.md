@@ -390,9 +390,14 @@ latest() {  # workflow file in $FLEET -> newest run ID
 Phase B (fallback from zero):
 
 ```bash
+# First wait until no fleet job is running and both burst pools show 0 nodes
+# (dispatch Rebalance Runners if idle runners hold burst nodes). DigitalOcean
+# rejects a maximum below the pool's current node count with 422 "number of
+# nodes out of min/max range", so lowering the primary while it still has
+# nodes fails; burst-pools.sh then changes nothing. Wait and re-run it.
 gh workflow run node-pool-sizing.yml -R "$FLEET" -f operation=set-burst-maxima \
   -f primary_max=0 -f fallback_max=2 -f apply=true -f expected_sha="$SHA"
-# wait for that run to succeed and both burst pools to show 0 nodes, then:
+# wait for that run to succeed and both burst pools to still show 0 nodes, then:
 probe batch 6    # 8 runner pods; then set PROBE as above
 gh workflow run runner-acceptance-evidence.yml -R "$FLEET" -f phase=B \
   -f probe_run_id="$PROBE" -f dispatch_tag="$TAG" -f expected_workflow_sha="$AURO" -f expected_sha="$SHA"
@@ -453,9 +458,11 @@ anchor runs; a rejected anchor run still cancels the verified probe.
 | E. Restore and ready-for-migration | after D: `remove-burst`, Deploy `rollback`, then rollout steps 3–4 | `batch`, `jobs=8` (10 runner pods) | `phase=E`, probe, `rollback_run_id`, `baseline_run_id`; **after the probe completes, dispatch Rebalance Runners** (the evidence run waits up to 30 minutes for two warm runners on baseline) | rollback run succeeded with its density readback and completed before the smoke probe was created; ARC `burst`; baseline 2/2/2, primary 0/6, fallback 0/2 with three distinct IDs and the baseline pool ID equal to the Phase A record's; expander readback; trust readback; exactly two warm runners, both on baseline, observed in the evidence workflow's final collection (`latest_collection_at`): Running, Ready, not terminating and idle; smoke run passes; prints `READY_FOR_MIGRATION=true` |
 
 Phase B note: there is no alternate Phase B shape. `create-burst` already
-created both pools at `max_nodes=0`, so DigitalOcean accepts a closed primary. If
-the `set-burst-maxima primary_max=0` run is nevertheless rejected, stop
-acceptance: Phase B needs a reviewed change to this procedure and to
+created both pools at `max_nodes=0`, so DigitalOcean accepts a closed primary. A
+rejection while the primary still has nodes ("number of nodes out of min/max
+range") is a setup-order error, not this case: wait for 0 nodes and re-run. If
+the `set-burst-maxima primary_max=0` run is rejected with the primary at 0
+nodes, stop acceptance: Phase B needs a reviewed change to this procedure and to
 `scripts/acceptance-verdict.py` (which accepts only primary 0/0, six jobs and
 4 baseline + 4 fallback runner pods) before it is re-run. A provider 422/backoff is
 not reproduced live; that path is covered by fixtures and the documented
