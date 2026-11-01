@@ -111,18 +111,60 @@ BASELINE_POOL_EXPRESSION = {
 DOCKER_HUB_MIRROR_FLAG = "--registry-mirror=https://mirror.gcr.io"
 
 
+# Burst, burst-acceptance and drain carry the actions/setup-* tool cache: one
+# plain emptyDir mounted at the same path in the runner and the dind sidecar
+# (container jobs bind-mount the tool directory and dockerd resolves bind
+# sources in its own filesystem), with RUNNER_TOOL_CACHE and
+# AGENT_TOOLSDIRECTORY naming it. Density and legacy-isolated do not, so their
+# pods keep the runner default <work>/_tool and recorded releases still match.
+TOOL_CACHE_PATH = "/opt/hostedtoolcache"
+TOOL_CACHE_VOLUME = "tool-cache"
+TOOL_CACHE_ENV = [
+    {"name": "RUNNER_TOOL_CACHE", "value": TOOL_CACHE_PATH},
+    {"name": "AGENT_TOOLSDIRECTORY", "value": TOOL_CACHE_PATH},
+]
+
+
+def add_tool_cache(template: dict) -> None:
+    mount = {"mountPath": TOOL_CACHE_PATH, "name": TOOL_CACHE_VOLUME}
+    for container in template["initContainers"]:
+        if container["name"] == "dind":
+            container["volumeMounts"] = container["volumeMounts"] + [dict(mount)]
+    for container in template["containers"]:
+        if container["name"] == "runner":
+            container["env"] = container["env"] + [dict(item) for item in TOOL_CACHE_ENV]
+            container["volumeMounts"] = container["volumeMounts"] + [dict(mount)]
+    template["volumes"] = template["volumes"] + [
+        {"emptyDir": {}, "name": TOOL_CACHE_VOLUME}
+    ]
+
+
+# Transition variant: the burst-family template exactly as released before the
+# shared tool cache (all of its env, mounts and volume absent together). The
+# live release is that template until Deploy `deploy` applies the committed
+# values, and every fleet gate classifies the live release with this validator,
+# so without it Deploy, drain, Emergency Stop's readback and the acceptance
+# operations would all reject the live fleet as matching no contract. A partial
+# tool cache matches neither variant. The Deploy admission check admits only
+# the full tool cache for a new release. Remove the variant (tool_cache=False)
+# once the fleet has been deployed with the tool cache.
+
+
 def burst_metadata() -> dict:
     return {
         "annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}
     }
 
 
-def burst_template(rendered: bool) -> dict:
-    """Density template plus a preferred (weight 100) baseline-pool affinity."""
+def burst_template(rendered: bool, tool_cache: bool = True) -> dict:
+    """Density template plus the Docker Hub mirror, the shared tool cache and a
+    preferred (weight 100) baseline-pool affinity."""
     template = density_template(rendered)
     for container in template["initContainers"]:
         if container["name"] == "dind":
             container["args"] = container["args"] + [DOCKER_HUB_MIRROR_FLAG]
+    if tool_cache:
+        add_tool_cache(template)
     template["affinity"] = {
         "nodeAffinity": {
             "preferredDuringSchedulingIgnoredDuringExecution": [
@@ -136,9 +178,9 @@ def burst_template(rendered: bool) -> dict:
     return template
 
 
-def drain_template(rendered: bool) -> dict:
+def drain_template(rendered: bool, tool_cache: bool = True) -> dict:
     """Burst template with the baseline affinity made required."""
-    template = burst_template(rendered)
+    template = burst_template(rendered, tool_cache)
     template["affinity"] = {
         "nodeAffinity": {
             "requiredDuringSchedulingIgnoredDuringExecution": {
@@ -278,14 +320,16 @@ def main() -> int:
             raise ValueError("template metadata does not match the contract")
         template = state.get("template", {}).get("spec")
         if base in ("burst", "burst-acceptance"):
-            expected = burst_template(rendered)
+            expected = [burst_template(rendered), burst_template(rendered, tool_cache=False)]
         elif base == "drain":
-            expected = drain_template(rendered)
+            expected = [drain_template(rendered), drain_template(rendered, tool_cache=False)]
         elif base == "density":
             expected = density_template(rendered)
         else:
             expected = legacy_isolated_template(rendered, private)
-        if template != expected:
+        if not isinstance(expected, list):
+            expected = [expected]
+        if template not in expected:
             raise ValueError("security/resource/placement template is not exact")
     except (
         KeyError,

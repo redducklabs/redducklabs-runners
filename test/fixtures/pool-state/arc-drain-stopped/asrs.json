@@ -152,6 +152,10 @@
                   {
                     "mountPath": "/home/runner/externals",
                     "name": "dind-externals"
+                  },
+                  {
+                    "mountPath": "/opt/hostedtoolcache",
+                    "name": "tool-cache"
                   }
                 ]
               }
@@ -178,6 +182,14 @@
                   {
                     "name": "RUNNER_WAIT_FOR_DOCKER_IN_SECONDS",
                     "value": "120"
+                  },
+                  {
+                    "name": "RUNNER_TOOL_CACHE",
+                    "value": "/opt/hostedtoolcache"
+                  },
+                  {
+                    "name": "AGENT_TOOLSDIRECTORY",
+                    "value": "/opt/hostedtoolcache"
                   }
                 ],
                 "volumeMounts": [
@@ -188,6 +200,10 @@
                   {
                     "mountPath": "/var/run",
                     "name": "dind-sock"
+                  },
+                  {
+                    "mountPath": "/opt/hostedtoolcache",
+                    "name": "tool-cache"
                   }
                 ]
               }
@@ -204,6 +220,10 @@
               {
                 "emptyDir": {},
                 "name": "dind-externals"
+              },
+              {
+                "emptyDir": {},
+                "name": "tool-cache"
               }
             ]
           }
