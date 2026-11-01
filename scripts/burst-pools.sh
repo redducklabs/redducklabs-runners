@@ -357,7 +357,7 @@ mutate() {
 }
 
 # DOKS deletes a node pool asynchronously: "node-pool delete" returns while the
-# pool is still listed (run 41285080919 read it back 3 s later and stopped on
+# pool is still listed (run 41288902410 read it back 3 s later and stopped on
 # identity drift; the pool was gone soon after). After a delete, apply re-reads
 # the pool list every POOL_DELETE_POLL_SECONDS for up to
 # POOL_DELETE_WAIT_SECONDS until the pool is absent, then runs the identity
