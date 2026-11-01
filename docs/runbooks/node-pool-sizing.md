@@ -658,11 +658,12 @@ starting the next step.
 | | 3 | Node Pool Sizing `configure-expander` | | | |
 | | 4 | Deploy `deploy` | | | |
 | | 4 | Node Pool Sizing `enable-burst` | | | |
-| | 5A | Acceptance A (probe tag / evidence run) | | | |
-| | 5B | Acceptance B + `set-burst-maxima` restore | | | |
-| | 5C | Scale Runners `acceptance-phase-c` + evidence | | | result `retired` / `fixture-only` |
-| | 5D | Deploy `drain` + evidence | | | |
-| | 5E | `remove-burst`, `rollback`, steps 3–4, evidence | | | `READY_FOR_MIGRATION=` |
+| 2026-11-01 | 5A | Acceptance A (probe tag / evidence run) | `6be69b6` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41270237200 | pass (attempt 4): 4 baseline + 12 primary; warm p95 13 s, cold p95 156 s; network probe passed |
+| 2026-11-01 | 5B | Acceptance B + `set-burst-maxima` restore | `6be69b6` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41273100458 | pass: 4 baseline + 4 fallback; restore 6/2 run 41273981232 |
+| 2026-11-01 | 5C | Scale Runners `acceptance-phase-c` + evidence | `d0851f2` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41278522596 | pass: result `retired` (cycle 1), `jobs_killed=0`; Phase C run 41278515350 |
+| 2026-11-01 | 5D | Deploy `drain` + evidence | `a6e9e12` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41293538915 | pass (attempt 2): drain 41293531020; widest in-drain gap 9 s |
+| 2026-11-01 | 5E | `remove-burst`, `rollback`, steps 3–4, evidence | `ca8e2d5` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41305468700 | pass (attempt 2): rollback 41304723978; `READY_FOR_MIGRATION=true` |
+| 2026-11-01 | ES | Emergency Stop drill + acknowledged Deploy `deploy` | `ca8e2d5` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41306946906 | pass: fence denied the dry-run write; Runner Status 41307007638 `burst-stopped`; Deploy 41307059244 deleted the marker, probe allowed; Runner Status 41307266616 `burst` |
 
 2026-10-28, first attempt at main `badfb93`: steps 1 and 2 passed; step 3
 `create-burst` apply failed twice (Node Pool Sizing runs 40647394663 and
@@ -720,3 +721,17 @@ them) and `A-priority` (an aggregated "(combined from similar events): "
 message did not parse, and fallback scale-ups failed the old rule). The
 fallback was raised only after the primary was at 6 of 6 (Ruling 45). Re-run
 Phase A at the reviewed commit that contains the Ruling 45 fix.
+
+2026-11-01, Phase A attempt 4 at main `6be69b6` passed, then Phase B (after
+the PR #46 runbook ordering fix: wait for the primary to reach 0 nodes
+before `set-burst-maxima primary_max=0`). Phase C's first run (41275139366)
+failed at its first Helm write without changing the fleet (reused values are
+float64, `--set` values int64; Ruling 47) and passed at `d0851f2`. Phase D
+attempt 1 (evidence 41281069997) failed only on an 18 s gap while ARC replaced
+ephemeral runners at the drain cap (Ruling 48); the restore before its re-run
+stopped with `IDENTITY_DRIFT` in `remove-burst` run 41288902410 because DOKS
+deletes pools asynchronously (Ruling 49). Phase D passed at `a6e9e12`. Phase E
+attempt 1 (evidence 41298984154) was rejected at its anchors: the Phase A
+record predates the later fixes, and cleanup had no cluster access after the
+rejection (Ruling 50); it passed at `ca8e2d5` after a drain and restore. The
+Emergency Stop drill passed at `ca8e2d5`. Repository migration is authorized.
