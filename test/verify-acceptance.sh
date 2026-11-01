@@ -76,6 +76,10 @@ if not expected["pass"]:
         problems.append(f"does not name {expected['criteria'][0]}")
     if not prefixes <= set(expected["criteria"]):
         problems.append(f"also fails {sorted(prefixes - set(expected['criteria']))}")
+# Optional exact report values (verdict "pickup"), e.g. Phase D max_gap_seconds.
+for key, value in expected.get("report", {}).items():
+    if verdict["pickup"].get(key) != value:
+        problems.append(f"report {key}={verdict['pickup'].get(key)!r}, expected {value!r}")
 if problems:
     print("; ".join(problems), verdict["failures"])
     sys.exit(1)

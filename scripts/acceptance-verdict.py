@@ -854,21 +854,35 @@ def phase_d(evidence, failures, report, notes):
     report["in_flight_at_drain_started"] = at_start
     if at_start < 8:
         failures.append(f"D-overlap-start: {at_start} probe entries in progress when the drain started, expected at least 8")
-    # At least one entry in progress at every instant of [started, completed].
+    # Entries in progress across [started, completed], except for gaps of at
+    # most WARM_P95_SECONDS between one entry ending and the next starting
+    # (Ruling 48): at the drain cap, entries that end together leave no runner
+    # busy while ARC replaces the ephemeral runners, which is pickup latency,
+    # not a stalled fleet. A longer gap fails.
     intervals = sorted(
         (ts(job["started_at"], "started_at"), ts(job["completed_at"], "completed_at"))
         for job in jobs if job.get("started_at") and job.get("completed_at"))
-    covered = started
+    # Gaps are measured inside [started, completed] only: a gap that runs past
+    # the drain's completion counts up to the completion, so entries starting
+    # after the drain cannot change the verdict.
+    covered, widest, widest_from = started, 0, started
     for begin, end in intervals:
+        if begin >= completed:
+            break
         if end <= covered:
             continue
-        if begin > covered:
-            break
+        if begin > covered and begin - covered > widest:
+            widest, widest_from = begin - covered, covered
         covered = end
         if covered >= completed:
             break
-    if covered < completed:
-        failures.append(f"D-overlap-continuous: no probe entry in progress from {datetime.fromtimestamp(covered, timezone.utc):%Y-%m-%dT%H:%M:%SZ} inside the drain interval")
+    if covered < completed and completed - covered > widest:
+        widest, widest_from = completed - covered, covered
+    report["max_gap_seconds"] = widest
+    if widest > WARM_P95_SECONDS:
+        failures.append(f"D-overlap-continuous: no probe entry in progress for {widest:.0f} s from {datetime.fromtimestamp(widest_from, timezone.utc):%Y-%m-%dT%H:%M:%SZ} inside the drain interval (at most {WARM_P95_SECONDS} s allowed)")
+    elif widest:
+        notes.append(f"Phase D: widest gap between probe entries inside the drain interval {widest:.0f} s (at most {WARM_P95_SECONDS} s allowed, Ruling 48)")
     later = [job for job in jobs if not job.get("completed_at") or ts(job["completed_at"], "completed_at") > completed]
     if not later:
         failures.append("D-overlap-end: the probe exhausted its matrix before the drain completed")
