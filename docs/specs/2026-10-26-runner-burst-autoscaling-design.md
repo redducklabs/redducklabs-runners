@@ -1149,13 +1149,13 @@ Measured in acceptance (Rollout record in `docs/runbooks/node-pool-sizing.md`):
 Decision: **no time-of-day warm floor; `minRunners=2` at all hours.**
 
 - ARC 0.14.2 targets `min(minRunners + assigned jobs, maxRunners)` (see
-  Acceptance). The floor is therefore always idle on top of the running jobs,
-  not a pool the jobs draw from. Baseline holds 4 runner pods.
+  Acceptance). Until `maxRunners` is reached, the floor is therefore idle on
+  top of the running jobs, not a pool the jobs draw from. Baseline holds 4 runner pods.
 - At `minRunners=2`, the first two concurrent jobs and their replacement warm
   runners fit on baseline, so a quiet fleet adds no burst node.
 - At `minRunners=4`, the 4 idle runners fill baseline. The replacement for the
   very first job is created on a burst node, so any working-hours job keeps at
-  least one `s-8vcpu-16gb-amd` node up. That spends burst cost for a pickup
+  least one burst node up. That spends burst cost for a pickup
   that is already 13 s warm.
 - Cold pickup, the case a higher floor would shorten, is 156-160 s at p95,
   inside the 480 s threshold.

@@ -658,8 +658,8 @@ starting the next step.
 | | 3 | Node Pool Sizing `configure-expander` | | | |
 | | 4 | Deploy `deploy` | | | |
 | | 4 | Node Pool Sizing `enable-burst` | | | |
-| 2026-11-01 | 5A | Acceptance A (probe tag / evidence run) | `6be69b6` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41270237200 | pass (attempt 4): 4 baseline + 12 primary; warm p95 13 s, cold p95 156 s; network probe passed |
-| 2026-11-01 | 5B | Acceptance B + `set-burst-maxima` restore | `6be69b6` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41273100458 | pass: 4 baseline + 4 fallback; restore 6/2 run 41273981232 |
+| 2026-11-01 | 5A | Acceptance A (probe tag / evidence run) | `6be69b6` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41270237200 | pass (attempt 4): 4 baseline + 12 primary; warm p95 13 s (n=4), cold p95 156 s (n=10); network probe passed |
+| 2026-11-01 | 5B | Acceptance B + `set-burst-maxima` restore | `6be69b6` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41273100458 | pass: 4 baseline + 4 fallback; warm p95 13 s (n=4), cold p95 160 s (n=2); restore 6/2 run 41273981232 |
 | 2026-11-01 | 5C | Scale Runners `acceptance-phase-c` + evidence | `d0851f2` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41278522596 | pass: result `retired` (cycle 1), `jobs_killed=0`; Phase C run 41278515350 |
 | 2026-11-01 | 5D | Deploy `drain` + evidence | `a6e9e12` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41293538915 | pass (attempt 2): drain 41293531020; widest in-drain gap 9 s |
 | 2026-11-01 | 5E | `remove-burst`, `rollback`, steps 3–4, evidence | `ca8e2d5` | https://github.com/redducklabs/redducklabs-runners/actions/runs/41305468700 | pass (attempt 2): rollback 41304723978; `READY_FOR_MIGRATION=true` |
