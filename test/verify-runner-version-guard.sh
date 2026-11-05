@@ -63,6 +63,11 @@ else
     fail "malformed releases: exit ${status}, output: ${out}"
 fi
 
+echo '[{"tag_name": "2.339.0", "published_at": "2026-11-10T12:00:00Z"}]' >"${WORK}/oddtag.json"
+status=0
+python3 "${SCRIPT}" --root "$(make_tree 2.338.2)" check --releases "${WORK}/oddtag.json" >/dev/null 2>&1 || status=$?
+[ "${status}" -eq 2 ] && pass "an unexpected stable tag is unavailable, not current" || fail "unexpected tag: exit ${status}"
+
 tree=$(make_tree 2.338.2)
 printf 'ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.1.0\n' >>"${tree}/docker/Dockerfile.custom-runner"
 status=0
@@ -106,7 +111,7 @@ else
 fi
 
 for needle in "cron:" "RUNNER_TOKEN" "persist-credentials: false" "runs-on: ubuntu-latest" \
-    "scripts/check-runner-version.py" "build-runner-image.yml"; do
+    "scripts/check-runner-version.py" "Current runner version" "git push --force"; do
     if grep -qF "${needle}" "${WORKFLOW}"; then
         pass "workflow contains ${needle}"
     else

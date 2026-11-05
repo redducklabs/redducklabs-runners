@@ -76,7 +76,7 @@ def stable_releases(path: Path) -> list[tuple[str, datetime]]:
             continue
         match = TAG_RE.match(str(item.get("tag_name", "")))
         if not match:
-            continue
+            raise DataError(f"unexpected stable release tag: {item.get('tag_name')!r}")
         try:
             published = datetime.fromisoformat(
                 str(item.get("published_at")).replace("Z", "+00:00")
