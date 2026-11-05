@@ -637,6 +637,27 @@ autoscaler status (`Healthy`, `NoCandidates`, `NoActivity`, `Backoff`). An
 the shared 6 GiB budget; attribute it only after reviewing both containers' use,
 restarts, headroom and events.
 
+### Jobs are assigned but no runner receives them
+
+Symptoms: jobs stay queued, the watchdog fails, every runner is online and logs
+`Listening for Jobs`, and the ARC listener reports assigned jobs. There is no
+error in any log. Replacing the runners on the same version changes nothing.
+
+Check the runner version first. GitHub rejects runners more than 30 days behind
+the latest release, and ARC runners cannot update themselves. This stopped the
+whole fleet for about nine hours on 2026-11-05: pin 2.336.0, 30 days after
+2.338.0 shipped. Runner 2.338.2 restored it within seconds.
+
+**Runner Version Guard** runs daily to prevent this. It opens the bump PR for
+any newer stable release, opens a tracking issue if the bump goes unmerged, and
+fails from seven days behind. Runner pods use `:latest` with `imagePullPolicy:
+Always`, so merging the bump is enough while jobs are flowing.
+
+If the fleet is already rejected, no pod is replaced on its own. Merge the bump,
+wait for **Build and Push Runner Image** on `main`, then run Emergency Stop and
+the acknowledged deploy (see "Emergency Stop"). A plain `deploy` does not replace
+idle runners because the image name does not change.
+
 ## Security trade-off
 
 Two jobs share each runner node while each pod includes privileged DinD. The

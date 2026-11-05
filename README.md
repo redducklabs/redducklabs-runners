@@ -352,6 +352,7 @@ available for investigation and explicitly requested operations.
 | **Runner Acceptance Evidence** | Read-only acceptance controller for phases A-E; cancels only its verified probe | Manual (`workflow_dispatch`) |
 | **Deploy Cluster Addons** | Deploy metrics-server (`kubectl top`) | Manual (`workflow_dispatch`) |
 | **CI Usage Report** | Read-only weekly job usage across the organization: fleet vs hosted job-minutes, estimated hosted cost, fleet concurrency and queue wait | Weekly (Mondays 08:00 UTC) + manual |
+| **Runner Version Guard** | Daily check of the pinned runner against upstream releases. Opens the bump PR, tracks overdue updates in an issue, and fails from seven days behind, because GitHub silently stops sending jobs to runners more than 30 days behind | Daily + manual |
 | **Runner Status** | Read-only pool-state admission, per-pool node counts and bounds, expander readback, runner health, registration, memory headroom, OOM kills | Manual + Daily at 9 AM UTC |
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
 | **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
