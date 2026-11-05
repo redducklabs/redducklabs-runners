@@ -92,7 +92,7 @@ jobs:
         env:
           PINNED: ${{ steps.check.outputs.pinned }}
         run: |
-          ./scripts/read-live-runner-versions.sh "${PINNED}" | tee "${RUNNER_TEMP}/live.txt"
+          bash scripts/read-live-runner-versions.sh "${PINNED}" | tee "${RUNNER_TEMP}/live.txt"
           reported=$(sed -n 's/^VERSIONS=//p' "${RUNNER_TEMP}/live.txt")
           ok=$(sed -n 's/^OK=//p' "${RUNNER_TEMP}/live.txt")
           echo "versions=${reported}" >>"${GITHUB_OUTPUT}"
@@ -100,7 +100,8 @@ jobs:
           [ "${ok}" = "true" ] || echo "::error::Live runners report ${reported}, expected ${PINNED}"
 
       - name: Open the bump PR
-        if: steps.check.outputs.status == 'update-available' || steps.check.outputs.status == 'overdue'
+        # always(): a failed cluster read must not stop the bump.
+        if: always() && (steps.check.outputs.status == 'update-available' || steps.check.outputs.status == 'overdue')
         env:
           LATEST: ${{ steps.check.outputs.latest }}
           DEADLINE: ${{ steps.check.outputs.deadline }}

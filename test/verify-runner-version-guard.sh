@@ -118,7 +118,7 @@ cat >"${FAKE}/bin/kubectl" <<'FAKE_KUBECTL'
 #!/usr/bin/env bash
 case "$*" in
     *configmap*) cat "${FAKE_DIR}/marker" 2>/dev/null; exit 0 ;;
-    "get pods"*) cat "${FAKE_DIR}/pods.json"; exit 0 ;;
+    "get pods"*) cat "${FAKE_DIR}/pods.json"; exit "${FAKE_PODS_EXIT:-0}" ;;
     logs*) f="${FAKE_DIR}/logs/$4"; [ -f "${f}" ] || exit 1; cat "${f}" ;;
 esac
 FAKE_KUBECTL
@@ -175,6 +175,10 @@ set_pods a:d1
 pod_log a 2.336.0
 expect_live "a stale fleet fails" 2.336.0 false
 
+set_pods a:d1
+pod_log a 2.338.2
+FAKE_PODS_EXIT=7 expect_live "a failed pod listing fails" none false
+
 set_pods
 expect_live "zero pods fail" none false
 
@@ -183,7 +187,7 @@ echo "configmap/runner-fleet-emergency-stop" >"${FAKE}/marker"
 expect_live "an Emergency Stop is recognized" stopped true
 
 for needle in "cron:" "RUNNER_TOKEN" "persist-credentials: false" "runs-on: ubuntu-latest" \
-    "scripts/check-runner-version.py" "scripts/read-live-runner-versions.sh" "git push --force"; do
+    "scripts/check-runner-version.py" "bash scripts/read-live-runner-versions.sh" "git push --force"     "if: always() && (steps.check.outputs.status"; do
     if grep -qF "${needle}" "${WORKFLOW}"; then
         pass "workflow contains ${needle}"
     else

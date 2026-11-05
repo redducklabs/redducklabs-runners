@@ -36,12 +36,13 @@ read_pod_version() {
 }
 
 collect() {
-    local pods digest name version unresolved=0
+    local listing pods digest name version unresolved=0
     local -A digest_version=()
-    pods=$(kubectl get pods -n "${NAMESPACE}" --field-selector=status.phase=Running -o json |
-        jq -r '.items[] | .metadata.name as $name
+    # collect runs under `if`, so set -e is off here: check each failure.
+    listing=$(kubectl get pods -n "${NAMESPACE}" --field-selector=status.phase=Running -o json) || return 1
+    pods=$(jq -r '.items[] | .metadata.name as $name
             | [.status.containerStatuses[]? | select(.name == "runner")][0] as $runner
-            | "\($runner.imageID // "unknown") \($name)"')
+            | "\($runner.imageID // "unknown") \($name)"' <<<"${listing}") || return 1
     [ -n "${pods}" ] || return 1
 
     while read -r digest name; do
