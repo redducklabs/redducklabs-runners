@@ -12,15 +12,17 @@ name: Runner Version Guard
 #   - opens a bump PR when a newer stable release exists. The PR still needs
 #     its image build and scans to pass and a merge: this image runs privileged,
 #     so a new base never reaches the fleet unreviewed
-#   - reads the version every live runner reports and requires it to equal the
-#     pin. Only this proves the fleet moved: a merged pin says nothing if the
+#   - requires every live runner to be on an image proven to report the pin (see
+#     scripts/read-live-runner-versions.sh). Only this proves the fleet moved: a merged pin says nothing if the
 #     build failed, if an older build overwrote :latest, or if rejected idle
 #     runners are never replaced
 #   - keeps one tracking issue open while action is needed, and fails from
 #     seven days behind, leaving at least 23 days to act
 #
-# No deploy is needed after a bump merges. Runner pods use :latest with
-# imagePullPolicy Always and are ephemeral, so each new pod takes the new image.
+# No deploy is needed if a bump merges before the cutoff: runner pods use :latest
+# with imagePullPolicy Always and are ephemeral, so each new pod takes the new
+# image. After the cutoff idle runners are never replaced on their own; the
+# runbook gives the recovery.
 #
 # RUNNER_TOKEN opens the PR because a PR from GITHUB_TOKEN would not trigger the
 # image build. It only pushes an automation/ branch, and issue writes. Nothing
@@ -90,20 +92,12 @@ jobs:
         env:
           PINNED: ${{ steps.check.outputs.pinned }}
         run: |
-          : >"${RUNNER_TEMP}/versions.txt"
-          for pod in $(kubectl get pods -n arc-runners --field-selector=status.phase=Running -o name); do
-            kubectl logs -n arc-runners "${pod}" -c runner 2>/dev/null |
-              sed -n "s/.*Current runner version: '\([0-9.]*\)'.*/\1/p" |
-              head -n 1 >>"${RUNNER_TEMP}/versions.txt" || true
-          done
-          reported=$(sort -u "${RUNNER_TEMP}/versions.txt" | paste -sd, -)
-          echo "versions=${reported:-none}" >>"${GITHUB_OUTPUT}"
-          if [ "${reported}" = "${PINNED}" ]; then
-            echo "ok=true" >>"${GITHUB_OUTPUT}"
-          else
-            echo "::error::Live runners report ${reported:-no version}, expected ${PINNED}"
-            echo "ok=false" >>"${GITHUB_OUTPUT}"
-          fi
+          ./scripts/read-live-runner-versions.sh "${PINNED}" | tee "${RUNNER_TEMP}/live.txt"
+          reported=$(sed -n 's/^VERSIONS=//p' "${RUNNER_TEMP}/live.txt")
+          ok=$(sed -n 's/^OK=//p' "${RUNNER_TEMP}/live.txt")
+          echo "versions=${reported}" >>"${GITHUB_OUTPUT}"
+          echo "ok=${ok}" >>"${GITHUB_OUTPUT}"
+          [ "${ok}" = "true" ] || echo "::error::Live runners report ${reported}, expected ${PINNED}"
 
       - name: Open the bump PR
         if: steps.check.outputs.status == 'update-available' || steps.check.outputs.status == 'overdue'
@@ -130,7 +124,7 @@ jobs:
           git push --force "https://github.com/${GITHUB_REPOSITORY}.git" "${branch}"
           gh pr create --base main --head "${branch}" \
             --title "fix: update the Actions runner base image to ${LATEST}" \
-            --body "Opened by Runner Version Guard. GitHub can stop sending jobs to the pinned runner from ${DEADLINE}. Merge once the image build and scans pass. Runner pods take the new image as they are replaced, so no deploy is needed."
+            --body "Opened by Runner Version Guard. GitHub can stop sending jobs to the pinned runner from ${DEADLINE}. Merge once the image build and scans pass. Before that date runner pods take the new image as they are replaced, so no deploy is needed. If jobs have already stopped reaching runners, follow docs/runbooks/node-pool-sizing.md, Jobs are assigned but no runner receives them."
 
       - name: Update the tracking issue
         if: always() && steps.check.outputs.status != ''
@@ -145,6 +139,7 @@ jobs:
           issue=$(gh issue list --state open --search "\"${ISSUE_TITLE}\" in:title" --json number,title \
             --jq "[.[] | select(.title == env.ISSUE_TITLE)][0].number // empty")
           if [ "${STATUS}" = "current" ] && [ "${LIVE_OK}" = "true" ]; then
+            [ "${LIVE_VERSIONS}" != "stopped" ] || exit 0
             [ -z "${issue}" ] || gh issue close "${issue}" --comment "The pin is current at ${PINNED} and every live runner reports it."
             exit 0
           fi

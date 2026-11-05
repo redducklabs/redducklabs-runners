@@ -650,8 +650,9 @@ whole fleet for about nine hours on 2026-11-05: pin 2.336.0, 30 days after
 
 **Runner Version Guard** runs daily to prevent this. It opens the bump PR for
 any newer stable release, opens a tracking issue if the bump goes unmerged, and
-fails from seven days behind. It also fails when any live runner reports a
-version other than the pin, which catches a failed build or a stale `:latest`.
+fails from seven days behind. It also fails unless every live runner is on an
+image proven to report the pin, which catches a failed build or a stale
+`:latest`.
 Runner pods use `:latest` with `imagePullPolicy:
 Always`, so merging the bump is enough while jobs are flowing.
 

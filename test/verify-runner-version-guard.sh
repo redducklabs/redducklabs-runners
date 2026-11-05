@@ -110,8 +110,80 @@ else
     fail "the repository pin does not parse"
 fi
 
+# Live version proof, against a fake kubectl.
+LIVE="${ROOT}/scripts/read-live-runner-versions.sh"
+FAKE="${WORK}/fake"
+mkdir -p "${FAKE}/bin"
+cat >"${FAKE}/bin/kubectl" <<'FAKE_KUBECTL'
+#!/usr/bin/env bash
+case "$*" in
+    *configmap*) cat "${FAKE_DIR}/marker" 2>/dev/null; exit 0 ;;
+    "get pods"*) cat "${FAKE_DIR}/pods.json"; exit 0 ;;
+    logs*) f="${FAKE_DIR}/logs/$4"; [ -f "${f}" ] || exit 1; cat "${f}" ;;
+esac
+FAKE_KUBECTL
+chmod +x "${FAKE}/bin/kubectl"
+
+# set_pods <name:digest>...
+set_pods() {
+    rm -f "${FAKE}/marker"
+    rm -rf "${FAKE}/logs"
+    mkdir -p "${FAKE}/logs"
+    python3 - "$@" >"${FAKE}/pods.json" <<'PODS'
+import json, sys
+items = []
+for spec in sys.argv[1:]:
+    name, digest = spec.split(":")
+    items.append({"metadata": {"name": name}, "status": {"containerStatuses": [
+        {"name": "dind", "imageID": "docker"}, {"name": "runner", "imageID": digest}]}})
+print(json.dumps({"items": items}))
+PODS
+}
+pod_log() { printf "line\nCurrent runner version: '%s'\nline\n" "$2" >"${FAKE}/logs/$1"; }
+
+# expect_live <name> <VERSIONS value> <OK value>
+expect_live() {
+    local out
+    out=$(PATH="${FAKE}/bin:${PATH}" FAKE_DIR="${FAKE}" RUNNER_VERSION_ATTEMPTS=2 \
+        RUNNER_VERSION_RETRY_SECONDS=0 bash "${LIVE}" 2.338.2 2>&1)
+    if grep -qxF "VERSIONS=$2" <<<"${out}" && grep -qxF "OK=$3" <<<"${out}"; then
+        pass "$1"
+    else
+        fail "$1: ${out}"
+    fi
+}
+
+set_pods a:d1 b:d1
+pod_log a 2.338.2
+pod_log b 2.338.2
+expect_live "every runner on the pin passes" 2.338.2 true
+
+set_pods a:d1 b:d1
+pod_log a 2.338.2
+expect_live "a rotated log on a proven digest passes" 2.338.2 true
+
+set_pods a:d1 b:d2
+pod_log a 2.338.2
+expect_live "an unreadable runner on another digest fails" "2.338.2,unproven" false
+
+set_pods a:d1 b:d2
+pod_log a 2.338.2
+pod_log b 2.336.0
+expect_live "mixed versions fail" "2.336.0,2.338.2" false
+
+set_pods a:d1
+pod_log a 2.336.0
+expect_live "a stale fleet fails" 2.336.0 false
+
+set_pods
+expect_live "zero pods fail" none false
+
+set_pods
+echo "configmap/runner-fleet-emergency-stop" >"${FAKE}/marker"
+expect_live "an Emergency Stop is recognized" stopped true
+
 for needle in "cron:" "RUNNER_TOKEN" "persist-credentials: false" "runs-on: ubuntu-latest" \
-    "scripts/check-runner-version.py" "Current runner version" "git push --force"; do
+    "scripts/check-runner-version.py" "scripts/read-live-runner-versions.sh" "git push --force"; do
     if grep -qF "${needle}" "${WORKFLOW}"; then
         pass "workflow contains ${needle}"
     else
