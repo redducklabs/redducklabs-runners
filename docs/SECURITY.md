@@ -55,6 +55,14 @@ githubConfigSecret:
   policy (`GET /repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos`),
   which needs repository administration read on every member. Without it the
   read fails and the operation fails closed before any runner-group change.
+- **Runner Version Guard** pushes one `automation/actions-runner-<version>`
+  branch, opens its PR, and writes a tracking issue in this repository. A PR
+  from `GITHUB_TOKEN` would not trigger the image build, so it uses this token.
+  The branch needs the usual build, scans and a merge, so a new base image never
+  reaches the privileged fleet unreviewed. The version comes from upstream tags
+  that must match `vX.Y.Z`, and no release text reaches a shell or a PR body.
+  It also uses `DO_TOKEN` for read-only pod and log reads, and prints only
+  version numbers from those logs.
 - **CI Usage Report** lists the organization's repositories and reads Actions
   runs and jobs (GET only) of every non-archived repository, which needs the
   `repo` scope for the private ones. It runs on GitHub-hosted `ubuntu-latest`

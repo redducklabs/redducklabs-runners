@@ -115,6 +115,12 @@ Actions workflows pass unless they have actually run successfully.
   confirmation is appropriate for destructive local scripts such as emergency
   stop.
 
+- Keep the runner current. GitHub rejects runners more than 30 days behind the
+  latest release, ARC runners cannot self-update, and the failure is silent:
+  runners stay online while jobs stay queued. If jobs are assigned but idle
+  runners get nothing, check the runner version first. Merge any Runner Version
+  Guard PR promptly; see `docs/runbooks/node-pool-sizing.md`.
+
 ## Testing And Verification
 
 - Do not say tests pass unless the relevant test or workflow actually ran and

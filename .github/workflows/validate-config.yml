@@ -181,6 +181,11 @@ jobs:
           chmod +x test/verify-runner-resources.sh
           ./test/verify-runner-resources.sh
 
+      - name: Verify the runner version guard
+        run: |
+          chmod +x test/verify-runner-version-guard.sh
+          ./test/verify-runner-version-guard.sh
+
       - name: Check ARC chart version pins agree
         run: |
           echo "🔍 Checking ARC chart version pins..."

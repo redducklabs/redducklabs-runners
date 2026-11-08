@@ -1,0 +1,183 @@
+name: Runner Version Guard
+
+# Keeps the fleet ahead of GitHub's runner deprecation rule. Runners more than
+# 30 days behind the latest release are rejected from executing workflows, ARC
+# runners cannot update themselves, and the rejection is silent: runners stay
+# online while every job stays queued. That stopped the whole fleet on
+# 2026-11-05. See docs/runbooks/node-pool-sizing.md, "Jobs are assigned but no
+# runner receives them".
+#
+# Each day this workflow:
+#   - compares the pin in docker/Dockerfile.custom-runner with upstream releases
+#   - opens a bump PR when a newer stable release exists. The PR still needs
+#     its image build and scans to pass and a merge: this image runs privileged,
+#     so a new base never reaches the fleet unreviewed
+#   - requires every live runner to be on an image proven to report the pin (see
+#     scripts/read-live-runner-versions.sh). Only this proves the fleet moved: a merged pin says nothing if the
+#     build failed, if an older build overwrote :latest, or if rejected idle
+#     runners are never replaced
+#   - keeps one tracking issue open while action is needed, and fails from
+#     seven days behind, leaving at least 23 days to act
+#
+# No deploy is needed if a bump merges before the cutoff: runner pods use :latest
+# with imagePullPolicy Always and are ephemeral, so each new pod takes the new
+# image. After the cutoff idle runners are never replaced on their own; the
+# runbook gives the recovery.
+#
+# RUNNER_TOKEN opens the PR because a PR from GITHUB_TOKEN would not trigger the
+# image build. It only pushes an automation/ branch, and issue writes. Nothing
+# DO_TOKEN gives read-only cluster access: this workflow lists runner pods and
+# reads their logs, and changes nothing. This repository is public: only version
+# numbers are printed, never pod log text.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'
+
+concurrency:
+  group: runner-version-guard
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Check the pinned runner version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+      ISSUE_TITLE: Actions runner update required
+      CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'redducklabs-cluster' }}
+      CLUSTER_CONTEXT: ${{ vars.CLUSTER_CONTEXT || 'do-sfo3-redducklabs-cluster' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compare the pin with upstream releases
+        id: check
+        run: |
+          gh api 'repos/actions/runner/releases?per_page=50' >"${RUNNER_TEMP}/releases.json"
+          status=0
+          python3 scripts/check-runner-version.py check \
+            --releases "${RUNNER_TEMP}/releases.json" | tee "${RUNNER_TEMP}/check.txt" || status=$?
+          echo "::notice::Runner version check exit ${status}"
+          for key in PINNED LATEST DEADLINE STATUS; do
+            value=$(sed -n "s/^${key}=//p" "${RUNNER_TEMP}/check.txt")
+            echo "$(tr '[:upper:]' '[:lower:]' <<<"${key}")=${value}" >>"${GITHUB_OUTPUT}"
+          done
+          [ "${status}" -le 1 ] || exit "${status}"
+
+      - name: Setup infrastructure tools
+        uses: ./.github/actions/setup-tools
+
+      - name: Configure Kubernetes access (read-only)
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+        run: |
+          doctl auth init --access-token "${DO_TOKEN}" >/dev/null
+          doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}" >/dev/null
+          kubectl config use-context "${CLUSTER_CONTEXT}" >/dev/null
+
+      - name: Read the version live runners report
+        id: live
+        env:
+          PINNED: ${{ steps.check.outputs.pinned }}
+        run: |
+          bash scripts/read-live-runner-versions.sh "${PINNED}" | tee "${RUNNER_TEMP}/live.txt"
+          reported=$(sed -n 's/^VERSIONS=//p' "${RUNNER_TEMP}/live.txt")
+          ok=$(sed -n 's/^OK=//p' "${RUNNER_TEMP}/live.txt")
+          echo "versions=${reported}" >>"${GITHUB_OUTPUT}"
+          echo "ok=${ok}" >>"${GITHUB_OUTPUT}"
+          [ "${ok}" = "true" ] || echo "::error::Live runners report ${reported}, expected ${PINNED}"
+
+      - name: Open the bump PR
+        # always(): a failed cluster read must not stop the bump.
+        if: always() && (steps.check.outputs.status == 'update-available' || steps.check.outputs.status == 'overdue')
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+          DEADLINE: ${{ steps.check.outputs.deadline }}
+        run: |
+          branch="automation/actions-runner-${LATEST}"
+          existing=$(gh pr list --head "${branch}" --state open --json number --jq 'length')
+          if [ "${existing}" -gt 0 ]; then
+            echo "PR for ${LATEST} is already open"
+            exit 0
+          fi
+          docker buildx imagetools inspect "ghcr.io/actions/actions-runner:${LATEST}" >/dev/null
+          python3 scripts/check-runner-version.py apply --version "${LATEST}"
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add docker/Dockerfile.custom-runner README.md docs/toolchain/dockerfile-security-refactor.md
+          git commit -m "fix: update the Actions runner base image to ${LATEST}"
+          # Force is safe: only this workflow writes automation/ branches, and a
+          # retry after a closed PR or an interrupted run must replace the branch.
+          git push --force "https://github.com/${GITHUB_REPOSITORY}.git" "${branch}"
+          gh pr create --base main --head "${branch}" \
+            --title "fix: update the Actions runner base image to ${LATEST}" \
+            --body "Opened by Runner Version Guard. GitHub can stop sending jobs to the pinned runner from ${DEADLINE}. Merge once the image build and scans pass. Before that date runner pods take the new image as they are replaced, so no deploy is needed. If jobs have already stopped reaching runners, follow docs/runbooks/node-pool-sizing.md, Jobs are assigned but no runner receives them."
+
+      - name: Update the tracking issue
+        if: always() && steps.check.outputs.status != ''
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          DEADLINE: ${{ steps.check.outputs.deadline }}
+          LIVE_OK: ${{ steps.live.outputs.ok }}
+          LIVE_VERSIONS: ${{ steps.live.outputs.versions }}
+        run: |
+          issue=$(gh issue list --state open --search "\"${ISSUE_TITLE}\" in:title" --json number,title \
+            --jq "[.[] | select(.title == env.ISSUE_TITLE)][0].number // empty")
+          if [ "${STATUS}" = "current" ] && [ "${LIVE_OK}" = "true" ]; then
+            [ "${LIVE_VERSIONS}" != "stopped" ] || exit 0
+            [ -z "${issue}" ] || gh issue close "${issue}" --comment "The pin is current at ${PINNED} and every live runner reports it."
+            exit 0
+          fi
+          if [ "${STATUS}" = "update-available" ] && [ "${LIVE_OK}" = "true" ] && [ -z "${issue}" ]; then
+            exit 0
+          fi
+          body="@aronweiler the pinned Actions runner needs attention. Pinned ${PINNED}, latest ${LATEST}, status ${STATUS}, live runners ${LIVE_VERSIONS:-unknown}, earliest cutoff ${DEADLINE:-none}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -n "${issue}" ]; then
+            gh issue comment "${issue}" --body "${body}"
+          else
+            gh issue create --title "${ISSUE_TITLE}" --body "${body}"
+          fi
+
+      - name: Fail when action is overdue
+        if: always()
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          DEADLINE: ${{ steps.check.outputs.deadline }}
+          LIVE_OK: ${{ steps.live.outputs.ok }}
+          LIVE_VERSIONS: ${{ steps.live.outputs.versions }}
+        run: |
+          {
+            echo "## Runner Version Guard"
+            echo ""
+            echo "Pinned ${PINNED:-unknown}, latest ${LATEST:-unknown}, status ${STATUS:-unavailable}, live runners ${LIVE_VERSIONS:-unknown}."
+          } >>"${GITHUB_STEP_SUMMARY}"
+          if [ "${STATUS}" = "overdue" ]; then
+            echo "::error::Runner ${PINNED} is overdue. Merge the bump before ${DEADLINE}."
+            exit 1
+          fi
+          if [ "${LIVE_OK}" != "true" ]; then
+            echo "::error::Live runners report ${LIVE_VERSIONS:-unknown}, not the pin ${PINNED}."
+            exit 1
+          fi
+          case "${STATUS}" in
+            current|update-available) ;;
+            *) echo "::error::Runner version status is unavailable."; exit 1 ;;
+          esac
