@@ -193,7 +193,7 @@ These are the current pins in `docker/Dockerfile.custom-runner`.
 
 | Tool | Version | Source / pin |
 |------|---------|--------------|
-| GitHub Actions Runner | 2.338.0 | official GitHub runner base image |
+| GitHub Actions Runner | 2.338.2 | official GitHub runner base image |
 | Python | 3.13.15 (python-build-standalone rel 20260814) | tarball + SHA256 |
 | Node.js | 22.23.2 | nodejs.org tarball + SHA256 |
 | pnpm | 11.5.0 | corepack |

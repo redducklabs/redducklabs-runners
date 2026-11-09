@@ -264,7 +264,7 @@ ARG UV_VERSION=0.11.17
 ARG AWSCLI_VERSION=2.34.57
 ARG PYTHON_FULL_VERSION=3.13.13
 ARG NODE_VERSION=22.22.3          # nodejs.org tarball (NodeSource apt is stale)
-ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.338.0
+ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.338.2
 ```
 
 **Benefits**:
