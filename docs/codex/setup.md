@@ -56,6 +56,11 @@ Use the launcher so Codex starts from the repository root:
 ./scripts/launch-codex.sh
 ```
 
+`scripts/launch-codex.sh` and `docs/codex/update-gh-cli.sh` are committed
+without the executable bit. If `./...` reports `Permission denied` (for
+example in a WSL-native clone), run them with `bash <path>` instead, such as
+`bash scripts/launch-codex.sh --search`.
+
 The launcher forwards all arguments to `codex`:
 
 ```bash
@@ -179,6 +184,6 @@ test -f ~/.codex/AGENTS.md
 Then start Codex from the repo root:
 
 ```bash
-cd /mnt/h/repos/redducklabs-runners
+cd /mnt/<drive>/<path>/redducklabs-runners   # your checkout's WSL path
 ./scripts/launch-codex.sh
 ```
