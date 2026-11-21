@@ -50,8 +50,8 @@ from the current repository root instead of hardcoding an absolute path.
 Rules:
 
 - If the current repo is shown as a Windows path, translate it to WSL for Codex
-  `cwd`: `D:\repos\redducklabs-runners` becomes
-  `/mnt/d/repos/redducklabs-runners`.
+  `cwd`: `H:\repos\redducklabs-runners` becomes
+  `/mnt/h/repos/redducklabs-runners`.
 - If the current repo is already a WSL path, use that path as `cwd`.
 - The Codex `cwd` is the only absolute path in the call.
 - Put repo-relative paths in prompts and commands, such as

@@ -243,20 +243,27 @@ docker run --rm image trivy --version
 
 ```dockerfile
 # Build arguments for version management (current values, 2026 refresh)
-ARG GO_VERSION=1.26.3
-ARG KUBECTL_VERSION=v1.36.1
-ARG DOCTL_VERSION=v1.160.1
-ARG KUBECONFORM_VERSION=v0.7.0   # source-built
+ARG GO_VERSION=1.27.0
+ARG TRIVY_VERSION=v0.74.0
+ARG KUBECTL_VERSION=v1.36.3
+ARG DOCTL_VERSION=v1.167.0
+ARG KUBECONFORM_VERSION=v0.8.0   # source-built
 ARG KUBESEC_VERSION=v2.14.2      # source-built, x/crypto bumped
-ARG HELM_VERSION=v3.21.0
-ARG TERRAFORM_VERSION=1.15.5-1
-ARG BUILDX_VERSION=v0.34.1
-ARG UV_VERSION=0.11.17
-ARG AWSCLI_VERSION=2.34.57
-ARG PYTHON_FULL_VERSION=3.13.13
-ARG NODE_VERSION=22.22.3          # nodejs.org tarball (NodeSource apt is stale)
+ARG KUBESEC_XCRYPTO_VERSION=v0.55.0
+ARG HELM_VERSION=v3.21.4
+ARG TERRAFORM_VERSION=1.15.9-1
+ARG BUILDX_VERSION=v0.36.1
+ARG UV_VERSION=0.12.5
+ARG AWSCLI_VERSION=2.36.27
+ARG PYTHON_FULL_VERSION=3.13.15
+ARG NODE_VERSION=22.23.2          # nodejs.org tarball (NodeSource apt is stale)
 ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.336.0
+ARG PLAYWRIGHT_VERSION=1.60.0
 ```
+
+Each downloaded release artifact also has a matching `*_SHA256` build argument
+(`GO_SHA256`, `TRIVY_SHA256`, `KUBECTL_SHA256`, `DOCTL_SHA256`, `HELM_SHA256`,
+`BUILDX_SHA256`, `UV_SHA256`, `NODE_SHA256`, `PYTHON_TARBALL_SHA256`).
 
 **Benefits**:
 - **Centralized version management**: All versions defined at the top of Dockerfile
@@ -269,13 +276,16 @@ ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:2.336.0
 **Security Enhancement**: All downloaded binaries now include checksum verification:
 
 ```dockerfile
-# Install Docker buildx with checksum verification
-RUN set -ex && \
-    BUILDX_CHECKSUM="4f5e5a1b6dd0d6ff8476c8def7602d1eeedcb6f602e8dcd45079d352247eba06" && \
-    wget https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64 && \
-    echo "${BUILDX_CHECKSUM}  buildx-${BUILDX_VERSION}.linux-amd64" | sha256sum -c - && \
-    chmod +x buildx-${BUILDX_VERSION}.linux-amd64 && \
-    mv buildx-${BUILDX_VERSION}.linux-amd64 /usr/local/bin/docker-buildx
+# Install Docker buildx (verified SHA256)
+RUN set -eux && \
+    cd /tmp && \
+    wget -q "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" -O docker-buildx && \
+    echo "${BUILDX_SHA256}  docker-buildx" | sha256sum -c - && \
+    install -m 0755 docker-buildx /usr/local/bin/docker-buildx && \
+    mkdir -p /usr/local/lib/docker/cli-plugins && \
+    cp /usr/local/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx && \
+    rm -f /tmp/docker-buildx && \
+    docker buildx version
 ```
 
 **Security Benefits**:
@@ -298,65 +308,63 @@ gh release download v0.27.0 --repo docker/buildx --pattern "checksums.txt"
 # Find checksum for linux-amd64
 grep "linux-amd64" checksums.txt
 
-# Update Dockerfile with new checksum value
-BUILDX_CHECKSUM="<new_checksum_value>"
+# Update the Dockerfile build argument with the new checksum value
+ARG BUILDX_SHA256=<new_checksum_value>
 ```
 
 ### 3. Enhanced Error Handling
 
-**Reliability Enhancement**: Improved bash error handling with `set -euo pipefail`:
+**Reliability Enhancement**: Build steps run with `set -eux`. Only kubeconform
+and kubesec are still built from source, in the `go-builder` stage:
 
 ```bash
-RUN set -euo pipefail && \
-    echo "Building kubectl..." && \
-    cd kubectl-src/kubernetes && \
-    go mod download || { echo "Failed to download kubectl dependencies"; exit 1; } && \
-    go build -ldflags="-w -s" -o /tmp/binaries/kubectl ./cmd/kubectl || { echo "Failed to build kubectl"; exit 1; } && \
-    [ -f /tmp/binaries/kubectl ] || { echo "kubectl binary not found after build"; exit 1; }
+RUN set -eux && \
+    mkdir -p /tmp/binaries && \
+    git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git /tmp/kubeconform-src && \
+    cd /tmp/kubeconform-src && \
+    go build -ldflags="-w -s" -o /tmp/binaries/kubeconform ./cmd/kubeconform && \
+    /tmp/binaries/kubeconform -v && \
+    git clone --depth 1 --branch ${KUBESEC_VERSION} https://github.com/controlplaneio/kubesec.git /tmp/kubesec-src && \
+    cd /tmp/kubesec-src && \
+    go get "golang.org/x/crypto@${KUBESEC_XCRYPTO_VERSION}" && \
+    go mod tidy && \
+    go build -ldflags="-w -s -X github.com/controlplaneio/kubesec/v2/cmd.version=${KUBESEC_VERSION}" -o /tmp/binaries/kubesec . && \
+    /tmp/binaries/kubesec version && \
+    strip /tmp/binaries/kubeconform /tmp/binaries/kubesec
 ```
 
 **Error Handling Features**:
 - **Fail fast**: Exit immediately on any command failure (`set -e`)
 - **Undefined variable detection**: Catch undefined variables (`set -u`)
-- **Pipeline failure detection**: Catch failures in pipes (`set -o pipefail`)
-- **Step validation**: Verify each binary exists after build
-- **Descriptive error messages**: Clear indication of what failed
+- **Command tracing**: Each command is echoed to the build log (`set -x`)
+- **Step validation**: Each binary is executed (`-v` / `version`) right after it is built or installed
 
 ### 4. Security-Focused .trivyignore Patterns
 
-**Security Enhancement**: More specific patterns to avoid masking real vulnerabilities:
-
-```bash
-# Go module cache test certificates (restrict to Go module paths only)
-/go/pkg/mod/**/*.pem
-/go/pkg/mod/**/*.key
-/go/pkg/mod/**/*.crt
-/tmp/unified-go-build/**/*.pem
-/tmp/unified-go-build/**/*.key
-/tmp/unified-go-build/**/*.crt
-```
+**Security Enhancement**: `.trivyignore` now contains only `CVE-2025-47907`
+(container runtime tools in the actions-runner base image). The Go module-cache
+path ignores (`/go/pkg/mod/**`, `/tmp/unified-go-build/**`) were deleted because
+no build-stage artifacts reach the final image.
 
 **Security Benefits**:
-- **Path-constrained patterns**: Only ignore test files in specific Go module directories
-- **Reduced false negative risk**: Avoid masking real certificate/key files in application code
-- **Targeted exclusions**: Ignore only build-time test fixtures, not runtime files
-- **Better security coverage**: Scan all production code and configuration files
+- **No path-based exclusions**: Every file in the final image is scanned
+- **Reduced false negative risk**: No certificate/key patterns that could mask real findings
 
 ## Security Compliance
 
 ### 1. CVE Fixes Maintained
 
-All current CVE fixes are enforced by the CVE-floor gate (measured 2026-06-01):
-- **CVE-2025-47907**: every Go tool toolchain ≥ Go 1.24.6 (measured go1.25.0–1.26.3)
-- **CVE-2025-22869 / CVE-2024-45337**: kubesec `x/crypto` v0.52.0 (≥ v0.35.0)
+All current CVE fixes are enforced by the CVE-floor gate (measured 2026-08-19):
+- **CVE-2025-47907**: every Go tool toolchain ≥ Go 1.24.6 (measured go1.25.0–1.27.0)
+- **CVE-2025-22869 / CVE-2024-45337**: kubesec `x/crypto` v0.55.0 (≥ v0.35.0)
 - **CVE-2025-8959**: Trivy `go-getter` v1.8.6 (≥ v1.7.9)
 - **CVE-2025-54388**: Docker CLI ≥ v28.3.3 (smoke-enforced)
-- **CVE-2025-55199 / CVE-2025-55198**: Helm 3.21.0
+- **CVE-2025-55199 / CVE-2025-55198**: Helm 3.21.4
 
 ### 2. Build Security
 
 **Secure Build Process**:
-- **Source builds**: All Go tools built from source with checksum verification
+- **Mixed builds**: kubectl, doctl, trivy, and buildx are SHA256-verified release binaries; only kubeconform and kubesec are built from source (pinned git tags)
 - **Latest dependencies**: Updated crypto and security packages
 - **Isolated environments**: Multi-stage isolation prevents contamination
 - **Verified binaries**: All tools tested for functionality with error handling

@@ -19,6 +19,16 @@ The easiest way to deploy runners is directly from GitHub Actions - no local set
 | `RUNNER_TOKEN` | Personal Access Token for runner registration | [Create here](https://github.com/settings/tokens/new?scopes=admin:org,repo,workflow) with scopes: `admin:org`, `repo`, `workflow` |
 | `DO_TOKEN` | DigitalOcean API token | [DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens) → Generate New Token |
 
+#### Optional Repository Variables:
+
+The workflows read these repository variables (**Settings** → **Secrets and variables** → **Actions** → **Variables**) and fall back to the production defaults when unset: `CLUSTER_NAME` (`redducklabs-cluster`), `CLUSTER_CONTEXT` (`do-sfo3-redducklabs-cluster`), `RELEASE_NAME` and `RUNNER_SCALE_SET_NAME` (`redducklabs-runners`), `REGISTRY` (`registry.digitalocean.com`), `REPOSITORY` (`redducklabs/github-runner`).
+
+#### Other Prerequisites:
+
+- **Runner node pool**: the node pool `github-runners-pool-16g` (`s-8vcpu-16gb`, autoscaling) must already exist with label `node-type=github-runner` and taint `github-runner=true:NoSchedule`. `deploy/dind-values.yaml` pins runners to it, and the "Node Pool Sizing" workflow only updates an existing pool. See [the node pool sizing runbook](runbooks/node-pool-sizing.md).
+- **Runner image**: the default image `registry.digitalocean.com/redducklabs/github-runner:latest` must exist before the first deploy. Run the "Build and Push Runner Image" workflow once if it has not been published yet.
+- **Build cache package access (one-time)**: after the first `main` build publishes `github-runner-buildcache`, go to Org → Packages → `github-runner-buildcache` → Settings → Manage Actions access, and add this repository with role **Admin**. Without it, the scheduled "Prune Build Cache" runs fail.
+
 ### Step 2: Deploy Runners
 
 1. Go to the **Actions** tab in your repository
@@ -36,7 +46,9 @@ The easiest way to deploy runners is directly from GitHub Actions - no local set
 The workflow will automatically:
 - ✅ Validate your GitHub token
 - ✅ Configure Kubernetes access
-- ✅ Install Actions Runner Controller if needed
+- ✅ Check node pool capacity against maxRunners
+- ✅ Create the registry pull secret if missing
+- ✅ Sync ARC CRDs and install/upgrade the ARC controller to the pinned chart (0.14.2)
 - ✅ Deploy runners with your configuration
 - ✅ Verify runner registration
 - ✅ Provide usage instructions
@@ -48,6 +60,11 @@ Use the GitHub Actions workflows to manage your runners:
 - **Scale Runners**: Actions → "Scale GitHub Runners" → Run workflow
 - **Check Status**: Actions → "Runner Status" → Run workflow
 - **Emergency Stop**: Actions → "Emergency Stop Runners" → Run workflow
+- **Build Runner Image**: Actions → "Build and Push Runner Image" → Run workflow (also runs automatically on pushes to `main` that change the Dockerfile or its build inputs)
+- **Resize Node Pool**: Actions → "Node Pool Sizing" → Run workflow (dry run unless `apply` is checked; defaults 2/8 on `github-runners-pool-16g`). Required before raising maxRunners above the pool's `max_nodes`
+- **Cluster Addons**: Actions → "Deploy Cluster Addons" → Run workflow (installs metrics-server, which `kubectl top` needs)
+- **Prune Build Cache**: Actions → "Prune Build Cache" (runs weekly; manual runs are dry runs unless `dry_run` is unchecked)
+- **Validate Config**: Actions → "Validate Config" (runs automatically on pull requests and pushes to `main` that touch `deploy/`, `scripts/`, `test/`, or `.github/`)
 
 ## 🛠️ Method 2: Local Deployment (Alternative)
 
@@ -57,17 +74,21 @@ If you prefer to deploy from your local machine:
 
 1. **Install Required Tools**:
    ```bash
-   # Install kubectl
-   curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+   # Install kubectl (matches the cluster version, 1.36.3)
+   curl -LO "https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl"
    sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
    
    # Install Helm
    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
    
    # Install doctl (for DigitalOcean)
-   wget https://github.com/digitalocean/doctl/releases/latest/download/doctl-*-linux-amd64.tar.gz
-   tar xf doctl-*-linux-amd64.tar.gz
+   DOCTL_VERSION=1.167.0
+   wget https://github.com/digitalocean/doctl/releases/download/v${DOCTL_VERSION}/doctl-${DOCTL_VERSION}-linux-amd64.tar.gz
+   tar xf doctl-${DOCTL_VERSION}-linux-amd64.tar.gz
    sudo mv doctl /usr/local/bin
+
+   # Install jq (used by the scripts in scripts/ and test/)
+   sudo apt-get install -y jq
    ```
 
 2. **Create GitHub Token**:
@@ -118,26 +139,13 @@ Create environment file:
 cp .env.example .env
 ```
 
-Edit `.env` with your settings:
+Only `GITHUB_TOKEN` (required) and `IMAGE_TAG` (optional, image build) are read, and only when exported:
+
 ```bash
-# GitHub Configuration
-GITHUB_TOKEN=ghp_your_token_here
-GITHUB_ORG=redducklabs
-
-# Kubernetes Configuration
-CLUSTER_CONTEXT=do-sfo3-redducklabs-cluster
-NAMESPACE=arc-runners
-
-# Registry Configuration (Red Duck Labs)
-REGISTRY_URL=registry.digitalocean.com
-REGISTRY_NAMESPACE=redducklabs
-
-# Runner Configuration
-RELEASE_NAME=redducklabs-runners
-RUNNER_SCALE_SET_NAME=redducklabs-runners
-MIN_RUNNERS=2
-MAX_RUNNERS=8
+set -a; source .env; set +a
 ```
+
+Cluster context, namespace and release name are fixed in `deploy/deploy.sh`; scaling bounds come from `deploy/dind-values.yaml`.
 
 ### 3. Container Registry Setup
 
@@ -145,11 +153,9 @@ MAX_RUNNERS=8
    ```bash
    kubectl create namespace arc-runners --dry-run=client -o yaml | kubectl apply -f -
    
-   kubectl create secret docker-registry do-registry-secret \
-     --docker-server=registry.digitalocean.com \
-     --docker-username=your-do-token \
-     --docker-password=your-do-token \
-     --namespace=arc-runners
+   doctl auth init   # with the DigitalOcean API token
+   doctl registry kubernetes-manifest --name do-registry-secret --namespace arc-runners \
+     | kubectl apply -f -
    ```
 
 2. **Verify secret**:
@@ -162,36 +168,38 @@ MAX_RUNNERS=8
 ### 1. Deploy ARC Controller (First Time Only)
 
 ```bash
-# Add the ARC Helm repository
-helm repo add actions-runner-controller https://actions-runner-controller.github.io/actions-runner-controller
-
-# Install the controller
+# Install the controller (same chart version CI pins)
 helm upgrade --install arc \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+  --version 0.14.2 \
   --namespace arc-systems \
   --create-namespace
+
+# Sync the CRDs. Helm installs a chart's crds/ only on first install and never
+# updates them on upgrade, so apply them explicitly (server-side, because the
+# CRDs exceed the client-side apply annotation size limit).
+helm pull oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller --version 0.14.2 --untar --untardir /tmp/arc
+kubectl apply --server-side --force-conflicts -f /tmp/arc/gha-runner-scale-set-controller/crds
 ```
 
 ### 2. Build Custom Runner Image (Optional)
 
-If you want to customize the runner image:
+If you want to customize the runner image (edit `docker/Dockerfile.custom-runner` as needed first):
 
 ```bash
-cd docker/
-
-# Edit Dockerfile.custom-runner as needed
-# Then build and push
-./build-and-push.sh
+# Log in to the DigitalOcean registry, then build and push
+doctl registry login
+(cd docker && ./build-and-push.sh)
 ```
 
 ### 3. Deploy Runner Scale Set
 
 ```bash
-cd deploy/
-
 # Deploy with production configuration
-./deploy.sh
+(cd deploy && ./deploy.sh)
 ```
+
+Note: `deploy/deploy.sh` does not pass `--version`, so Helm uses the newest `gha-runner-scale-set` chart rather than the 0.14.2 that CI pins. Prefer the "Deploy GitHub Runners" workflow for production.
 
 The deployment script will:
 - Switch to the correct Kubernetes context
@@ -298,7 +306,7 @@ pieces the chart used to manage:
 ```bash
 helm template redducklabs-runners \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-  --version <version> --kube-version <cluster-version> \
+  --version 0.14.2 --kube-version 1.36.3 \
   -f deploy/dind-values.yaml
 ```
 
@@ -336,7 +344,7 @@ jobs:
   test:
     runs-on: redducklabs-runners
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Test Python
         run: |
@@ -416,9 +424,12 @@ spec:
 kubectl apply -f network-policy.yaml
 ```
 
-### 2. Service Account Setup
+### 2. Service Account Setup (Optional)
 
-Create a minimal service account for runners:
+Optional, and not deployed by this repository. A minimal service account for
+runners can be created as below; it only takes effect if you also set
+`template.spec.serviceAccountName: runner-service-account` in
+`deploy/dind-values.yaml`.
 
 ```yaml
 # service-account.yaml
@@ -435,7 +446,7 @@ metadata:
   namespace: arc-runners
 rules:
 - apiGroups: [""]
-  resources: ["pods", "secrets"]
+  resources: ["pods"]
   verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -455,21 +466,14 @@ roleRef:
 
 ### 3. Secret Management
 
-Store sensitive values in Kubernetes secrets:
-
-```bash
-# Create secret for registry access
-kubectl create secret docker-registry registry-secret \
-  --docker-server=registry.digitalocean.com \
-  --docker-username=$DO_REGISTRY_TOKEN \
-  --docker-password=$DO_REGISTRY_TOKEN \
-  -n arc-runners
-
-# Create secret for additional configuration
-kubectl create secret generic runner-config \
-  --from-literal=github-token=$GITHUB_TOKEN \
-  -n arc-runners
-```
+- **Registry pull secret**: runner pods pull with `do-registry-secret`
+  (`deploy/dind-values.yaml`), created in
+  [Container Registry Setup](#3-container-registry-setup) or by the "Deploy
+  GitHub Runners" workflow. No other registry secret is needed.
+- **GitHub token**: never commit it. It reaches ARC through
+  `--set githubConfigSecret.github_token=...` at deploy time
+  (`deploy/deploy.sh` and the "Deploy GitHub Runners" workflow), and ARC stores
+  it in a Kubernetes secret itself. No separate secret is needed.
 
 ## 🚨 Troubleshooting Setup
 
@@ -487,7 +491,7 @@ kubectl create secret generic runner-config \
 2. **Image Pull Errors**
    ```bash
    # Verify registry secret
-   kubectl get secret do-registry-secret -n arc-runners -o yaml
+   kubectl get secret do-registry-secret -n arc-runners
    
    # Test image pull
    kubectl run test-pod --image=registry.digitalocean.com/redducklabs/github-runner:latest --rm -it --restart=Never -n arc-runners
@@ -511,14 +515,14 @@ kubectl create secret generic runner-config \
 
 ### Getting Help
 
-1. Check the [troubleshooting section](README.md#troubleshooting) in the main README
+1. Check the [troubleshooting section](../README.md#troubleshooting) in the main README
 2. Review pod logs and events
 3. Use the test scripts to identify issues
 4. Check GitHub Actions Runner Controller documentation
 
 ## ✅ Setup Verification Checklist
 
-- [ ] kubectl and helm are installed
+- [ ] kubectl, helm, and jq are installed
 - [ ] DigitalOcean CLI (doctl) is configured
 - [ ] Kubernetes cluster access is working
 - [ ] GitHub token is created with correct scopes

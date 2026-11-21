@@ -28,7 +28,7 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
    - [Create in DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens)
 
 ### Infrastructure Requirements
-- **Kubernetes cluster 1.29+** - Red Duck Labs uses DigitalOcean (currently 1.33).
+- **Kubernetes cluster 1.29+** - Red Duck Labs uses DigitalOcean (currently 1.36).
   1.29 is a hard floor: the Docker-in-Docker daemon runs as a *native sidecar*
   (an init container with `restartPolicy: Always`), which earlier versions ignore.
 - DigitalOcean Container Registry (for custom images)
@@ -67,7 +67,7 @@ jobs:
   build:
     runs-on: redducklabs-runners  # Red Duck Labs runner label
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: echo "Running on Red Duck Labs self-hosted runner!"
 ```
 
@@ -245,16 +245,18 @@ available for investigation and explicitly requested operations.
 | **Deploy Cluster Addons** | Deploy metrics-server (`kubectl top`) | Manual (`workflow_dispatch`) |
 | **Runner Status** | Runner health, registration, memory headroom, OOM kills | Manual + Daily at 9 AM UTC |
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
-| **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
+| **Build and Push Runner Image** | Build, scan, and push the runner image | Push/PR touching image files, or manual |
+| **Validate Config** | Lint workflows, scripts, and runner config | Push/PR touching `deploy/`, `scripts/`, `test/`, `.github/`, or manual |
+| **Prune Build Cache** | Delete untagged GHCR buildx cache versions | Weekly (Sundays 04:00 UTC) + manual (dry run by default) |
 
 ### Scaling via GitHub Actions
 
 1. Go to **Actions** → **Scale GitHub Runners**
 2. Choose scaling action:
    - `status`: Check current configuration
-   - `scale-up`: Scale to default (2-4 runners)
+   - `scale-up`: Scale to default (2-8 runners)
    - `scale-down`: Minimal configuration (0-1 runners)
-   - `scale-max`: Maximum capacity (4-8 runners)
+   - `scale-max`: Maximum warm capacity (4-8 runners)
    - `scale-custom`: Custom min/max values
 
 ### Monitoring via GitHub Actions
@@ -279,6 +281,9 @@ available for investigation and explicitly requested operations.
 
 Run local management commands from the repository root. These scripts can mutate
 the live runner fleet, so use them only when local operations are intended.
+
+Most scripts are committed without the executable bit. On a Linux or macOS
+checkout, run them with `bash <path>` or `chmod +x` them first.
 
 ### Quick Scaling
 
@@ -455,32 +460,46 @@ This solution uses GitHub's Actions Runner Controller (ARC) to dynamically provi
 
 ```
 redducklabs-runners/
-├── docker/                    # Docker configurations
+├── docker/                    # Runner image
 │   ├── Dockerfile.custom-runner
+│   ├── aws-cli-public.key     # Pinned AWS CLI signing key
 │   ├── build-and-push.sh      # Production script
 │   └── build-and-push.template.sh
 ├── deploy/                    # Deployment configurations
 │   ├── deploy.sh              # Production script
 │   ├── deploy.template.sh
 │   ├── dind-values.yaml       # Production values
-│   └── dind-values.template.yaml
+│   ├── dind-values.template.yaml
+│   └── metrics-server-values.yaml
 ├── scripts/                   # Local management scripts
 │   ├── scale-runners.sh       # Main scaling script
 │   ├── runner-admin.sh        # Interactive admin
 │   ├── emergency-stop.sh      # Emergency shutdown
+│   ├── dismiss-base-image-vulnerabilities.sh
+│   ├── launch-codex.sh
 │   └── README.md
-├── test/                      # Testing scripts
+├── test/                      # Verification scripts (see test/README.md)
 │   ├── verify-tools.sh        # Tool verification
 │   ├── verify-cve-floor.sh    # Enforcing CVE-floor gate
 │   ├── verify-aws-key-expiry.sh
+│   ├── verify-runner-resources.sh
+│   ├── verify-docker-version.sh
+│   ├── verify-go-runtime.sh
+│   ├── verify-security-fixes.sh
 │   └── test-deployment.sh     # Deployment testing
 ├── docs/
 │   ├── SETUP.md               # Deployment setup guide
 │   ├── SECURITY.md            # Security guide
 │   ├── CONTRIBUTING.md
+│   ├── runbooks/              # Operational runbooks
 │   ├── security/              # Security runbooks and risk records
-│   └── toolchain/             # Runner image implementation notes
-├── .github/workflows/         # CI/CD workflows
+│   ├── toolchain/             # Runner image implementation notes
+│   ├── codex/                 # Codex CLI setup
+│   ├── specs/                 # Design specs
+│   └── plans/                 # Implementation plans
+├── .github/
+│   ├── actions/setup-tools/   # Shared tool-install action
+│   └── workflows/             # CI/CD and operations workflows
 └── README.md                  # This file
 ```
 
@@ -511,6 +530,6 @@ This repository is configured for Red Duck Labs production environment:
 - **Registry**: `registry.digitalocean.com/redducklabs`
 - **Namespace**: `arc-runners`
 - **Runner Label**: `redducklabs-runners`
-- **Scaling**: 2-4 runners (default), 4-8 runners (maximum)
+- **Scaling**: 2-8 runners (default), 4-8 runners (maximum warm capacity)
 
 Template versions (`.template.*` files) are provided for reuse by other organizations.

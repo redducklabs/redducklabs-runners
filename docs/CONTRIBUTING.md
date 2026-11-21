@@ -43,14 +43,12 @@ git remote add upstream https://github.com/redducklabs/redducklabs-runners.git
 
 ```bash
 # Install required tools
-# - kubectl (1.24+)
-# - helm (3.x)
+# - kubectl (1.35-1.37; within one minor of the 1.36 cluster, CI uses v1.36.3)
+# - helm (3.x; CI uses v3.21.4)
 # - docker
 # - doctl (DigitalOcean CLI)
 
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your development settings
+# No script reads .env; scripts take configuration from exported environment variables.
 
 # Set up GitHub token for testing
 export GITHUB_TOKEN=ghp_your_development_token
@@ -163,32 +161,51 @@ redducklabs-runners/
 
 ### Testing Locally
 
+Most scripts are committed without the executable bit. On a Linux or macOS
+checkout, run them with `bash <path>` or `chmod +x` them first.
+
+Run these from the repository root:
+
 ```bash
 # Test Docker build
-cd docker/
-docker build -t test-runner -f Dockerfile.custom-runner .
+docker build -t test-runner -f docker/Dockerfile.custom-runner docker/
 
-# Test deployment scripts (dry-run)
-cd deploy/
-# Edit values for test environment
-./deploy.sh --dry-run
+# Render and verify the runner config offline (no cluster access, nothing deployed).
+# Checks runner pod memory reservations and the one-pod-per-node invariant.
+# Needs helm, jq, and a `python` binary with PyYAML installed.
+./test/verify-runner-resources.sh
 
-# Test management scripts
-cd scripts/
-./scale-runners.sh status
-./test/verify-tools.sh
+# deploy/deploy.sh has no dry-run mode: it switches to the production context
+# and runs `helm upgrade --install`. Deploy only through the
+# "Deploy GitHub Runners" workflow.
+
+# Image security gates (run by Build and Push Runner Image in CI)
+bash test/verify-aws-key-expiry.sh docker/aws-cli-public.key
+docker build -t rdl-runner:local -f docker/Dockerfile.custom-runner docker/
+bash test/verify-cve-floor.sh rdl-runner:local
+
+# Go runtime check. Expects the image tagged redducklabs/custom-runner:latest and
+# asserts an exact Go version, which must match GO_VERSION in
+# docker/Dockerfile.custom-runner.
+docker tag rdl-runner:local redducklabs/custom-runner:latest
+./test/verify-go-runtime.sh
 ```
 
 ### Testing in Kubernetes
+
+These scripts talk to a cluster. Run them from the repository root.
 
 ```bash
 # Deploy to test cluster
 kubectl config use-context your-test-cluster
 
+# Read-only runner status (uses the CURRENT kube context)
+./scripts/scale-runners.sh status
+
 # Run deployment test
 ./test/test-deployment.sh
 
-# Verify tools installation
+# Verify tools installation (needs a running runner pod in arc-runners)
 ./test/verify-tools.sh
 ```
 
@@ -213,7 +230,7 @@ git push origin feature/your-feature-name
 ### 2. Create Pull Request
 
 1. **Create PR** on GitHub from your fork
-2. **Fill out the template** - Provide clear description
+2. **Describe the change** - What changed, why, and how you verified it
 3. **Reference issues** - Link to related issues
 4. **Add labels** - Use appropriate labels
 
@@ -234,11 +251,20 @@ git push origin feature/your-feature-name
 
 ### 4. Review Process
 
-1. **Automated checks** - CI/CD pipeline runs
+1. **Automated checks** - "Validate Config" runs when a PR touches `deploy/`,
+   `scripts/`, `test/`, `.github/workflows/` or `.github/actions/`; "Build and
+   Push Runner Image" runs when it touches `docker/Dockerfile.custom-runner`,
+   `docker/build-and-push.sh`, `docker/aws-cli-public.key`,
+   `test/verify-cve-floor.sh`, `test/verify-aws-key-expiry.sh` or `.trivyignore`.
+   PRs are not merged with failing checks.
 2. **Code review** - Maintainers review your code
 3. **Feedback** - Address any comments or suggestions
 4. **Approval** - Get approval from maintainers
 5. **Merge** - PR is merged into main branch
+
+Use conventional commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `test:`,
+`ci:`). Significant PRs also go through the Codex review gate
+(`claude_help/codex-review-process.md`).
 
 ## 🐛 Bug Reports
 
@@ -330,7 +356,11 @@ docker run --rm dev-runner python3 --version
 # Helm development
 helm template redducklabs-runners \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-  --values deploy/dind-values.yaml
+  --version 0.14.2 --kube-version 1.36.3 \
+  -f deploy/dind-values.yaml \
+  --set githubConfigSecret.github_token=PLACEHOLDER \
+  --set controllerServiceAccount.name=arc-gha-rs-controller \
+  --set controllerServiceAccount.namespace=arc-systems
 ```
 
 ### Documentation
@@ -350,7 +380,6 @@ helm template redducklabs-runners \
 
 Contributors will be recognized in:
 - Release notes for significant contributions
-- Contributors list in README
 - Special mentions for security reports
 
 ## 🆘 Getting Help

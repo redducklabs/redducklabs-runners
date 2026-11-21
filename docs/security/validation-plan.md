@@ -4,6 +4,13 @@
 **Date:** August 21, 2025  
 **Update Type:** Critical Security Updates & Base Image Upgrade
 
+> **Historical record.** This plan describes the August 2025 update. The tool
+> versions below are not current; see the
+> [README version table](../../README.md#software-versions) for current pins.
+> Trivy is now installed as a SHA256-verified release binary, and the CVE floors
+> are enforced by `test/verify-cve-floor.sh`. The commands below have been
+> updated to work against the current repository.
+
 ## 🔍 Summary of Changes
 
 ### 1. Base Image Updates
@@ -36,14 +43,15 @@
 #### 1.1 Dockerfile Integrity Check ✅
 ```bash
 # Syntax validation
-docker buildx build -f docker/Dockerfile.custom-runner --check .
+docker buildx build -f docker/Dockerfile.custom-runner --check docker
 ```
 **Status:** PASSED - No warnings found
 
 #### 1.2 Tool Version Alignment ✅
 ```bash
 # Verify test scripts match Dockerfile versions
-grep -n "3.18" docker/Dockerfile.custom-runner test/verify-tools.sh
+grep -n "HELM_VERSION" docker/Dockerfile.custom-runner
+grep -n "Helm" test/verify-tools.sh
 ```
 **Status:** PASSED - Helm version aligned to 3.18.6
 
@@ -57,7 +65,7 @@ grep -n "3.18" docker/Dockerfile.custom-runner test/verify-tools.sh
 #### 2.1 Image Build Test
 ```bash
 # Build test image
-docker build -f docker/Dockerfile.custom-runner -t redducklabs/runner:security-test .
+docker build -f docker/Dockerfile.custom-runner -t redducklabs/runner:security-test docker
 ```
 **Expected:** Successful build with all security updates
 
@@ -74,8 +82,8 @@ docker run --rm redducklabs/runner:security-test helm version
 
 #### 3.1 Runner Deployment Test
 ```bash
-# Deploy updated runners
-cd deploy && ./deploy.sh
+# Deploy updated runners via the "Deploy GitHub Runners" workflow
+gh workflow run deploy-runners.yml
 ```
 **Expected:** Successful deployment with new image
 
@@ -142,13 +150,12 @@ trivy image registry.digitalocean.com/redducklabs/github-runner:latest
 
 ### Rollback Commands:
 ```bash
-# Emergency rollback
-kubectl set image deployment/runner-scale-set \
-  runner=registry.digitalocean.com/redducklabs/github-runner:previous-stable \
-  -n arc-runners
+# Emergency rollback: re-run the deploy workflow with the previous image tag
+gh workflow run deploy-runners.yml \
+  -f runner_image=registry.digitalocean.com/redducklabs/github-runner:previous-stable
 
-# Verify rollback
-kubectl rollout status deployment/runner-scale-set -n arc-runners
+# Verify rollback (ARC runners are ephemeral pods, not a Deployment)
+kubectl get pods -n arc-runners -l actions.github.com/scale-set-name=redducklabs-runners
 ```
 
 ## 📊 Success Metrics

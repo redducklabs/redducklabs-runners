@@ -22,17 +22,17 @@ The security refactor was designed to eliminate false positive security alerts f
 
 ### 1. Clean Go Runtime Installation
 
-Added a clean Go 1.26.3 installation in the final stage:
+Added a clean Go 1.27.0 installation in the final stage:
 
 ```dockerfile
 # Install clean Go runtime for CI workflows (no module cache or test fixtures)
-RUN set -ex && \
+RUN set -eux && \
     GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz" && \
     cd /tmp && \
-    wget "https://golang.org/dl/${GO_TARBALL}" && \
+    wget -q "https://go.dev/dl/${GO_TARBALL}" && \
+    echo "${GO_SHA256}  ${GO_TARBALL}" | sha256sum -c - && \
     tar -C /usr/local -xzf "${GO_TARBALL}" && \
     rm -f "${GO_TARBALL}" && \
-    # Verify Go installation
     /usr/local/go/bin/go version
 ```
 
@@ -58,19 +58,6 @@ mkdir -p /home/runner/go/{bin,src,pkg} && \
 chown -R runner:runner /home/runner/go
 ```
 
-### 4. Updated Security Exclusions
-
-Updated `.trivyignore` to exclude the clean Go installation:
-
-```
-# Clean Go runtime installation (no module cache or test fixtures)
-# This is a clean Go installation without any cached modules or test certificates
-/usr/local/go/**
-
-# Go workspace for runner user (clean, no cached modules)
-/home/runner/go/**
-```
-
 ## Key Distinctions
 
 | Aspect | Build-time Go (Removed) | Runtime Go (Preserved) |
@@ -79,19 +66,17 @@ Updated `.trivyignore` to exclude the clean Go installation:
 | **Purpose** | Building Go tools | Runtime execution |
 | **Contains** | Module cache, test fixtures, certificates | Clean Go binaries only |
 | **Security Risk** | High (test certificates, private keys) | Low (clean installation) |
-| **Trivy Scanning** | Excluded due to false positives | Excluded as clean runtime |
+| **Trivy Scanning** | Excluded due to false positives | Scanned (not excluded) |
 
 ## Security Benefits Maintained
 
-✅ **No cached Go modules** - Clean installation only  
-✅ **No test fixtures** - No testdata directories  
-✅ **No test certificates** - No .pem, .key, .crt files  
+✅ **No cached modules** - Module cache and GOPATH start empty  
 ✅ **No build artifacts** - No go.mod, go.sum from dependencies  
 ✅ **Multi-stage isolation** - Build artifacts isolated and cleaned  
 
 ## Functionality Restored
 
-✅ **Go 1.26.3 available** - `go` command in PATH  
+✅ **Go 1.27.0 available** - `go` command in PATH  
 ✅ **Environment variables set** - GOROOT, GOPATH, PATH configured  
 ✅ **Module support** - `go mod init`, `go mod tidy` working  
 ✅ **Compilation support** - `go build`, `go run` working  
@@ -106,13 +91,18 @@ Run the verification script to confirm the fix:
 ./test/verify-go-runtime.sh
 ```
 
+The script runs against a local image tagged `redducklabs/custom-runner:latest`
+(`docker/build-and-push.sh` tags `registry.digitalocean.com/redducklabs/github-runner`,
+so retag the image first). It asserts an exact Go version, which must match
+`GO_VERSION` in `docker/Dockerfile.custom-runner`.
+
 The script tests:
-- Go binary availability and version
+- Go binary availability and exact version
 - Environment variable configuration
 - Basic compilation functionality
-- Module system functionality
+- Module system functionality (`go mod init`)
 - Workspace permissions
-- Absence of cached modules/test fixtures
+- Absence of `testdata`, `*_test.go`, `*.pem` and `*.key` files under `/usr/local/go`
 
 ## Impact
 
@@ -129,6 +119,6 @@ Before deploying:
 ## Files Modified
 
 1. `docker/Dockerfile.custom-runner` - Added clean Go runtime installation
-2. `.trivyignore` - Added exclusions for clean Go installation
+2. `.trivyignore` - Added exclusions for clean Go installation (since removed; `.trivyignore` now lists only `CVE-2025-47907`)
 3. `test/verify-go-runtime.sh` - Added verification script (new)
 4. `docs/toolchain/go-runtime.md` - This documentation (new)

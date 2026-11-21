@@ -24,8 +24,9 @@ Codex-specific adapter rules:
 - For Docker image changes, read `README.md`, `docs/security/vulnerability-dismissals.md`,
   `docs/toolchain/go-runtime.md`, and `docs/toolchain/dockerfile-security-refactor.md` as
   relevant.
-- For deployment or Kubernetes changes, read `docs/SETUP.md` and the relevant
-  scripts/configuration under `deploy/` before editing.
+- For deployment or Kubernetes changes, read `docs/SETUP.md`,
+  `docs/runbooks/node-pool-sizing.md`, and the relevant scripts/configuration
+  under `deploy/` before editing.
 - For security-related changes, read `docs/SECURITY.md`,
   `docs/security/validation-plan.md`, and `docs/security/vulnerability-dismissals.md` as
   relevant.

@@ -58,9 +58,13 @@ minRunners: 2
 maxRunners: 8
 ```
 
-Commit and open a PR. Then deploy via the **Deploy GitHub Runners** workflow
-(`.github/workflows/deploy-runners.yml`), setting `min_runners`/`max_runners` to
-the same numbers.
+Commit and open a PR; **Validate Config** runs `test/verify-runner-resources.sh`
+on it. After it merges, run the **Deploy GitHub Runners** workflow
+(`.github/workflows/deploy-runners.yml`) from `main`, setting
+`min_runners`/`max_runners` to the same numbers. The workflow overrides the
+values file with these inputs, and they are fixed choices (min 0-4; max 1, 2, 4,
+6, 8, 10), so other values also need the `options` lists in `deploy-runners.yml`
+updated.
 
 ### 2. Change the pool bounds
 
@@ -124,7 +128,9 @@ pod per node; the limits are what a job can actually consume.
 
 **Before raising the requests**, note the budget: node allocatable is 13.32Gi and
 system DaemonSets take ~0.68Gi, leaving **~12.64Gi**. Total requests must stay
-comfortably under that or pods stop scheduling entirely.
+above half of allocatable (6819Mi, or two pods fit per node) and at or below
+~12.64Gi (12945Mi), or pods stop scheduling. Run `./test/verify-runner-resources.sh` (no
+cluster needed) after any change; **Validate Config** enforces both bounds on PRs.
 
 To go beyond ~12.5Gi per job you need a bigger node size, which is a pool
 replacement, not a resize. `m-8vcpu-64gb` ($336/mo) is the cheapest memory on

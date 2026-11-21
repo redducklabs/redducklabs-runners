@@ -50,7 +50,10 @@ This repository does not require a project-specific Postgres MCP server.
 
 ## Launch Codex From The Repo
 
-Use the launcher so Codex starts from the repository root:
+Use the launcher so Codex starts from the repository root.
+
+Most scripts are committed without the executable bit. On a Linux or macOS
+checkout, run them with `bash <path>` or `chmod +x` them first.
 
 ```bash
 ./scripts/launch-codex.sh
