@@ -27,6 +27,31 @@ Configure these secrets in your repository settings (`Settings → Secrets and v
    - DigitalOcean API token for Kubernetes and registry access
    - [Create in DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens)
 
+Besides Deploy, `RUNNER_TOKEN` is used by Scale Runners, Rebalance Runners,
+Runner Status, Runner Acceptance Evidence, Runner Version Guard and CI Usage
+Report for organization-level reads. Runner Version Guard also uses it to push
+its `automation/` bump branch and open the PR (a PR opened with
+`GITHUB_TOKEN` would not trigger the image build) and to update its tracking
+issue.
+
+### Optional Repository Variables
+The fleet workflows read these Actions variables
+(`Settings → Secrets and variables → Actions → Variables`) and fall back to the
+Red Duck Labs defaults when they are unset:
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `CLUSTER_NAME` | `redducklabs-cluster` | every workflow that reaches the cluster |
+| `CLUSTER_CONTEXT` | `do-sfo3-redducklabs-cluster` | every workflow that reaches the cluster |
+| `RELEASE_NAME` | `redducklabs-runners` | Deploy, Scale Runners, Emergency Stop, Runner Status |
+| `RUNNER_SCALE_SET_NAME` | `redducklabs-runners` | Deploy |
+| `REGISTRY` | `registry.digitalocean.com` | Deploy |
+| `REPOSITORY` | `redducklabs/github-runner` | Deploy |
+
+Many gates also assert the canonical names (namespace `arc-runners`, release
+and label `redducklabs-runners`, the committed pool names), so overriding a
+variable alone does not retarget the fleet to another organization.
+
 ### Infrastructure Requirements
 - **Kubernetes 1.36 or newer** - deployment preflight verifies both the API
   server and eligible runner nodes. The Docker-in-Docker daemon is a *native
@@ -87,34 +112,47 @@ runner registration with GitHub.
 
 ### 5. Use in Your Workflows
 
+Only the private repositories in the runner group allow-list
+(`deploy/trusted-runner-repositories.txt`, see
+[Trust boundary](#trust-boundary-and-hosted-runner-placement)) can use this
+label; public repositories stay on GitHub-hosted runners.
+
 ```yaml
 jobs:
   build:
     runs-on: redducklabs-runners  # Red Duck Labs runner label
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: echo "Running on Red Duck Labs self-hosted runner!"
 ```
 
 ## Custom Runner Image
 
-The included Dockerfile provides a comprehensive development environment optimized for Red Duck Labs workflows:
+The included Dockerfile provides a comprehensive development environment optimized for Red Duck Labs workflows.
+
+The production image is built by **Build and Push Runner Image**: pull
+requests that touch the image build it, smoke-test it and run the CVE-floor
+gate without pushing; a push to `main` (or a manual run on `main`) builds,
+pushes `registry.digitalocean.com/redducklabs/github-runner:latest`, and runs the
+CVE-floor gate and Trivy scan on the pushed image. Runner pods use `:latest`
+with `imagePullPolicy: Always`, so each new runner pod pulls the newest push.
+A manual push to `:latest` therefore reaches the fleet without the CI gates;
+build locally under a test tag instead:
 
 ```bash
-cd docker/
+cd docker
+docker build -t test-runner -f Dockerfile.custom-runner .
 
-# Build and push (Red Duck Labs production)
-./build-and-push.sh
-
-# Or build manually
-docker build -t registry.digitalocean.com/redducklabs/github-runner:latest -f Dockerfile.custom-runner .
-docker push registry.digitalocean.com/redducklabs/github-runner:latest
+# Manual push (production registry; requires `doctl registry login`).
+# build-and-push.sh builds and pushes ${IMAGE_TAG:-latest}.
+IMAGE_TAG=my-test-tag bash build-and-push.sh
 ```
 
 ## Included Tools
 
 ### Development Tools
-- Python 3.13.15 with pip, black, flake8, mypy, ruff, pytest, pytest-mock
+- Python 3.13.15 with pip, black, flake8, mypy, ruff, pytest, pytest-cov,
+  pytest-mock, requests, boto3, pyyaml
 - Node.js 22.23.2 with npm, pnpm 11.5.0 (via corepack)
 - uv 0.12.5 (Python package/installer manager)
 - Go 1.27.0 runtime (for CI workflows that build Go)
@@ -243,10 +281,10 @@ guide and update the pinned fingerprint in the Dockerfile and in
 ## Reviewed Target: Runner Capacity and Memory
 
 This is the reviewed burst-autoscaling target
-([design](docs/specs/2026-10-26-runner-burst-autoscaling-design.md)). It is
-pending CI rollout and the acceptance phases A-E in
-[the runbook](docs/runbooks/node-pool-sizing.md); repositories migrate only
-after Phase E reports `READY_FOR_MIGRATION=true`.
+([design](docs/specs/2026-10-26-runner-burst-autoscaling-design.md)). It was
+rolled out through CI and passed acceptance phases A-E and an Emergency Stop
+drill on 2026-11-01; Phase E reported `READY_FOR_MIGRATION=true`. The runs are
+listed in the "Rollout record" of [the runbook](docs/runbooks/node-pool-sizing.md).
 
 | | Value |
 |---|---|
@@ -259,8 +297,9 @@ after Phase E reports `READY_FOR_MIGRATION=true`.
 
 On the measured 13.32 GiB / 7880m allocatable baseline node, two pods reserve
 10 GiB and 6 CPU; a third does not fit. The burst sizes have the same
-16 GiB / 8 vCPU shape; their allocatable is assumed equal until acceptance
-Phases A and B measure it live.
+16 GiB / 8 vCPU shape; acceptance Phases A and B passed the pool-state
+compatibility and headroom check on live primary and fallback nodes
+(two pods per node).
 The burst pools do not use the baseline's `s-8vcpu-16gb`: DigitalOcean refused
 to create a pool of that size in `sfo3` for lack of regional capacity
 (2026-10-28; spec "Burst pool sizes (Ruling 38)"). Warm runners prefer baseline; burst nodes exist only
@@ -283,8 +322,9 @@ Every self-hosted runner pod includes privileged DinD. Two jobs on one node
 therefore share a kernel and increase the cross-job blast radius. The reviewed
 target limits the fleet to the organization runner group
 `redducklabs-private-runners`, with
-`visibility=selected`, public access disabled, and exactly these private
-repositories: `aurolegal.ai`, `autoduck`, `keel`, `manager`,
+`visibility=selected`, public access disabled, and exactly the private
+repositories committed in `deploy/trusted-runner-repositories.txt` (by
+repository ID): `aurolegal.ai`, `autoduck`, `keel`, `manager`,
 `platform-observability`, `redducklabs`, `redducklaw`, `superfood-shred`,
 `therapy-link`, `zipbot-internal`, and `zipbot-v2`. Admission evidence for the
 newest members is under `docs/security/runner-admission/`. CI fails closed if
@@ -323,7 +363,8 @@ unavailable. See [node-pool sizing](docs/runbooks/node-pool-sizing.md).
 
 ### Acceptance
 
-Live acceptance runs after the rollout steps, from reviewed commits only. The
+Live acceptance runs after the rollout steps, from reviewed commits only (the
+2026-11-01 results are in the runbook's "Rollout record"). The
 probe `runner-burst-acceptance.yml` in private `redducklabs/aurolegal.ai` is
 dispatched from a unique annotated tag on its reviewed commit and checks
 `expected_workflow_sha`; **Runner Acceptance Evidence** in this repository
@@ -348,14 +389,16 @@ available for investigation and explicitly requested operations.
 | **Deploy GitHub Runners** | CI-only trust preparation, deployment, and rollback | Manual (`workflow_dispatch`) |
 | **Scale GitHub Runners** | `record-density` (read-only check of the committed density rollback target) and acceptance `acceptance-phase-c` | Manual (`workflow_dispatch`) |
 | **Node Pool Sizing** | Burst pools: `create-burst`, `configure-expander`, `enable-burst`, `set-burst-maxima`, `remove-burst` | Manual (`workflow_dispatch`) |
-| **Rebalance Runners** | Retires idle runners stranded on burst nodes | Hourly + manual |
+| **Rebalance Runners** | Retires idle runners stranded on burst nodes | Hourly (minute 17) + manual (`expected_sha`) |
 | **Runner Acceptance Evidence** | Read-only acceptance controller for phases A-E; cancels only its verified probe | Manual (`workflow_dispatch`) |
 | **Deploy Cluster Addons** | Deploy metrics-server (`kubectl top`) | Manual (`workflow_dispatch`) |
 | **CI Usage Report** | Read-only weekly job usage across the organization: fleet vs hosted job-minutes, estimated hosted cost, fleet concurrency and queue wait | Weekly (Mondays 08:00 UTC) + manual |
-| **Runner Version Guard** | Daily check of the pinned runner against upstream releases. Opens the bump PR, tracks overdue updates in an issue, and fails from seven days behind, because GitHub silently stops sending jobs to runners more than 30 days behind | Daily + manual |
+| **Runner Version Guard** | Daily check of the pinned runner against upstream releases. Opens the bump PR, tracks overdue updates in an issue, and fails from seven days behind, because GitHub silently stops sending jobs to runners more than 30 days behind | Daily (06:17 UTC) + manual |
 | **Runner Status** | Read-only pool-state admission, per-pool node counts and bounds, expander readback, runner health, registration, memory headroom, OOM kills | Manual + Daily at 9 AM UTC |
 | **Emergency Stop Runners** | Emergency shutdown with recovery info | Manual (requires confirmation) |
-| **Build Custom Runner Image** | Build and push Docker image | Push to Dockerfile or manual |
+| **Build and Push Runner Image** | Build, gate and push the runner image (PRs build and gate without pushing) | Push to `main` or PR touching the image files + manual |
+| **Validate Config** | YAML, actionlint, `bash -n` and shellcheck, hosted-runner policy, `test/verify-runner-resources.sh`, `test/verify-runner-version-guard.sh`, `test/verify-burst-autoscaling.sh`, `test/verify-acceptance.sh`; no cluster access | PR / push to `main` touching `deploy/`, `scripts/`, `test/`, `.github/workflows/`, `.github/actions/` + manual |
+| **Prune Build Cache** | Deletes untagged versions of the GHCR buildx cache package (dry run by default when dispatched) | Weekly (Sundays 04:00 UTC) + manual |
 
 ### CI-only runner changes
 
@@ -372,7 +415,8 @@ verifies that the live release equals that render before a rollout. Every Helm
 write keeps 100 revisions (`--history-max 100`). Emergency Stop writes the
 marker `arc-runners/runner-fleet-emergency-stop` before its Helm write; while it
 exists the fleet workflows refuse to run, except Deploy `deploy`/`rollback`
-with `acknowledge_emergency_stop=true`, and every fleet Helm write re-checks it
+with `acknowledge_emergency_stop=true` and Node Pool Sizing `remove-burst`
+(which only removes capacity), and every fleet Helm write re-checks it
 afterwards and re-applies the stop. The marker is also the parameter of the
 server-side fence `deploy/runner-emergency-stop-fence.yaml` (a
 ValidatingAdmissionPolicy installed by Deploy `deploy` and `rollback`): while
@@ -420,20 +464,51 @@ The local helper is read-only and accepts only `status`:
 ./scripts/scale-runners.sh status
 ```
 
+It needs `kubectl`, `jq` and an authenticated `gh`, and it switches the current
+kube context to `CLUSTER_CONTEXT` (default `do-sfo3-redducklabs-cluster`).
+Scripts without the executable bit in git (`git ls-files -s` shows `100644`,
+for example `scale-runners.sh`) must be run as `bash scripts/<name>.sh` or
+after `chmod +x`.
+
 ## Testing
 
 ### Focused Checks
 
+Most scripts are committed without the executable bit; run them with `bash`
+(as below) or `chmod +x` them first. See [test/README.md](test/README.md) for
+details.
+
+Offline checks (no cluster, DigitalOcean or GitHub API access; Validate Config runs
+the first four on every relevant PR):
+
 ```bash
-./test/verify-tools.sh
-./test/test-deployment.sh
-./test/verify-runner-resources.sh   # pod-level resources, two-pods-per-node, trust/preflight fixtures (no cluster needed)
-./test/verify-cve-floor.sh <image>
-./test/verify-aws-key-expiry.sh docker/aws-cli-public.key
-./test/verify-docker-version.sh
-./test/verify-go-runtime.sh
-./test/verify-security-fixes.sh
+bash test/verify-runner-resources.sh     # chart render: pod-level resources, two-pods-per-node, trust/preflight fixtures (needs helm, jq, python3 and access to the ghcr.io chart registry)
+bash test/verify-burst-autoscaling.sh    # burst pools, pool-state gate, fence, network policy, rebalance (fake CLIs)
+bash test/verify-acceptance.sh           # acceptance verdicts and the evidence workflow
+bash test/verify-runner-version-guard.sh # runner version guard (python3 only)
+bash test/verify-aws-key-expiry.sh docker/aws-cli-public.key
 ```
+
+Image checks (need Docker and a locally built image):
+
+```bash
+bash test/verify-cve-floor.sh <image>
+bash test/verify-go-runtime.sh   # expects the image tagged redducklabs/custom-runner:latest
+bash test/verify-docker-version.sh   # checks the Docker CLI on the machine it runs on (run it inside the image)
+```
+
+Live checks against the runner pods in the current kube context (`kubectl
+exec` into the first runner pod in `arc-runners`; `verify-tools.sh` also starts
+a throwaway container in that pod's dind daemon; only when explicitly wanted):
+
+```bash
+bash test/verify-tools.sh
+bash test/test-deployment.sh
+bash test/verify-security-fixes.sh
+```
+
+On Windows, run the offline suites in WSL against a fresh LF clone; a
+`core.autocrlf=true` checkout produces false failures (see `CLAUDE.md`).
 
 ## Security Best Practices
 
@@ -583,8 +658,8 @@ failed repository listing prints `usage data unavailable` and no tables.
 
 ### Verify GitHub Registration
 ```bash
-curl -H "Authorization: token $GITHUB_TOKEN" \
-  https://api.github.com/orgs/redducklabs/actions/runners
+# Needs a token with organization runner read access (admin:org)
+gh api orgs/redducklabs/actions/runners --jq '.runners[] | "\(.name) \(.status) busy=\(.busy)"'
 ```
 
 ### Diagnosing Out-Of-Memory Failures
@@ -601,7 +676,12 @@ Actions -> Runner Status -> Run workflow
 
 ### Common Issues
 
-- **Pods stuck in Init**: Check image pull secrets and registry access
+- **Jobs stay queued while idle runners are online**: check the runner
+  version first. GitHub stops sending jobs to runners more than 30 days behind
+  the latest release, with no error in any log. Merge the Runner Version Guard
+  bump PR; see the runbook's
+  [Diagnostics](docs/runbooks/node-pool-sizing.md#diagnostics) for recovery
+- **Pods stuck in Init**: Check the `do-registry-secret` pull secret and registry access
 - **Runners not appearing**: Verify GitHub token has correct scopes
 - **Build failures**: Ensure Docker-in-Docker is properly configured
 - **Scaling issues**: Check AutoScalingRunnerSet status
@@ -653,31 +733,55 @@ This solution uses GitHub's Actions Runner Controller (ARC) to dynamically provi
 redducklabs-runners/
 ├── docker/                    # Docker configurations
 │   ├── Dockerfile.custom-runner
-│   ├── build-and-push.sh      # Production script
+│   ├── aws-cli-public.key     # Pinned AWS CLI signing key
+│   ├── build-and-push.sh      # Manual build-and-push; CI is the production path
 │   └── build-and-push.template.sh
 ├── deploy/                    # Deployment configurations
+│   ├── dind-values.yaml       # Reviewed `burst` target values (Deploy `deploy`)
+│   ├── density-values.yaml    # Committed `density` rollback target (Deploy `rollback`)
+│   ├── runner-network-policy.yaml       # Runner pod NetworkPolicy
+│   ├── runner-emergency-stop-fence.yaml # Emergency Stop ValidatingAdmissionPolicy
+│   ├── trusted-runner-repositories.txt  # Runner group allow-list (repository IDs)
+│   ├── metrics-server-values.yaml       # Deploy Cluster Addons
 │   ├── deploy.sh              # Legacy local helper; CI is the production path
 │   ├── deploy.template.sh
-│   ├── dind-values.yaml       # Reviewed target values
 │   └── dind-values.template.yaml
-├── scripts/                   # Local operational helpers
-│   ├── scale-runners.sh       # Status-only helper
+├── scripts/                   # Helpers called by the workflows, plus local tools
+│   ├── verify-runner-pool-state.sh      # Pool-state admission gate
+│   ├── verify-runner-trust-boundary.sh  # Runner group and public-workflow checks
+│   ├── verify-runner-network-policy.sh
+│   ├── burst-pools.sh         # Node Pool Sizing operations
+│   ├── drain-runners.sh, rollback-density.sh, retire-idle-burst-runners.sh
+│   ├── acceptance-*.{sh,py}   # Acceptance Phase C and evidence/verdicts
+│   ├── check-runner-version.py, read-live-runner-versions.sh  # Runner Version Guard
+│   ├── runner-cost-report.sh  # Read-only invoice-based node cost
 │   ├── ci-usage-report.sh     # Read-only Actions job usage and fleet concurrency
+│   ├── scale-runners.sh       # Status-only helper
 │   ├── runner-admin.sh        # Legacy interactive helper
 │   ├── emergency-stop.sh      # Legacy local helper
+│   ├── lib/                   # Shared shell and Python modules
 │   └── README.md
-├── test/                      # Testing scripts
-│   ├── verify-tools.sh        # Tool verification
+├── test/                      # Testing scripts (see test/README.md)
+│   ├── verify-runner-resources.sh, verify-burst-autoscaling.sh,
+│   │   verify-acceptance.sh, verify-runner-version-guard.sh  # Offline suites
 │   ├── verify-cve-floor.sh    # Enforcing CVE-floor gate
 │   ├── verify-aws-key-expiry.sh
-│   └── test-deployment.sh     # Deployment testing
+│   ├── verify-tools.sh        # Tool verification
+│   ├── test-deployment.sh     # Deployment testing
+│   ├── fixtures/, lib/        # Offline fixtures and fakes
+│   └── README.md
 ├── docs/
 │   ├── SETUP.md               # Deployment setup guide
 │   ├── SECURITY.md            # Security guide
 │   ├── CONTRIBUTING.md
+│   ├── runbooks/              # Node pool sizing, rollout, rollback, emergency stop
 │   ├── security/              # Security runbooks and risk records
-│   └── toolchain/             # Runner image implementation notes
-├── .github/workflows/         # CI/CD workflows
+│   ├── toolchain/             # Runner image implementation notes
+│   ├── specs/, plans/         # Dated design records and implementation plans
+│   └── codex/                 # Codex environment setup
+├── .github/
+│   ├── workflows/             # CI/CD workflows
+│   └── actions/setup-tools/   # Shared kubectl/helm/doctl installer
 └── README.md                  # This file
 ```
 
@@ -702,8 +806,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Reviewed Red Duck Labs Target Configuration
 
-This repository records the reviewed target configuration, pending CI deployment
-and external live acceptance:
+This repository records the reviewed target configuration, deployed through CI
+and accepted live on 2026-11-01 (see the runbook's "Rollout record"):
 
 - **Cluster**: `do-sfo3-redducklabs-cluster`
 - **Registry**: `registry.digitalocean.com/redducklabs`

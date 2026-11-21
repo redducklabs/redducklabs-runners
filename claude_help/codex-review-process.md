@@ -30,7 +30,8 @@ temp/codex-reviews/
 ```
 
 The repository ignores `temp/`, so these files are local working artifacts and
-must not be committed.
+must not be committed. The directory does not exist in a fresh clone; create it
+with `mkdir -p temp/codex-reviews` before the first review.
 
 File naming convention:
 
@@ -50,8 +51,9 @@ from the current repository root instead of hardcoding an absolute path.
 Rules:
 
 - If the current repo is shown as a Windows path, translate it to WSL for Codex
-  `cwd`: `D:\repos\redducklabs-runners` becomes
-  `/mnt/d/repos/redducklabs-runners`.
+  `cwd`: the drive letter becomes a lower-case `/mnt/<drive>` prefix and
+  backslashes become slashes, so `X:\path\to\redducklabs-runners` becomes
+  `/mnt/x/path/to/redducklabs-runners`.
 - If the current repo is already a WSL path, use that path as `cwd`.
 - The Codex `cwd` is the only absolute path in the call.
 - Put repo-relative paths in prompts and commands, such as

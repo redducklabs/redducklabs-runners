@@ -53,11 +53,12 @@ paths admit them.
 
 ## Operations
 
-All mutating workflows verify `expected_sha` first, share the non-cancelling
-`runner-fleet-mutation` concurrency group (except Emergency Stop,
-`runner-emergency-stop`, and Rebalance, `runner-rebalance`; see below), admit
-the live state with
-`scripts/verify-runner-pool-state.sh --operation <op>`, and bracket every
+All mutating workflows in the table below verify `expected_sha` first, share
+the non-cancelling `runner-fleet-mutation` concurrency group (except Emergency
+Stop, `runner-emergency-stop`, and Rebalance, `runner-rebalance`; see below),
+admit the live state with
+`scripts/verify-runner-pool-state.sh --cluster-name <name> --operation <op>`,
+and bracket every
 mutation with the identity contract (cluster ID, baseline pool ID and baseline
 node UID/providerID pairs never change; only the declared transition may).
 Every Helm write passes `--history-max 100`. Rollback does not depend on Helm
@@ -84,6 +85,16 @@ run except as described in "Emergency Stop".
 | Runner Acceptance Evidence (`phase`, run IDs, `expected_sha`) | read-only evidence | any | acceptance verdict; cancels only its verified probe |
 | Runner Status | read-only | any | pools, burst node count per pool, ARC state |
 | CI Usage Report | read-only (GitHub API only) | any | fleet vs hosted job-minutes, hosted cost estimate, fleet concurrency and queue wait |
+
+Two platform workflows also hold `runner-fleet-mutation` but are outside this
+contract: they run no pool-state admission and do not check the Emergency Stop
+marker. **Prepare Runner Platform** (`expected_sha`,
+`confirm_platform_mutation`) reconciles the `arc-systems` and `arc-runners`
+namespaces, the `do-registry-secret` pull secret, and the pinned ARC CRDs and
+controller (chart 0.14.2). **Deploy Cluster Addons** (`addon=metrics-server`,
+`metrics_server_chart_version`, default 3.14.0; no `expected_sha`) installs
+metrics-server from `deploy/metrics-server-values.yaml`; Runner Status metrics
+and the Phase A network probe targets depend on it.
 
 Node Pool Sizing runs without `apply` are dry runs that print the planned calls;
 run one first and read it. `scripts/runner-cost-report.sh --month YYYY-MM`
@@ -122,6 +133,18 @@ from the GitHub jobs API. Read it before proposing a bounds change:
 
 Any bounds change is a reviewed commit to `deploy/dind-values.yaml` (and Node
 Pool Sizing `set-burst-maxima` for the pools) followed by Deploy, as above.
+The bounds are also pinned in code, so that commit must change the pins with
+the values or CI and Deploy reject it: the `burst` contract `(2, 20)` in
+`scripts/validate-runner-isolation-contract.py` and
+`scripts/lib/runner_pool_state.py`, the `--min-runners 2 --max-runners 20`
+arguments in `.github/workflows/deploy-runners.yml`, and the burst pool caps
+(`BURST_CAPS` primary 6 / fallback 2, `BURST_SUM_CAP` 8) in
+`scripts/lib/runner_pool_state.py`. `test/verify-runner-resources.sh` (Validate
+Config) fails unless the rendered pod requests exactly 3 CPU / 5 GiB with a
+6 GiB limit, two pods fit each runner node size with at least 2 GiB and
+1000m to spare while a third does not, `maxRunners` is 20 and fits two pods
+on each of 2 baseline + 8 burst nodes, and `minRunners` is at most 4; change
+its constants in the same commit.
 
 ### Failure rules
 
@@ -233,9 +256,11 @@ Pool Sizing `set-burst-maxima` for the pools) followed by Deploy, as above.
   (which restores `burst` first) or with Deploy `drain`.
 - **Fresh cluster.** The gate requires an existing ARC release
   (`redducklabs-runners`, chart `gha-runner-scale-set-0.14.2`, `deployed`) and
-  controller release. A new or rebuilt cluster cannot be brought up with these
-  workflows; it needs a separate, reviewed bootstrap procedure (first Helm
-  install) before this runbook applies.
+  controller release. Prepare Runner Platform can create the namespaces,
+  registry secret, CRDs and controller, but no workflow performs the first
+  install of the scale-set release, so a new or rebuilt cluster cannot be
+  brought up with these workflows alone; it needs a separate, reviewed
+  bootstrap procedure (first Helm install) before this runbook applies.
 
 ## Rollout order
 

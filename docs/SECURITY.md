@@ -1,6 +1,6 @@
 # Security Guide - Red Duck Labs GitHub Actions Runners
 
-**Last Updated:** October 27, 2026
+**Last Updated:** November 21, 2026
 
 This document outlines security best practices and guidelines for the Red Duck Labs GitHub Actions self-hosted runners.
 
@@ -29,7 +29,8 @@ This document outlines security best practices and guidelines for the Red Duck L
 **Requirements:**
 - Use Personal Access Tokens (PAT) with minimal required scopes
 - Rotate tokens regularly (recommended: every 90 days)
-- Store tokens in Kubernetes secrets, never in code
+- Store the token only as the `RUNNER_TOKEN` GitHub Actions repository secret,
+  never in code or in a committed values file
 
 **Required Scopes:**
 ```
@@ -39,15 +40,16 @@ workflow     # For workflow management
 ```
 
 **Token Storage:**
-```bash
-# Store in Kubernetes secret
-kubectl create secret generic github-token \
-  --from-literal=token=$GITHUB_TOKEN \
-  --namespace=arc-runners
 
-# Reference in Helm values
-githubConfigSecret:
-  github_token: ""  # Provided via --set flag
+`deploy/dind-values.yaml` commits `githubConfigSecret.github_token: ""`. The
+**Deploy GitHub Runners** workflow passes the token to Helm at deploy time, and
+the ARC scale-set chart stores it in a Kubernetes Secret that the chart creates
+in `arc-runners`. No manually created token secret is used.
+
+```bash
+# What .github/workflows/deploy-runners.yml runs (token from secrets.RUNNER_TOKEN)
+helm upgrade ... -f deploy/dind-values.yaml \
+  --set githubConfigSecret.github_token="${RUNNER_TOKEN}"
 ```
 
 **`RUNNER_TOKEN` uses beyond ARC registration:**
@@ -286,71 +288,99 @@ set `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` to that path on the runner.
 
 ### Container Network Security
 
-- Containers run in isolated network namespaces
-- Docker-in-Docker uses secure configuration
-- No privileged containers unless absolutely necessary
+- The runner container and the DinD sidecar share the pod's network
+  namespace, so the runner NetworkPolicy above applies to both
+- `dockerd` listens only on the Unix socket `/var/run/docker.sock`, shared with
+  the runner through the `dind-sock` emptyDir volume; no TCP listener is opened
+- The DinD sidecar runs with `privileged: true`; the runner container is not
+  privileged. This is an accepted risk (AOR-1 and AOR-2 in
+  `docs/security/vulnerability-dismissals.md`)
 
 ## 🐳 Container Security
 
 ### Image Security
 
 **Base Image:**
-- Use official GitHub runner images as base
-- Regular updates to base images
-- Vulnerability scanning with Trivy
+- The official GitHub runner image, pinned by version in
+  `docker/Dockerfile.custom-runner`
+  (`ARG ACTIONS_RUNNER_BASE=ghcr.io/actions/actions-runner:<version>`)
+- The **Runner Version Guard** workflow opens a reviewed PR to bump the pin
+  when a new runner release appears
+- Vulnerability scanning with Trivy and an enforcing CVE-floor gate (below)
 
-**Custom Image Security:**
-```dockerfile
-# Run as non-root user
-USER runner
-
-# Remove unnecessary packages
-RUN apt-get autoremove -y && \
-    apt-get autoclean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set secure permissions
-RUN chmod 755 /usr/local/bin/*
-```
+**Custom Image Security** (`docker/Dockerfile.custom-runner`):
+- Multi-stage build: kubeconform and kubesec are built from source with a
+  current Go toolchain in a throwaway builder stage; kubectl, doctl, Trivy,
+  Helm, buildx, uv and Node.js are downloaded as release artifacts and checked
+  against pinned SHA256 values
+- Tool versions are pinned with `ARG` values at the top of the Dockerfile
+- apt lists, `/tmp` and Python caches are removed in a final cleanup layer
+- The image ends with `USER runner`; root is used only during the build
 
 **Image Scanning:**
+
+The **Build Runner Image** workflow scans every PR image and every pushed
+image. The Trivy HIGH/CRITICAL scan (`aquasecurity/trivy-action`, honoring
+`.trivyignore`) is report-only and uploads SARIF to the Security tab. The
+enforcing gate is `test/verify-cve-floor.sh`, which fails the build if any Go
+tool's toolchain is below Go 1.24.6, Trivy's go-getter is below v1.7.9, or
+kubesec's `golang.org/x/crypto` is below v0.35.0. The workflow also requires
+Docker CLI 28.3.3 or newer.
+
 ```bash
-# Automated scanning in CI/CD
+# Run the CVE-floor gate against a locally built image
+bash test/verify-cve-floor.sh <image-ref>
+
+# Scan the published image (log in first with `doctl registry login`)
 trivy image registry.digitalocean.com/redducklabs/github-runner:latest
 ```
 
 ### Runtime Security
 
-**Security Context:**
+**Security Context** (as set in `deploy/dind-values.yaml`):
 ```yaml
 template:
   spec:
-    securityContext:
-      runAsNonRoot: true
-      runAsUser: 1001
-      fsGroup: 1001
+    automountServiceAccountToken: false
+    # No pod-level securityContext (no runAsNonRoot, no fsGroup)
+    initContainers:
+    - name: dind
+      securityContext:
+        privileged: true            # Docker daemon; accepted risk (AOR-2)
     containers:
     - name: runner
       securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: false  # Required for runner operation
-        runAsNonRoot: true
-        capabilities:
-          drop:
-          - ALL
+        runAsUser: 1001
+        runAsGroup: 121
+        allowPrivilegeEscalation: true   # workflows use sudo (AOR-1)
+        readOnlyRootFilesystem: false
 ```
 
+The runner container starts as uid 1001 but keeps the default capability set
+and can escalate with `sudo`. Setting `allowPrivilegeEscalation: false` or
+dropping all capabilities breaks `sudo`/`apt` in real workflows; the isolation
+boundary is the pod, not in-container privilege restriction. See AOR-1 in
+`docs/security/vulnerability-dismissals.md`.
+
 **Resource Limits:**
+
+One pod-level budget is shared by the runner and the DinD sidecar; containers
+set no resources of their own. There is no CPU limit and no ephemeral-storage
+limit.
+
 ```yaml
-resources:
-  limits:
-    cpu: "2"
-    memory: "4Gi"
-    ephemeral-storage: "10Gi"
-  requests:
-    cpu: "500m"
-    memory: "1Gi"
+template:
+  spec:
+    resources:
+      requests:
+        cpu: "3"
+        memory: "5Gi"
+      limits:
+        memory: "6Gi"
 ```
+
+`test/verify-runner-resources.sh` renders the chart and checks this budget and
+the two-pods-per-node packing.
 
 ## 🔍 Monitoring & Auditing
 
@@ -368,9 +398,15 @@ resources:
 - Network policy violations
 - Image pull failures
 
+This repository does not deploy Prometheus, alerting rules, or a Kubernetes
+audit policy; the cluster add-ons it manages are limited to metrics-server
+(`deploy/metrics-server-values.yaml`). The **Runner Status** workflow reports
+pod state and OOM evidence. The two snippets below are illustrative examples
+for an operator who adds that tooling, not deployed configuration.
+
 **Alerting Rules:**
 ```yaml
-# Example Prometheus alert
+# Example Prometheus alert (not deployed by this repository)
 groups:
 - name: runner-security
   rules:
@@ -385,9 +421,10 @@ groups:
 
 ### Audit Logging
 
-**Enable Kubernetes Audit:**
+**Kubernetes Audit (example):**
 ```yaml
-# audit-policy.yaml
+# audit-policy.yaml (example; DOKS manages the API server, so apply this only
+# where you control the control plane's audit configuration)
 apiVersion: audit.k8s.io/v1
 kind: Policy
 rules:
@@ -419,40 +456,47 @@ unavailable.
 ```bash
 # Legacy local fallback only
 ./scripts/emergency-stop.sh
-
-# Isolate affected pods
-kubectl label pod <pod-name> security=isolated -n arc-runners
 ```
+
+Relabeling a pod does not isolate it: the runner NetworkPolicy selects pods by
+`actions.github.com/scale-set-name`, which a new label does not change.
+Runner pods are ephemeral and are removed when their job ends or the release
+is stopped, so collect logs before or while stopping.
 
 **2. Investigation:**
 ```bash
-# Collect logs
-kubectl logs <pod-name> -n arc-runners -c runner > incident-logs.txt
+# Collect logs (runner and Docker daemon)
+kubectl logs <pod-name> -n arc-runners -c runner > incident-runner.txt
+kubectl logs <pod-name> -n arc-runners -c dind > incident-dind.txt
 
 # Check events
 kubectl get events -n arc-runners --sort-by='.lastTimestamp'
-
-# Review audit logs
-grep "arc-runners" /var/log/kubernetes/audit.log
 ```
+
+Review the organization audit log in GitHub for runner registration and
+runner-group changes.
 
 **3. Recovery:**
-```bash
-# Rotate tokens
-# Update GitHub token
-export NEW_GITHUB_TOKEN=ghp_new_token
 
-# Update the repository DO_TOKEN secret, then run Prepare Runner Platform from
-# the reviewed SHA to reconcile registry access. Deploy runners through the
-# GitHub Actions deployment workflow from that same reviewed SHA.
-```
+Rotate credentials in GitHub, then redeploy from a reviewed commit:
+
+1. Create a new `RUNNER_TOKEN` PAT, update the repository secret, and revoke
+   the old token.
+2. If `DO_TOKEN` is affected, create a new DigitalOcean token, update the
+   repository secret, revoke the old one, and run **Prepare Runner Platform**
+   from the reviewed SHA to recreate `do-registry-secret`.
+3. Run **Deploy GitHub Runners** (`operation=deploy`, with
+   `acknowledge_emergency_stop=true` after an Emergency Stop) from the same
+   reviewed SHA. Deploy re-renders the chart's token Secret from the new
+   `RUNNER_TOKEN`.
 
 ### Common Security Incidents
 
 **1. Token Compromise:**
 - Immediately revoke the token in GitHub
 - Generate new token with minimal scopes
-- Update Kubernetes secrets
+- Update the `RUNNER_TOKEN` (or `DO_TOKEN`) repository secret and redeploy
+  through the workflows, as in Recovery above
 - Monitor for unauthorized usage
 
 **2. Container Escape:**
@@ -486,18 +530,28 @@ export NEW_GITHUB_TOKEN=ghp_new_token
 ### Application Hardening
 
 **Runner Configuration:**
+
+The runner container's environment in `deploy/dind-values.yaml` is limited to
+the Docker connection and the shared tool cache:
 ```yaml
-# Disable unnecessary features
 template:
   spec:
     containers:
     - name: runner
       env:
-      - name: RUNNER_ALLOW_RUNASROOT
-        value: "false"
-      - name: DISABLE_RUNNER_UPDATE
-        value: "true"
+      - name: DOCKER_HOST
+        value: unix:///var/run/docker.sock
+      - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+        value: "120"
+      - name: RUNNER_TOOL_CACHE
+        value: /opt/hostedtoolcache
+      - name: AGENT_TOOLSDIRECTORY
+        value: /opt/hostedtoolcache
 ```
+
+Runners are ephemeral (one job per pod) and cannot self-update. The runner
+version is the pinned base image; the **Runner Version Guard** workflow opens a
+PR before GitHub's 30-day version cutoff (see `docs/runbooks/node-pool-sizing.md`).
 
 **Workflow Security:**
 ```yaml
@@ -509,7 +563,7 @@ jobs:
       contents: read      # Minimal permissions
       packages: none      # No package access
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         token: ${{ secrets.GITHUB_TOKEN }}  # Use provided token
 ```
@@ -553,8 +607,8 @@ jobs:
 # Scan runner image
 trivy image registry.digitalocean.com/redducklabs/github-runner:latest
 
-# Scan cluster
-trivy k8s cluster --report summary
+# Scan the cluster in the current kube context (read-only)
+trivy k8s --report summary
 ```
 
 ## 🔒 Security Vulnerability Remediation
@@ -573,10 +627,14 @@ HashiCorp's go-getter library subdirectory download feature was vulnerable to sy
 - go-getter library dependency v1.7.8
 
 **Remediation Action:**
-Updated Trivy installation in `docker/Dockerfile.custom-runner` to:
-1. Build from source using Go 1.24.6 instead of using pre-compiled binaries
-2. Explicitly update go-getter dependency to v1.7.9 which includes the security fix
-3. Build from main branch to ensure latest security patches
+The August 2025 fix built Trivy from source with Go 1.24.6 and go-getter
+v1.7.9. The 2026 toolchain refresh
+(`docs/specs/2026-05-31-runner-toolchain-refresh-design.md`) replaced the
+source build: `docker/Dockerfile.custom-runner` now installs the official Trivy
+release binary (`TRIVY_VERSION`, verified against `TRIVY_SHA256`), whose
+upstream build already includes the fixed go-getter. The fix is enforced, not
+assumed: the CVE-floor gate (`test/verify-cve-floor.sh`) fails the image build
+if Trivy's embedded go-getter is below v1.7.9.
 
 **Technical Details:**
 - The fix disables symlinks in git client operations
@@ -585,9 +643,11 @@ Updated Trivy installation in `docker/Dockerfile.custom-runner` to:
 
 **Verification:**
 ```bash
-# Verify Trivy includes fixed go-getter version
-trivy --version
-# Check for go-getter v1.7.9 in dependencies
+# Enforcing gate, as run by the Build Runner Image workflow
+bash test/verify-cve-floor.sh <image-ref>
+
+# Manual check inside the image (the image ships a Go runtime)
+docker run --rm <image-ref> bash -c 'go version -m /usr/local/bin/trivy | grep go-getter'
 ```
 
 **References:**
@@ -596,24 +656,51 @@ trivy --version
 - go-getter v1.7.9 release: https://github.com/hashicorp/go-getter/releases/tag/v1.7.9
 
 **kubesec Security:**
+`deploy/dind-values.yaml` is a Helm values file, not a manifest, and the
+rendered runner pod template sits inside an `AutoscalingRunnerSet` custom
+resource, while kubesec scores standard workload kinds such as Pod and
+Deployment. Render the chart, wrap the pod template in a Pod, and scan that. Expect kubesec to flag the privileged DinD sidecar and
+`allowPrivilegeEscalation: true`; both are accepted risks (AOR-1, AOR-2).
 ```bash
-# Validate Kubernetes manifests
-kubesec scan deploy/dind-values.yaml
+# Render the runner scale set (no cluster access needed)
+helm template redducklabs-runners \
+  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+  --version 0.14.2 --kube-version 1.36.3 -f deploy/dind-values.yaml \
+  --set githubConfigSecret.github_token=PLACEHOLDER \
+  --set controllerServiceAccount.name=arc-gha-rs-controller \
+  --set controllerServiceAccount.namespace=arc-systems > rendered-runners.yaml
+
+# Extract the runner pod template as a Pod (needs PyYAML) and scan it
+python3 -c '
+import sys, yaml
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "AutoscalingRunnerSet":
+        print(yaml.safe_dump({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "runner"}, "spec": d["spec"]["template"]["spec"]}))
+' < rendered-runners.yaml > runner-pod.yaml
+kubesec scan runner-pod.yaml
 ```
 
 ### Policy Enforcement
 
-**Open Policy Agent (OPA):**
-```rego
-# Example policy
-package kubernetes.admission
+No OPA, Gatekeeper, Kyverno, or Pod Security Standards enforcement is deployed
+for `arc-runners`. A policy that rejects privileged containers (or the
+`baseline`/`restricted` Pod Security Standards) would reject the DinD sidecar,
+which must run privileged. The admission and policy controls this repository
+does enforce are:
 
-deny[msg] {
-  input.request.kind.kind == "Pod"
-  input.request.object.spec.containers[_].securityContext.privileged == true
-  msg := "Privileged containers are not allowed"
-}
-```
+- the ValidatingAdmissionPolicy `runner-fleet-emergency-stop-fence`
+  (`deploy/runner-emergency-stop-fence.yaml`), described under Burst capacity
+  controls;
+- the NetworkPolicy `redducklabs-runner-isolation`
+  (`deploy/runner-network-policy.yaml`), validated by
+  `scripts/verify-runner-network-policy.sh`;
+- workflow-side checks before every Helm write: the rendered contract checks
+  in `scripts/validate-runner-isolation-contract.py` and the Deploy workflow, a
+  server-side dry run, and the pool-state gate
+  (`scripts/verify-runner-pool-state.sh`);
+- the runner-group trust boundary (`scripts/verify-runner-trust-boundary.sh`
+  against `deploy/trusted-runner-repositories.txt`).
 
 ## ✅ Security Checklist
 

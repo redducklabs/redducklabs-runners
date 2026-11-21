@@ -21,13 +21,22 @@ scale, or roll back the runner fleet.
 | `RUNNER_TOKEN` | Personal Access Token for runner registration | [Create here](https://github.com/settings/tokens/new?scopes=admin:org,repo,workflow) with scopes: `admin:org`, `repo`, `workflow` |
 | `DO_TOKEN` | DigitalOcean API token | [DigitalOcean Control Panel](https://cloud.digitalocean.com/account/api/tokens) → Generate New Token |
 
+The workflows also read optional repository variables (`CLUSTER_NAME`,
+`CLUSTER_CONTEXT`, `RELEASE_NAME`, `RUNNER_SCALE_SET_NAME`, `REGISTRY`,
+`REPOSITORY`) and fall back to the Red Duck Labs defaults when they are unset;
+see "Optional Repository Variables" in the [README](../README.md).
+
 ### Step 2: Prepare the Platform
 
 For initial setup, or a deliberate controller/CRD reconciliation, select
 **"Prepare Runner Platform"**, provide the exact reviewed SHA, and confirm the
 mutation. This separate workflow owns the `arc-systems`/`arc-runners`
-namespaces, an explicitly named `do-registry-secret`, all four pinned ARC CRDs,
-and the pinned ARC controller. The scale-set Helm chart owns
+namespaces, an explicitly named `do-registry-secret` (a
+`kubernetes.io/dockerconfigjson` secret in `arc-runners`, built from
+`doctl registry docker-config` with `DO_TOKEN`), all four pinned ARC CRDs
+(server-side applied from the controller chart's `crds/`), and the pinned ARC
+controller (Helm release `arc` in `arc-systems`). Both use ARC chart version
+`0.14.2` (`ARC_CHART_VERSION` in the workflows). The scale-set Helm chart owns
 `redducklabs-runners-gha-rs-no-permission`; platform preparation must not create
 that ServiceAccount.
 
@@ -85,8 +94,9 @@ independent of Helm history); the legacy-isolated rollback target is retired.
 Every Helm write keeps 100 revisions (`--history-max 100`). Emergency Stop
 writes the marker `arc-runners/runner-fleet-emergency-stop` before its Helm
 write; while it exists the fleet workflows refuse to run (except recovery with
-`acknowledge_emergency_stop=true`), and every fleet Helm write re-checks it
-afterwards and re-applies the stop. Deploy `deploy` and `rollback` also
+`acknowledge_emergency_stop=true`, Node Pool Sizing `remove-burst`, Runner
+Status, and Rebalance, which then retires nothing), and every fleet Helm write
+re-checks it afterwards and re-applies the stop. Deploy `deploy` and `rollback` also
 install the server-side fence `deploy/runner-emergency-stop-fence.yaml` (a
 ValidatingAdmissionPolicy and binding: while the marker exists the API server
 denies any AutoscalingRunnerSet write that is not 0/0) before their Helm
@@ -109,7 +119,10 @@ Use the GitHub Actions workflows to manage your runners:
 - **Burst node pools**: Actions → "Node Pool Sizing" → Run workflow (`operation` = `create-burst`, `configure-expander`, `enable-burst`, `set-burst-maxima` or `remove-burst`; the baseline pool stays `min=max=count=2`)
 - **Idle burst runners**: Actions → "Rebalance Runners" (hourly; dispatch with `expected_sha`)
 - **Acceptance**: Actions → "Runner Acceptance Evidence" (phases A-E; see the runbook)
-- **Check Status**: Actions → "Runner Status" → Run workflow
+- **Check Status**: Actions → "Runner Status" → Run workflow (also daily at 09:00 UTC)
+- **Runner image**: "Build and Push Runner Image" runs on pushes to `main` that touch the image; "Runner Version Guard" (daily) opens the runner bump PR
+- **Usage report**: Actions → "CI Usage Report" (weekly; dispatch with `days` 1-31)
+- **metrics-server**: Actions → "Deploy Cluster Addons" (backs `kubectl top`)
 - **Emergency Stop**: Actions → "Emergency Stop Runners" → Run workflow. It
   runs immediately (its own `runner-emergency-stop` concurrency group, not the
   shared fleet lock) and leaves a `stopped` state; recovery is in
@@ -170,8 +183,11 @@ template:
 - **Kubernetes API token**: runner Pods set
   `automountServiceAccountToken: false`; admission must not inject an API token
   volume or mount.
-- **Image**: Custom runner image with pre-installed tools.
-- **Pull Secrets**: For accessing private registries.
+- **Image**: Custom runner image with pre-installed tools, pulled as `:latest`
+  with `imagePullPolicy: Always`, so each new runner pod picks up the newest
+  image that **Build and Push Runner Image** pushed from `main`.
+- **Pull Secrets**: `imagePullSecrets: do-registry-secret`, created by Prepare
+  Runner Platform.
 
 ### Why the Docker sidecar is declared manually
 
@@ -190,11 +206,21 @@ and a pinned image.
 pieces the chart used to manage:
 
 ```bash
+# 0.14.2 is ARC_CHART_VERSION in the workflows and CHART_VERSION in
+# test/verify-runner-resources.sh; use the version you are upgrading to.
+# The placeholder token and controller service account keep the chart from
+# attempting live controller discovery.
 helm template redducklabs-runners \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-  --version <version> --kube-version <cluster-version> \
-  -f deploy/dind-values.yaml
+  --version 0.14.2 --kube-version 1.36.3 \
+  -f deploy/dind-values.yaml \
+  --set githubConfigSecret.github_token=PLACEHOLDER \
+  --set controllerServiceAccount.name=arc-gha-rs-controller \
+  --set controllerServiceAccount.namespace=arc-systems
 ```
+
+`bash test/verify-runner-resources.sh` runs the same render and asserts the
+pod spec; Validate Config also checks that the chart version pins agree.
 
 ### Reviewed target: capacity, cost and diagnostics
 
@@ -225,17 +251,24 @@ See `docs/runbooks/node-pool-sizing.md`.
 ### 1. Verify Tools Installation
 
 ```bash
-./test/verify-tools.sh
+bash test/verify-tools.sh
 ```
 
-This tests all pre-installed tools in the runners.
+This tests all pre-installed tools in the first runner pod of `arc-runners` in
+the current kube context (through `kubectl exec`), and starts a throwaway
+container in that pod's dind daemon to check the shared tool cache. Run it
+only when a live check is explicitly wanted. Most scripts in this repository
+are committed without the executable bit, so run them with `bash` or
+`chmod +x` them first. The offline suites that need no cluster are listed in
+the README's "Testing" section.
 
 ### 2. Test in an allow-listed private repository
 
-This self-hosted example is for an allow-listed private repository only, after
-the reviewed target has CI deployment and external live-acceptance evidence. Do
-not copy it into a public repository or a repository outside the selected runner
-group.
+This self-hosted example is for an allow-listed private repository only (one
+listed in `deploy/trusted-runner-repositories.txt`). Do not copy it into a
+public repository or a repository outside the selected runner group. The
+reviewed target has CI deployment and live-acceptance evidence from
+2026-11-01 (the "Rollout record" in `docs/runbooks/node-pool-sizing.md`).
 
 ```yaml
 # .github/workflows/test-runners.yml
@@ -248,7 +281,7 @@ jobs:
   test:
     runs-on: redducklabs-runners
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Test Python
         run: |
@@ -288,12 +321,13 @@ enumeration response omits them.
 
 ## 🛠️ Status monitoring
 
-Use Runner Status for CI diagnostics. The local helper supports status only:
+Use Runner Status for CI diagnostics. The local helper supports status only.
+It needs `kubectl`, `jq` and an authenticated `gh`, and it switches the current
+kube context to `CLUSTER_CONTEXT` (default `do-sfo3-redducklabs-cluster`):
 
 ```bash
 # Check status regularly
-./scripts/scale-runners.sh status
-
+bash scripts/scale-runners.sh status
 ```
 
 ## 🔒 Security Setup
@@ -332,14 +366,20 @@ dynamic self-hosted runner selector.
    verifies the restored `density` (2/4) template and the private runner-group
    boundary.
 
-5. **After an Emergency Stop**
+5. **Jobs stay queued while idle runners are online**
+   Check the runner version first: GitHub stops sending jobs to runners more
+   than 30 days behind the latest release, silently. Merge the Runner Version
+   Guard bump PR; recovery is in `docs/runbooks/node-pool-sizing.md`,
+   "Jobs are assigned but no runner receives them".
+
+6. **After an Emergency Stop**
    The release is in a `stopped` state (`burst-stopped`, `density-stopped` or
    `drain-stopped`); the Emergency Stop summary names it and the recovery that
    admits it. See `docs/runbooks/node-pool-sizing.md`, "Emergency Stop".
 
 ### Getting Help
 
-1. Check the [troubleshooting section](README.md#troubleshooting) in the main README
+1. Check the [troubleshooting section](../README.md#troubleshooting) in the main README
 2. Review pod logs and events
 3. Use the test scripts to identify issues
 4. Check GitHub Actions Runner Controller documentation

@@ -4,6 +4,15 @@
 **Date:** August 21, 2025  
 **Update Type:** Critical Security Updates & Base Image Upgrade
 
+> **Historical record.** This plan describes the August 2025 security update.
+> Tool versions and the Trivy source build below are from that change and are
+> no longer current: Trivy is now installed as a verified release binary, and
+> the enforcing check is the CVE-floor gate (`test/verify-cve-floor.sh`); see
+> `docs/SECURITY.md` and `docs/specs/2026-05-31-runner-toolchain-refresh-design.md`.
+> Current pins are the `ARG` values in `docker/Dockerfile.custom-runner`. The
+> commands below were updated (2026-11-21) so they run against the current
+> repository.
+
 ## 🔍 Summary of Changes
 
 ### 1. Base Image Updates
@@ -36,14 +45,15 @@
 #### 1.1 Dockerfile Integrity Check ✅
 ```bash
 # Syntax validation
-docker buildx build -f docker/Dockerfile.custom-runner --check .
+docker buildx build -f docker/Dockerfile.custom-runner --check docker
 ```
 **Status:** PASSED - No warnings found
 
 #### 1.2 Tool Version Alignment ✅
 ```bash
 # Verify test scripts match Dockerfile versions
-grep -n "3.18" docker/Dockerfile.custom-runner test/verify-tools.sh
+grep -n "HELM_VERSION=" docker/Dockerfile.custom-runner
+grep -n "Helm" test/verify-tools.sh
 ```
 **Status:** PASSED - Helm version aligned to 3.18.6
 
@@ -57,7 +67,10 @@ grep -n "3.18" docker/Dockerfile.custom-runner test/verify-tools.sh
 #### 2.1 Image Build Test
 ```bash
 # Build test image
-docker build -f docker/Dockerfile.custom-runner -t redducklabs/runner:security-test .
+docker build -f docker/Dockerfile.custom-runner -t redducklabs/runner:security-test docker
+
+# Enforcing CVE-floor gate (the same check the Build Runner Image workflow runs)
+bash test/verify-cve-floor.sh redducklabs/runner:security-test
 ```
 **Expected:** Successful build with all security updates
 
@@ -73,9 +86,18 @@ docker run --rm redducklabs/runner:security-test helm version
 ### Phase 3: Deployment Validation
 
 #### 3.1 Runner Deployment Test
+Merging the image change to `main` runs **Build Runner Image**, which pushes
+`registry.digitalocean.com/redducklabs/github-runner:latest`. Runner pods use
+`imagePullPolicy: Always`, so new ephemeral runners pull the new image. Runner
+configuration changes deploy through the **Deploy GitHub Runners** workflow
+(`operation=deploy`, `expected_sha` set to the reviewed commit); the local
+`deploy/deploy.sh` is a legacy helper, not the production path.
 ```bash
-# Deploy updated runners
-cd deploy && ./deploy.sh
+# Deploy updated runners (dispatch from the reviewed commit)
+gh workflow run deploy-runners.yml \
+  -f operation=deploy \
+  -f accept_privileged_runner_co_tenancy=true \
+  -f expected_sha=<reviewed-commit-sha>
 ```
 **Expected:** Successful deployment with new image
 
@@ -102,7 +124,7 @@ cd deploy && ./deploy.sh
 
 #### 4.2 Security Scanning
 ```bash
-# Scan deployed runner image
+# Scan deployed runner image (log in first with `doctl registry login`)
 trivy image registry.digitalocean.com/redducklabs/github-runner:latest
 ```
 **Expected:** No HIGH/CRITICAL vulnerabilities for fixed CVEs
@@ -141,14 +163,29 @@ trivy image registry.digitalocean.com/redducklabs/github-runner:latest
 3. **Long-term:** Re-deploy with fixes after validation
 
 ### Rollback Commands:
-```bash
-# Emergency rollback
-kubectl set image deployment/runner-scale-set \
-  runner=registry.digitalocean.com/redducklabs/github-runner:previous-stable \
-  -n arc-runners
 
-# Verify rollback
-kubectl rollout status deployment/runner-scale-set -n arc-runners
+Runners are an ARC `AutoscalingRunnerSet`, not a Deployment, and the Deploy
+workflow accepts only the canonical image
+`registry.digitalocean.com/redducklabs/github-runner:latest`. To roll back the
+image, revert the image change on `main`; **Build Runner Image** republishes
+`:latest` and new runner pods pull it. To roll back the runner configuration,
+run Deploy `operation=rollback`, which upgrades the release to the committed
+`deploy/density-values.yaml` contract. To stop all runners immediately, run
+**Emergency Stop Runners**.
+```bash
+# Image rollback: revert the image commit through a reviewed PR to main
+git revert <image-change-commit>
+
+# Configuration rollback (from the reviewed commit)
+gh workflow run deploy-runners.yml \
+  -f operation=rollback \
+  -f expected_sha=<reviewed-commit-sha>
+
+# Emergency stop
+gh workflow run emergency-stop.yml -f confirm=STOP-RUNNERS
+
+# Verify (read-only)
+kubectl get autoscalingrunnersets,pods -n arc-runners
 ```
 
 ## 📊 Success Metrics

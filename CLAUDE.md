@@ -27,42 +27,62 @@ GitHub Actions workflows, operational scripts, and security documentation.
 ## Repository Map
 
 - `.github/workflows/` - GitHub Actions workflows for building images,
-  deploying runners, scaling, status checks, and emergency stop.
+  preparing the platform, deploying runners, node pool sizing, rebalancing,
+  acceptance evidence, status checks, usage reports, the runner version guard,
+  emergency stop, and PR validation (`validate-config.yml`).
 - `.github/actions/setup-tools/` - shared workflow action for installing tools.
-- `docker/` - custom runner Dockerfile and image build scripts.
-- `deploy/` - ARC runner scale set configuration and deployment scripts.
-- `scripts/` - local operational helpers for scaling, admin actions, emergency
-  stop, and vulnerability alert dismissal.
-- `test/` - shell-based verification scripts for deployment, tools, Docker, Go,
-  and security fixes.
-- `docs/` - setup, security, contribution, and implementation documentation.
+- `docker/` - custom runner Dockerfile, the committed AWS CLI public signing
+  key, and image build scripts.
+- `deploy/` - ARC runner scale set values (`dind-values.yaml`, the `density`
+  rollback target `density-values.yaml`), the Emergency Stop fence, the runner
+  NetworkPolicy, the trusted repository list, metrics-server values, and
+  deployment scripts.
+- `scripts/` - operational helpers used by the workflows (pool-state admission,
+  burst pools, drain, rebalance, acceptance, cost and CI usage reports, runner
+  version check) and local helpers for status, admin actions, emergency stop,
+  and vulnerability alert dismissal; shared code lives in `scripts/lib/`.
+- `test/` - verification scripts: offline contract suites with fixtures under
+  `test/fixtures/` (run by Validate Config), image checks (run by the image
+  build), and live checks against a running fleet.
+- `docs/` - setup, security, contribution, runbook, and implementation
+  documentation.
 - `claude_help/` - project operating process docs for Claude/Codex workflows.
 
 ## Development Commands
 
 Run commands from the repository root unless the script documentation says
-otherwise.
+otherwise. Most scripts are committed without the executable bit
+(`git ls-files -s`), so run them with `bash <path>` as below.
 
 ```bash
-# Verify runner image tools in a running pod or test environment
-./test/verify-tools.sh
+# Offline suites (no cluster, DigitalOcean or GitHub access); Validate Config
+# runs these on PRs. Runner memory reservations and the two-pods-per-node
+# invariant: renders deploy/dind-values.yaml with Helm (needs helm, jq, python
+# and network access to the chart registry).
+bash test/verify-runner-resources.sh
+bash test/verify-runner-version-guard.sh
+bash test/verify-burst-autoscaling.sh
+bash test/verify-acceptance.sh
 
-# Deployment verification
-./test/test-deployment.sh
+# Image checks (run by Build and Push Runner Image)
+bash test/verify-aws-key-expiry.sh docker/aws-cli-public.key
+bash test/verify-cve-floor.sh <image-ref>
 
-# Runner memory reservations and the one-pod-per-node invariant.
-# Renders deploy/dind-values.yaml with Helm; needs no cluster access.
-./test/verify-runner-resources.sh
+# Live checks against the runner pods in the current kube context;
+# verify-tools.sh also starts a throwaway container in a pod's dind daemon
+bash test/verify-tools.sh
+bash test/test-deployment.sh
+bash test/verify-security-fixes.sh
 
-# Security and runtime verification
-./test/verify-docker-version.sh
-./test/verify-go-runtime.sh
-./test/verify-security-fixes.sh
+# Docker CLI check (on the machine it runs on) and Go runtime check (runs a
+# local image tagged redducklabs/custom-runner:latest)
+bash test/verify-docker-version.sh
+bash test/verify-go-runtime.sh
 
 # Local runner operations, only when explicitly requested
-./scripts/scale-runners.sh status
-./scripts/runner-admin.sh
-./scripts/emergency-stop.sh
+bash scripts/scale-runners.sh status
+bash scripts/runner-admin.sh
+bash scripts/emergency-stop.sh
 ```
 
 For Docker image work:
@@ -170,18 +190,22 @@ When running Codex non-interactively (`codex exec`), redirect stdin from
 "Reading additional input from stdin..." and wait indefinitely:
 
 ```bash
+mkdir -p temp/codex-reviews
 codex exec -s workspace-write -C . "<review prompt>" < /dev/null > temp/codex-reviews/<name>.log 2>&1
 ```
 
 ## Running the test suites locally on Windows
 
-This checkout uses `core.autocrlf=true`, so fixture files get CRLF line
-endings and `test/verify-runner-resources.sh` reports ~30 false failures under
-Git Bash or when run against `/mnt/d/...` from WSL. Run the suites in WSL
-against a fresh LF clone instead (CI on Linux is the reference):
+`test/verify-runner-resources.sh` reports ~30 false failures under Git Bash or
+when run from WSL against the Windows checkout (`/mnt/<drive>/...`), and
+`test/verify-burst-autoscaling.sh` and `test/verify-acceptance.sh` refuse to run
+under Git Bash/MSYS/Cygwin because their CLI fakes do not shadow the real
+`doctl`/`kubectl`/`helm`/`gh` there. Run the suites in WSL against a fresh LF
+clone instead (CI on Linux is the reference). Replace the clone source with
+your checkout's WSL path:
 
 ```bash
-wsl -d Ubuntu -- bash -c 'rm -rf /tmp/rrtest && git -c core.autocrlf=false clone -q /mnt/d/repos/redducklabs-runners /tmp/rrtest && cd /tmp/rrtest && git checkout -q <branch> && bash test/verify-runner-resources.sh && bash test/verify-burst-autoscaling.sh'
+wsl -d Ubuntu -- bash -c 'rm -rf /tmp/rrtest && git -c core.autocrlf=false clone -q /mnt/<drive>/<path>/redducklabs-runners /tmp/rrtest && cd /tmp/rrtest && git checkout -q <branch> && bash test/verify-runner-resources.sh && bash test/verify-burst-autoscaling.sh && bash test/verify-acceptance.sh'
 ```
 
 Clone from the main checkout path, not from a worktree directory (a worktree's
